@@ -3,7 +3,7 @@ use crate::error::EntryError;
 use crate::export::ExportSummary;
 use crate::load::{LoadError, LoadOutcome};
 use crate::model::{FeedSummary, Ioc, IocType, RawEntry};
-use crate::retro::{RetroReply, RetroRequest};
+use crate::retro::{RetroError, RetroReply, RetroRequest};
 use serde_json::Value;
 use siem_ingest::error::InsertClass;
 use std::collections::BTreeMap;
@@ -11,6 +11,7 @@ use std::io::{self, BufRead};
 use std::path::Path;
 use std::time::Duration;
 use time::OffsetDateTime;
+use ureq::http::StatusCode;
 
 
 pub type IocKey = (IocType, String);
@@ -44,3 +45,6 @@ pub type RetroSendFn<'a> = dyn Fn(&RetroRequest) -> Result<RetroReply, InsertCla
 
 
 pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;
+
+
+pub type RefusalFn = fn(StatusCode, Option<u32>) -> Option<RetroError>;

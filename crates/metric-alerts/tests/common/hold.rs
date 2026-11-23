@@ -1,4 +1,4 @@
-use crate::stub::read_request;
+use crate::stub::{read_request, serve_check};
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::Receiver;
@@ -17,6 +17,7 @@ const BLOCK: usize = 65_536;
 /// Accepts one connection, reads the request and holds it open until `release` fires.
 pub fn stall(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Result<()>> {
     spawn(move || {
+        serve_check(&listener)?;
         let (mut stream, _) = listener.accept()?;
         read_request(&mut stream)?;
         release.recv().map_err(io::Error::other)
@@ -27,6 +28,7 @@ pub fn stall(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Res
 /// Sends the headers of a long reply and one row, then holds the connection until `release` fires.
 pub fn half_reply(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Result<()>> {
     spawn(move || {
+        serve_check(&listener)?;
         let (mut stream, _) = listener.accept()?;
         read_request(&mut stream)?;
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n1\t1\n")?;
@@ -38,6 +40,7 @@ pub fn half_reply(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io
 /// Streams a body without end (`Connection: close`) until the client hangs up; returns the chunks written.
 pub fn endless(listener: TcpListener) -> JoinHandle<io::Result<usize>> {
     spawn(move || {
+        serve_check(&listener)?;
         let (mut stream, _) = listener.accept()?;
         read_request(&mut stream)?;
         stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")?;

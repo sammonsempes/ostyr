@@ -1,9 +1,10 @@
 use crate::canon::canonicalise;
 use crate::config::FeedConfig;
-use crate::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_IDENTIFIER_BYTES, MAX_ROWS_PER_BATCH};
+use crate::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_IDENTIFIER_BYTES, MAX_READ_ROWS, MAX_ROWS_PER_BATCH};
 use crate::model::Ioc;
 use crate::types::TtlDefaults;
 use serde_json::json;
+use siem_ingest::reader_profile::pin_clause;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tracing::warn;
@@ -126,12 +127,13 @@ pub fn checked_column_ddl(database: &str, table: &str) -> Result<String, StoreEr
 }
 
 
-/// One tenant's live network and domain IOCs, one more than the cap so the reader can tell a truncated list from a full one.
+/// One tenant's live network and domain IOCs, one more than the cap so the reader can tell a truncated list from a full one; the pins are in its `SETTINGS` clause.
 pub fn read_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    let pins = pin_clause(&[], MAX_READ_ROWS as u64 + 1);
     Ok(format!(
         "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
          FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
-         AND `checked` = 1 AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
+         AND `checked` = 1 AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
         qualified(database, table)?
     ))
 }
