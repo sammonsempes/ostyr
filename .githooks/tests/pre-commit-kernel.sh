@@ -13,6 +13,10 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
+if [[ " $* " == *" clippy "* && " $* " == *" --target-dir "* ]]; then
+  clippy_dir=${*#*--target-dir }
+  echo "clippy-dir-entries $(find "${clippy_dir%% *}" -mindepth 1 2>/dev/null | wc -l)" >>"$STUB_LOG"
+fi
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
 chmod +x "$SCRATCH/bin/cargo"
@@ -85,7 +89,7 @@ expect_kernel() {
     echo "FAIL: $label: the checker did not get the object the build writes under CARGO_TARGET_DIR"
     FAILS=$((FAILS + 1))
   fi
-  if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml -- -D warnings$' "$STUB_LOG"; then
+  if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml --target-dir '"$R"'/target/ebpf-clippy -- -D warnings$' "$STUB_LOG"; then
     echo "FAIL: $label: no kernel clippy"
     FAILS=$((FAILS + 1))
   fi
@@ -131,6 +135,28 @@ stage lab/tests/ebpf-no-panic-test.sh
 declare_kernel
 run_hook
 expect_kernel "panic check test staged"
+
+stage lab/ebpf-build.sh
+declare_kernel
+echo "true" >>lab/ebpf-build.sh
+git add -A
+run_hook
+expect_kernel "build script staged"
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+mkdir -p target/ebpf-clippy/debug
+echo stale >target/ebpf-clippy/debug/proc-macro-leftover
+run_hook
+if ! grep -qxF "clippy-dir-entries 0" "$STUB_LOG"; then
+  echo "FAIL: the kernel clippy must start in an emptied target directory (a proc-macro built earlier from an edited source would run again on the host)"
+  cat "$STUB_LOG"
+  FAILS=$((FAILS + 1))
+fi
+if [ -e target/ebpf-clippy ]; then
+  echo "FAIL: the clippy target directory must be removed after the clippy"
+  FAILS=$((FAILS + 1))
+fi
 
 stage plain.rs
 declare_kernel

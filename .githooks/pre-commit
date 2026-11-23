@@ -7,6 +7,19 @@ if [ -e "$ROOT/.cargo" ] || [ -L "$ROOT/.cargo" ]; then
   echo "pre-commit: $ROOT/.cargo exists: a cargo config in the repository can run a runner or swap a source (refused before any cargo command)" >&2
   exit 1
 fi
+main_checkout=$(dirname "$(realpath "$(git rev-parse --git-common-dir)")")
+cargo_dir=$(dirname "$ROOT")
+for _ in $(seq 64); do
+  case "$cargo_dir/" in
+    "$main_checkout"/*)
+      if [ -e "$cargo_dir/.cargo" ] || [ -L "$cargo_dir/.cargo" ]; then
+        echo "pre-commit: $cargo_dir/.cargo exists above the checkout: cargo reads it (refused before any cargo command)" >&2
+        exit 1
+      fi
+      cargo_dir=$(dirname "$cargo_dir")
+      ;;
+  esac
+done
 export CARGO_INCREMENTAL=0
 if command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
@@ -234,6 +247,7 @@ package_args() {
 
 EBPF_NIGHTLY="${EBPF_NIGHTLY:-nightly-2026-11-08}"
 EBPF_MANIFEST=crates/ebpf-probes/ebpf/Cargo.toml
+EBPF_CLIPPY_DIR="$TARGET/ebpf-clippy"
 EBPF_KERNEL_OBJECT="$TARGET/bpfel-unknown-none/release/ebpf-probes-kernel"
 EBPF_NO_PANIC="${EBPF_NO_PANIC:-lab/ebpf-no-panic.sh}"
 
@@ -245,7 +259,7 @@ kernel_touched() {
   for path in "${staged[@]+"${staged[@]}"}"; do
     if forced_full_path "$path"; then return 0; fi
     case "$path" in
-      crates/ebpf-probes/ebpf/* | lab/ebpf-no-panic.sh | lab/tests/ebpf-no-panic-test.sh) return 0 ;;
+      crates/ebpf-probes/ebpf/* | lab/ebpf-no-panic.sh | lab/tests/ebpf-no-panic-test.sh | lab/ebpf-build.sh) return 0 ;;
     esac
   done
   return 1
@@ -266,8 +280,10 @@ kernel_checks() {
   kernel_manifest_present &&
     low env EBPF_CHECK_ONLY=1 EBPF_OFFLINE=1 EBPF_NIGHTLY="$EBPF_NIGHTLY" lab/ebpf-build.sh "$EBPF_MANIFEST" &&
     low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
+    rm -rf "$EBPF_CLIPPY_DIR" &&
     low cargo "+$EBPF_NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-      --manifest-path "$EBPF_MANIFEST" -- -D warnings &&
+      --manifest-path "$EBPF_MANIFEST" --target-dir "$EBPF_CLIPPY_DIR" -- -D warnings &&
+    rm -rf "$EBPF_CLIPPY_DIR" &&
     kernel_build &&
     kernel_object_check
 }
