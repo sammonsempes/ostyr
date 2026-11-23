@@ -15,6 +15,36 @@ const MAX_READS: usize = 10_000;
 const ZERO: u8 = 0;
 
 
+pub const CLEAN_NAMES: [&str; 19] = [
+    "readonly",
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
+
+
+/// Answers the settings check of a run with a profile that changed nothing outside the pins.
+pub fn serve_check(listener: &TcpListener) -> io::Result<String> {
+    let (stream, _) = listener.accept()?;
+    serve(stream, "200 OK", "", format!("{}\n", CLEAN_NAMES.join("\n")).as_bytes())
+}
+
+
 pub fn read_request(stream: &mut TcpStream) -> io::Result<String> {
     let mut received = Vec::new();
     let mut chunk = [ZERO; CHUNK];
@@ -44,6 +74,7 @@ pub fn read_request(stream: &mut TcpStream) -> io::Result<String> {
 /// Answers one connection with a status, extra header lines and a body; returns the request it saw; blocks until the client connects.
 pub fn reply(listener: TcpListener, status: &'static str, extra: &'static str, body: Vec<u8>) -> JoinHandle<io::Result<String>> {
     spawn(move || {
+        serve_check(&listener)?;
         let (stream, _) = listener.accept()?;
         serve(stream, status, extra, &body)
     })

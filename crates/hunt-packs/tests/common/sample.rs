@@ -56,6 +56,7 @@ pub fn settings(port: u16) -> FetchSettings {
         password_file: "unused".into(),
         ca_file: None,
         timeout_ms: TIMEOUT_MS,
+        database: None,
     }
 }
 

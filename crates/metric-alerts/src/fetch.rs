@@ -1,5 +1,5 @@
 use crate::query::MetricQuery;
-use crate::types::Point;
+use crate::types::{ElapsedFn, Point};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_pg::error::PgError;
@@ -7,14 +7,18 @@ use core_pg::password::{read_limited, read_password};
 use serde::Deserialize;
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, new_agent, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::{InsertClass, InsertError, SettingsError as UrlError};
+use siem_ingest::reader_profile::{
+    changed_statement, is_database_name, pin_clause, profile_refused, read_changed_bytes, url_settings, violations, MAX_DATABASE_BYTES,
+};
 use siem_ingest::settings::{check_url, is_loopback_http};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::warn;
-use ureq::Agent;
+use ureq::http::Response;
+use ureq::{Agent, Body};
 use zeroize::Zeroizing;
 
 
@@ -37,26 +41,6 @@ pub const MAX_FETCH_POINTS: usize = 100_000;
 
 
 pub const FORMAT_SUFFIX: &str = " FORMAT TabSeparated";
-
-
-/// Settings pinned on every read so a user or profile cannot change what a reply means (T773): the exception goes to the stream end, times stay `simple`, no limit, offset, overflow `break` or result filter.
-pub const PINNED_SETTINGS: &[(&str, &str)] = &[
-    ("http_write_exception_in_output_format", "0"),
-    ("date_time_output_format", "simple"),
-    ("limit", "0"),
-    ("offset", "0"),
-    ("additional_result_filter", ""),
-    ("result_overflow_mode", "throw"),
-    ("read_overflow_mode", "throw"),
-    ("read_overflow_mode_leaf", "throw"),
-    ("group_by_overflow_mode", "throw"),
-    ("sort_overflow_mode", "throw"),
-    ("join_overflow_mode", "throw"),
-    ("set_overflow_mode", "throw"),
-    ("distinct_overflow_mode", "throw"),
-    ("transfer_overflow_mode", "throw"),
-    ("timeout_overflow_mode", "throw"),
-];
 
 
 pub const PARAM_PREFIX: &str = "param_";
@@ -91,6 +75,8 @@ pub struct FetchSettings {
     pub ca_file: Option<PathBuf>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub database: Option<String>,
 }
 
 
@@ -110,6 +96,8 @@ pub enum FetchError {
     User,
     #[error("timeout_ms must be within 1..={MAX_TIMEOUT_MS}")]
     Timeout,
+    #[error("database must be a plain identifier of at most {MAX_DATABASE_BYTES} bytes")]
+    Database,
     #[error("the ClickHouse password file could not be used")]
     Password(#[source] PgError),
     #[error("the ClickHouse password is not valid UTF-8")]
@@ -118,6 +106,8 @@ pub enum FetchError {
     CaFile(#[source] PgError),
     #[error(transparent)]
     Agent(#[from] InsertError),
+    #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
+    ReaderProfileChanged(usize),
     #[error("fetch refused: {}", class_text(*.0))]
     Failed(InsertClass),
     #[error("the reply body could not be read")]
@@ -162,7 +152,7 @@ pub fn escape_param(value: &str) -> String {
 }
 
 
-/// URL by siem-ingest's rule (https, or http on loopback), user and timeout bounded.
+/// URL by siem-ingest's rule (https, or http on loopback), user and timeout bounded, database a plain identifier.
 pub fn validate_fetch_settings(settings: &FetchSettings) -> Result<(), FetchError> {
     check_url(&settings.url)?;
     let user_ok =
@@ -171,6 +161,8 @@ pub fn validate_fetch_settings(settings: &FetchSettings) -> Result<(), FetchErro
         Err(FetchError::User)
     } else if settings.timeout_ms == 0 || settings.timeout_ms > MAX_TIMEOUT_MS {
         Err(FetchError::Timeout)
+    } else if settings.database.as_deref().is_some_and(|name| !is_database_name(name)) {
+        Err(FetchError::Database)
     } else {
         Ok(())
     }
@@ -282,7 +274,84 @@ pub fn read_points<Source: Read>(reader: Source) -> Result<Vec<Point>, FetchErro
 }
 
 
-/// One request under `remaining`; a spent deadline sends nothing. The server's own message is never read.
+/// The time left of `remaining` after `elapsed`; a spent budget sends nothing.
+pub fn left_of(remaining: Duration, elapsed: &ElapsedFn) -> Result<Duration, FetchError> {
+    let left = remaining.saturating_sub(elapsed());
+    if left.is_zero() {
+        Err(FetchError::Failed(InsertClass::Timeout))
+    } else {
+        Ok(left)
+    }
+}
+
+
+/// One POST: the two URL settings, the query's own params (escaped), the statement as body; only a transport failure is an error here.
+pub fn send_statement(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    statement: &str,
+    params: &[(String, String)],
+    remaining: Duration,
+) -> Result<Response<Body>, FetchError> {
+    let with_url = url_settings(settings.database.as_deref())
+        .iter()
+        .fold(agent.post(&settings.url), |builder, (name, value)| builder.query(*name, value));
+    let builder = params.iter().fold(with_url, |builder, (name, value)| {
+        builder.query(format!("{PARAM_PREFIX}{name}"), escape_param(value))
+    });
+    builder
+        .header(USER_HEADER, &settings.user)
+        .header(KEY_HEADER, password)
+        .config()
+        .timeout_global(Some(remaining))
+        .http_status_as_error(false)
+        .build()
+        .send(statement)
+        .map_err(|error| FetchError::Failed(classify_transport(&error)))
+}
+
+
+/// The settings check: a changed setting outside the pins, a pinned name missing or a refusal the profile caused is `ReaderProfileChanged`, before the query is sent.
+pub fn check_profile(agent: &Agent, settings: &FetchSettings, password: &str, remaining: Duration) -> Result<(), FetchError> {
+    let response = send_statement(agent, settings, password, &changed_statement(), &[], remaining)?;
+    let code = exception_code(response.headers());
+    match classify_reply(response.status(), code) {
+        Some(_) if profile_refused(code) => Err(FetchError::ReaderProfileChanged(1)),
+        Some(class) => Err(FetchError::Failed(class)),
+        None => {
+            let bytes = read_changed_bytes(response.into_body().into_reader()).map_err(FetchError::Body)?;
+            let found = violations(&bytes, &[], settings.database.as_deref());
+            if found > 0 {
+                Err(FetchError::ReaderProfileChanged(found))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+
+/// The settings check, then the query with its pins in its own `SETTINGS` clause, both under `remaining` measured by `elapsed`. The server's own message is never read.
+pub fn request_points_timed(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    query: &MetricQuery,
+    remaining: Duration,
+    elapsed: &ElapsedFn,
+) -> Result<Vec<Point>, FetchError> {
+    check_profile(agent, settings, password, left_of(remaining, elapsed)?)?;
+    let pins = pin_clause(&[], MAX_FETCH_POINTS as u64 + 1);
+    let statement = format!("{}{pins}{FORMAT_SUFFIX}", query.sql.trim_end());
+    let response = send_statement(agent, settings, password, &statement, &query.params, left_of(remaining, elapsed)?)?;
+    match classify_reply(response.status(), exception_code(response.headers())) {
+        Some(class) => Err(FetchError::Failed(class)),
+        None => read_points(response.into_body().into_reader()),
+    }
+}
+
+
 pub fn request_points(
     agent: &Agent,
     settings: &FetchSettings,
@@ -290,30 +359,8 @@ pub fn request_points(
     query: &MetricQuery,
     remaining: Duration,
 ) -> Result<Vec<Point>, FetchError> {
-    if remaining.is_zero() {
-        Err(FetchError::Failed(InsertClass::Timeout))
-    } else {
-        let statement = format!("{}{FORMAT_SUFFIX}", query.sql.trim_end());
-        let pinned = PINNED_SETTINGS
-            .iter()
-            .fold(agent.post(&settings.url), |builder, (name, value)| builder.query(*name, *value));
-        let builder = query.params.iter().fold(pinned, |builder, (name, value)| {
-            builder.query(format!("{PARAM_PREFIX}{name}"), escape_param(value))
-        });
-        let response = builder
-            .header(USER_HEADER, &settings.user)
-            .header(KEY_HEADER, password)
-            .config()
-            .timeout_global(Some(remaining))
-            .http_status_as_error(false)
-            .build()
-            .send(statement)
-            .map_err(|error| FetchError::Failed(classify_transport(&error)))?;
-        match classify_reply(response.status(), exception_code(response.headers())) {
-            Some(class) => Err(FetchError::Failed(class)),
-            None => read_points(response.into_body().into_reader()),
-        }
-    }
+    let started = Instant::now();
+    request_points_timed(agent, settings, password, query, remaining, &|| started.elapsed())
 }
 
 

@@ -1,6 +1,7 @@
 use crate::fetch::FetchError;
 use crate::query::MetricQuery;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 
 pub type Timestamp = u64;
@@ -20,3 +21,6 @@ pub type FetchResult = Result<Vec<Point>, FetchError>;
 
 /// Runs one query for a round; production wraps `fetch_points`, tests answer from a script.
 pub type FetchFn<'a> = &'a dyn Fn(&MetricQuery) -> FetchResult;
+
+
+pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;

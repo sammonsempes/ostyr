@@ -182,13 +182,41 @@ fn run(settings: &RetroSettings) -> Result<intel_feeds::retro::RetroRun, RetroEr
 }
 
 
+const CLEAN_NAMES: [&str; 19] = [
+    "readonly",
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
+
+
+fn clean_reply() -> String {
+    format!("{}\n", CLEAN_NAMES.join("\n"))
+}
+
+
 #[test]
 fn a_run_goes_through_the_real_sender_with_the_statement_in_the_body() -> TestResult {
     let rig = rig()?;
     let server = serve(
         rig.listener.try_clone()?,
         vec![
-            reply_text("200 OK", "", "readonly\n"),
+            reply_text("200 OK", "", &clean_reply()),
             reply_text("200 OK", "", "0\n"),
             reply_text("200 OK", "", "4\n"),
             reply_text("200 OK", "", &format!("{ROW}\n")),
@@ -205,8 +233,8 @@ fn a_run_goes_through_the_real_sender_with_the_statement_in_the_body() -> TestRe
     let third = seen.get(THIRD).ok_or("no third request")?;
     assert!(third.starts_with("POST /?readonly=2&http_write_exception_in_output_format=0&param_tenant=tenant-a&"));
     assert!(third.contains("param_tenant=tenant-a&param_start=1793664000&param_end=1793707200&param_limit=4 HTTP/1.1"));
-    assert!(third.contains(" SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', "));
-    assert!(third.contains("additional_table_filters = {} FORMAT JSONEachRow"));
+    assert!(third.contains(" SETTINGS max_execution_time = 30, max_rows_to_read = 1000000, "));
+    assert!(third.contains("date_time_output_format = 'simple' FORMAT JSONEachRow"));
     assert!(seen
         .first()
         .ok_or("no first request")?

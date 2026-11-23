@@ -8,8 +8,8 @@ use intel_feeds::limits::{MAX_READ_BYTES, MAX_READ_ROWS};
 use intel_feeds::load::LoadError;
 use intel_feeds::model::{Ioc, IocType, Tlp};
 use intel_feeds::read::{
-    clickhouse_time, count_bad, ioc_line, read_iocs, read_iocs_capped, reason_of, total_bad, BadReason, BadRows, ReadCaps, ReadError, ReadSummary,
-    PINNED_SETTINGS,
+    clickhouse_time, collect_iocs_timed, count_bad, ioc_line, read_iocs, read_iocs_capped, reason_of, remaining_of, total_bad, BadReason, BadRows,
+    ReadCaps, ReadError, ReadSummary, DEFAULT_CAPS,
 };
 use siem_ingest::error::InsertClass;
 use socket2::{Domain, Socket, Type};
@@ -18,6 +18,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread::{spawn, JoinHandle};
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::macros::datetime;
 use time::OffsetDateTime;
@@ -90,6 +91,66 @@ const NOT_UTF8: [u8; 2] = [0xff, 0xfe];
 const OVERSHOOT: usize = 2;
 
 
+const CODE_ROWS: u32 = 158;
+
+
+const CODE_READONLY: u32 = 164;
+
+
+const CODE_RESULT: u32 = 396;
+
+
+const CODE_CONSTRAINT: u32 = 452;
+
+
+const PIN_NAMES: [&str; 19] = [
+    "readonly",
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
+
+
+const RUN_PIN_NAMES: [&str; 18] = [
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
+
+
+const SPENT_MS: u64 = 200_000;
+
+
 const EXTRA_ROWS: usize = 10;
 
 
@@ -153,11 +214,26 @@ where
     Body: FnOnce(&mut TcpStream) -> io::Result<()> + Send + 'static,
 {
     spawn(move || {
+        let (mut check, _) = listener.accept()?;
+        read_head(&mut check)?;
+        check.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}\n", PIN_NAMES.join("\n")).as_bytes())?;
+        drop(check);
         let (mut stream, _) = listener.accept()?;
         let head = read_head(&mut stream)?;
         stream.write_all(reply_head.as_bytes())?;
         let sent = body(&mut stream).is_ok();
         Ok((head, sent))
+    })
+}
+
+
+fn answer_check(listener: TcpListener, reply_head: String, body: String) -> JoinHandle<io::Result<String>> {
+    spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let head = read_head(&mut stream)?;
+        stream.write_all(reply_head.as_bytes())?;
+        stream.write_all(body.as_bytes())?;
+        Ok(head)
     })
 }
 
@@ -245,10 +321,108 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
     assert!(line.contains(&format!("param_now={}", NOW.unix_timestamp())), "{line}");
     assert!(line.contains(&format!("param_limit={}", MAX_READ_ROWS + 1)), "{line}");
     assert!(!line.contains(PASSWORD));
-    PINNED_SETTINGS
-        .iter()
-        .for_each(|(name, value)| assert!(line.contains(&format!("{name}={value}")), "{name}: {line}"));
+    assert!(line.contains("readonly=2&http_write_exception_in_output_format=0&query=SELECT"), "{line}");
+    RUN_PIN_NAMES.iter().for_each(|name| assert!(line.contains(name), "{name}: {line}"));
+    assert!(!line.contains("break"), "{line}");
     assert!(head.to_lowercase().contains(&format!("x-clickhouse-key: {}", PASSWORD.to_lowercase())));
+    Ok(())
+}
+
+
+#[test]
+fn a_profile_that_changed_a_setting_or_hides_one_refuses_before_the_read() -> TestResult {
+    let clean = PIN_NAMES.join("\n");
+    let hidden = PIN_NAMES.iter().take(PIN_NAMES.len() - 1).copied().collect::<Vec<_>>().join("\n");
+    let bodies = [format!("{clean}\nmax_block_size\n"), String::new(), "filter\n".to_owned(), hidden];
+    bodies.into_iter().try_for_each(|body| -> TestResult {
+        let rig = rig(LONG_TIMEOUT_MS)?;
+        let server = answer_check(rig.listener.try_clone()?, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(), body);
+        let mut out = Vec::new();
+        let failed = read_iocs(&rig.config, NOW, &mut out);
+        assert!(matches!(failed, Err(ReadError::ReaderProfileChanged(_))), "{failed:?}");
+        assert!(failed.is_err_and(|error| error.to_string().starts_with("reader_profile_changed: ")));
+        assert!(out.is_empty());
+        server.join().map_err(|_| "server thread panicked")??;
+        assert!(untouched(&rig.listener)?);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn an_error_of_the_check_is_a_profile_refusal_only_for_the_profile_codes() -> TestResult {
+    [CODE_ROWS, CODE_READONLY, CODE_RESULT, CODE_CONSTRAINT]
+        .iter()
+        .try_for_each(|code| -> TestResult {
+            let rig = rig(LONG_TIMEOUT_MS)?;
+            let head = format!("HTTP/1.1 500 Internal Server Error\r\nX-ClickHouse-Exception-Code: {code}\r\nConnection: close\r\n\r\n");
+            let server = answer_check(rig.listener.try_clone()?, head, "SECRET-SERVER-TEXT".to_owned());
+            let mut out = Vec::new();
+            let failed = read_iocs(&rig.config, NOW, &mut out).err().ok_or("no error")?;
+            assert!(matches!(failed, ReadError::ReaderProfileChanged(1)), "{code}");
+            assert!(!format!("{failed:?}{failed}").contains("SECRET"));
+            server.join().map_err(|_| "server thread panicked")??;
+            assert!(untouched(&rig.listener)?);
+            Ok(())
+        })?;
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let head = "HTTP/1.1 500 Internal Server Error\r\nX-ClickHouse-Exception-Code: 159\r\nConnection: close\r\n\r\n".to_owned();
+    let server = answer_check(rig.listener.try_clone()?, head, String::new());
+    let mut out = Vec::new();
+    assert!(matches!(
+        read_iocs(&rig.config, NOW, &mut out),
+        Err(ReadError::Refused(InsertClass::Unavailable))
+    ));
+    server.join().map_err(|_| "server thread panicked")??;
+    Ok(())
+}
+
+
+#[test]
+fn a_check_reply_cut_before_its_end_is_a_body_error() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let server = answer_check(
+        rig.listener.try_clone()?,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
+        "4\r\nlimi\r\n".to_owned(),
+    );
+    let mut out = Vec::new();
+    let failed = read_iocs(&rig.config, NOW, &mut out);
+    assert!(matches!(failed, Err(ReadError::Body(_))), "{failed:?}");
+    server.join().map_err(|_| "server thread panicked")??;
+    Ok(())
+}
+
+
+#[test]
+fn one_deadline_covers_the_check_and_the_read() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let spent = || Duration::from_millis(SPENT_MS);
+    assert!(matches!(
+        collect_iocs_timed(&rig.config, NOW, DEFAULT_CAPS, &spent),
+        Err(ReadError::Refused(InsertClass::Timeout))
+    ));
+    assert!(untouched(&rig.listener)?);
+    assert!(matches!(remaining_of(&rig.config, &spent), Err(ReadError::Refused(InsertClass::Timeout))));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut config = rig.config.clone();
+    config.url = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+    let server = answer_check(
+        listener.try_clone()?,
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+        format!("{}\n", PIN_NAMES.join("\n")),
+    );
+    let calls = std::cell::Cell::new(0);
+    let after_check = || {
+        calls.set(calls.get() + 1);
+        Duration::from_millis(if calls.get() > 1 { SPENT_MS } else { 0 })
+    };
+    assert!(matches!(
+        collect_iocs_timed(&config, NOW, DEFAULT_CAPS, &after_check),
+        Err(ReadError::Refused(InsertClass::Timeout))
+    ));
+    server.join().map_err(|_| "server thread panicked")??;
+    assert!(untouched(&listener)?);
     Ok(())
 }
 

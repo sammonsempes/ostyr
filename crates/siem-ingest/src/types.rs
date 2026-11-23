@@ -45,3 +45,7 @@ pub type ConnectionFields<'a> = (
     (&'a str, bool, Option<&'a Path>, Option<&'a Path>, Option<&'a str>, Option<&'a Path>),
     (&'a str, &'a str, u64, u64, u64, usize),
 );
+
+
+/// A reader's own limits as `(setting, value)` pairs, values already written as ClickHouse literals.
+pub type Limits<'a> = &'a [(&'static str, String)];

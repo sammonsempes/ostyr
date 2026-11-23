@@ -53,6 +53,7 @@ fn a_trace_subscriber_never_sees_the_key_the_values_or_the_server_text() -> Test
         password_file: "unused".into(),
         ca_file: None,
         timeout_ms: DEFAULT_TIMEOUT_MS,
+        database: None,
     };
     let query = MetricQuery {
         sql: "SELECT 1 FROM `metric_samples`\n".to_string(),

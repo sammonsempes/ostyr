@@ -8,20 +8,30 @@ mod stub;
 use common::types::TestResult;
 use hunt_packs::model::Source;
 use hunt_packs::run::{
-    count_statement, failure_line, pack_refusal, parse_count, read_count, refusal_text, run_pack, server_settings, shown_tenant, window_text,
-    HuntOutcome, PackRefusal, RunError, MAX_COUNT_BYTES,
+    count_statement, execute_pack_timed, failure_line, left_of, mentions_settings, pack_limits, pack_refusal, parse_count, read_count, refusal_text,
+    run_pack, shown_tenant, window_text, HuntOutcome, PackRefusal, RunError, MAX_COUNT_BYTES,
 };
-use metric_alerts::fetch::{agent_for, PINNED_SETTINGS};
+use metric_alerts::fetch::agent_for;
 use sample::{pack, param, sent_params, settings, NOW, PASSWORD};
 use siem_ingest::error::InsertClass;
 use socket2::{Domain, Socket, Type};
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::Duration;
-use stub::{reply, serve};
+use stub::{reply, serve, serve_check, CLEAN_NAMES};
 
 
 const COUNT: u64 = 42;
+
+
+const COUNT_FOUND: u64 = 3;
+
+
+const LIFT_ROWS: &str = "SELECT 1 WHERE (SELECT count() FROM numbers(200000) SETTINGS max_rows_to_read = 0, max_bytes_to_read = 0) > 0 \
+     AND {tenant:String} != '' AND {window_start:DateTime64(3)} < {window_end:DateTime64(3)}";
+
+
+const CHECK_CODES: usize = 4;
 
 
 const SEVEN: u64 = 7;
@@ -31,9 +41,6 @@ const BODIES: usize = 6;
 
 
 const HOSTILE: usize = 7;
-
-
-const SERVER_SETTINGS: usize = 5;
 
 
 const EXCEPTION_LINE: &[u8] = b"{\"exception\": \"Code: 159. DB::Exception: Timeout exceeded\"}\n";
@@ -164,36 +171,143 @@ fn count_is_read_and_compared_to_the_baseline() -> TestResult {
 
 
 #[test]
-fn sent_url_holds_every_setting_and_the_callers_tenant() -> TestResult {
+fn sent_url_holds_the_two_settings_and_the_callers_tenant_and_the_clause_holds_every_pin() -> TestResult {
     let (outcome, seen) = run_against(OK, "", b"1".to_vec())?;
     assert_eq!(outcome?.matches, 1);
     let params = sent_params(&seen)?;
-    let own = [
-        ("readonly", "1"),
-        ("max_execution_time", "10"),
-        ("max_rows_to_read", MAX_ROWS_LIMIT),
-        ("max_bytes_to_read", "1000000"),
-        ("max_result_rows", "1"),
+    let expected = [
+        ("readonly", "2"),
+        ("http_write_exception_in_output_format", "0"),
         ("param_tenant", "acme"),
         ("param_window_end", "2023-11-14 22:13:20.000"),
         ("param_window_start", "2023-11-13 22:13:20.000"),
     ];
-    let expected: Vec<(&str, &str)> = own.into_iter().chain(PINNED_SETTINGS.iter().copied()).collect();
-    assert!(expected.contains(&("http_write_exception_in_output_format", "0")));
-    assert!(expected.contains(&("date_time_output_format", "simple")));
-    expected
-        .iter()
-        .for_each(|(name, _)| assert_eq!(params.iter().filter(|(found, _)| found == name).count(), 1, "{name}: {params:?}"));
     expected.iter().try_for_each(|(name, value)| {
+        assert_eq!(params.iter().filter(|(found, _)| found == name).count(), 1, "{name}: {params:?}");
         assert_eq!(&param(&seen, name)?, value);
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     assert_eq!(params.len(), expected.len(), "{params:?}");
+    assert!(
+        seen.contains(
+            ") SETTINGS max_execution_time = 10, max_rows_to_read = 1000, max_bytes_to_read = 1000000, max_result_rows = 1, \
+         timeout_overflow_mode = 'throw', timeout_overflow_mode_leaf = 'throw', read_overflow_mode = 'throw', read_overflow_mode_leaf = 'throw', \
+         group_by_overflow_mode = 'throw', result_overflow_mode = 'throw', sort_overflow_mode = 'throw', set_overflow_mode = 'throw', \
+         distinct_overflow_mode = 'throw', join_overflow_mode = 'throw', transfer_overflow_mode = 'throw', limit = 0, offset = 0, \
+         additional_result_filter = '', filter = '', additional_table_filters = {}, date_time_output_format = 'simple' FORMAT TabSeparated"
+        ),
+        "{seen}"
+    );
     assert!(seen.to_lowercase().contains("x-clickhouse-user: ostyr"), "{seen}");
     assert!(
         seen.to_lowercase().contains(&format!("x-clickhouse-key: {}", PASSWORD.to_lowercase())),
         "{seen}"
     );
+    Ok(())
+}
+
+
+fn check_only(listener: TcpListener, status: &'static str, extra: &'static str, body: Vec<u8>) -> std::thread::JoinHandle<io::Result<String>> {
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept()?;
+        serve(stream, status, extra, &body)
+    })
+}
+
+
+fn untouched(listener: &TcpListener) -> Result<bool, Box<dyn std::error::Error>> {
+    listener.set_nonblocking(true)?;
+    Ok(listener.accept().err().map(|error| error.kind()) == Some(io::ErrorKind::WouldBlock))
+}
+
+
+#[test]
+fn a_profile_that_changed_a_setting_or_hides_one_refuses_before_the_pack_runs() -> TestResult {
+    let clean = CLEAN_NAMES.join("\n");
+    let hidden = CLEAN_NAMES.iter().take(CLEAN_NAMES.len() - 1).copied().collect::<Vec<_>>().join("\n");
+    let bodies = [format!("{clean}\nmax_block_size\n"), String::new(), "filter\n".to_owned(), hidden];
+    bodies.into_iter().try_for_each(|body| -> TestResult {
+        let bound = TcpListener::bind("127.0.0.1:0")?;
+        let port = bound.local_addr()?.port();
+        let server = check_only(bound.try_clone()?, OK, "", body.into_bytes());
+        let outcome = run(port, "acme", LONG);
+        let seen = server.join().map_err(|_| "server thread")??;
+        assert!(matches!(outcome, Err(RunError::ReaderProfileChanged(_))), "{outcome:?}");
+        assert!(outcome.is_err_and(|error| error.to_string().starts_with("reader_profile_changed: ")));
+        assert!(seen.contains("`system`.`settings`"), "{seen}");
+        assert!(untouched(&bound)?);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn an_error_of_the_check_is_a_profile_refusal_never_a_pack_refusal() -> TestResult {
+    let codes: [(&str, &'static str); CHECK_CODES] = [
+        ("158", "X-ClickHouse-Exception-Code: 158\r\n"),
+        ("164", "X-ClickHouse-Exception-Code: 164\r\n"),
+        ("396", "X-ClickHouse-Exception-Code: 396\r\n"),
+        ("452", "X-ClickHouse-Exception-Code: 452\r\n"),
+    ];
+    codes.iter().try_for_each(|(code, extra)| -> TestResult {
+        let bound = TcpListener::bind("127.0.0.1:0")?;
+        let port = bound.local_addr()?.port();
+        let server = check_only(bound.try_clone()?, "500 Internal Server Error", extra, SECRET.as_bytes().to_vec());
+        let outcome = run(port, "acme", LONG);
+        server.join().map_err(|_| "server thread")??;
+        assert!(matches!(outcome, Err(RunError::ReaderProfileChanged(1))), "{code}: {outcome:?}");
+        assert!(!format!("{outcome:?}").contains(SECRET));
+        assert!(untouched(&bound)?);
+        Ok(())
+    })?;
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let port = bound.local_addr()?.port();
+    let server = check_only(bound, "500 Internal Server Error", "X-ClickHouse-Exception-Code: 159\r\n", Vec::new());
+    let outcome = run(port, "acme", LONG);
+    server.join().map_err(|_| "server thread")??;
+    assert!(matches!(outcome, Err(RunError::Failed(InsertClass::Unavailable))), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_check_reply_cut_before_its_end_is_a_body_error() -> TestResult {
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let port = bound.local_addr()?.port();
+    let server = std::thread::spawn(move || -> io::Result<()> {
+        let (mut stream, _) = bound.accept()?;
+        stub::read_request(&mut stream)?;
+        io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nlimi")
+    });
+    let outcome = run(port, "acme", LONG);
+    server.join().map_err(|_| "server thread")??;
+    assert!(matches!(outcome, Err(RunError::Body(_))), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn one_deadline_covers_the_check_and_the_count() -> TestResult {
+    assert!(matches!(left_of(&|| Duration::ZERO), Err(RunError::Failed(InsertClass::Timeout))));
+    assert_eq!(left_of(&|| LONG)?, LONG);
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let config = settings(bound.local_addr()?.port());
+    let agent = agent_for(&config)?;
+    let calls = std::cell::Cell::new(0);
+    let after_check = || {
+        calls.set(calls.get() + 1);
+        if calls.get() > 1 {
+            Duration::ZERO
+        } else {
+            LONG
+        }
+    };
+    let listener = bound.try_clone()?;
+    let server = std::thread::spawn(move || serve_check(&listener));
+    let outcome = execute_pack_timed(&agent, &config, PASSWORD, &pack(), "acme", NOW, &after_check);
+    server.join().map_err(|_| "server thread")??;
+    assert!(matches!(outcome, Err(RunError::Failed(InsertClass::Timeout))), "{outcome:?}");
+    assert!(untouched(&bound)?);
     Ok(())
 }
 
@@ -279,6 +393,9 @@ fn refusals_happen_before_any_connection() -> TestResult {
     assert!(matches!(empty_tenant, RunError::Tenant(_)));
     let bytes = refused_without_io(|candidate| candidate.cost.max_bytes_read = None, "acme", LONG)?;
     assert!(matches!(bytes, RunError::NoByteLimit));
+    let settings_pack = refused_without_io(|candidate| candidate.query = LIFT_ROWS.to_string(), "acme", LONG)?;
+    assert!(matches!(settings_pack, RunError::PackSettings));
+    assert_eq!(settings_pack.to_string(), "pack refused: the query names SETTINGS");
     let window = refused_without_io(|candidate| candidate.window_seconds = NOW + 1, "acme", LONG)?;
     assert!(matches!(window, RunError::Window));
     let spent = refused_without_io(|_| {}, "acme", Duration::ZERO)?;
@@ -300,14 +417,24 @@ fn window_arithmetic_is_checked() -> TestResult {
 
 #[test]
 fn statement_and_settings() -> TestResult {
-    assert_eq!(
-        count_statement("SELECT 1 -- x\n;\n"),
-        "SELECT count() FROM (\nSELECT 1 -- x\n) FORMAT TabSeparated"
-    );
     let mut candidate = pack();
-    assert_eq!(server_settings(&candidate)?.len(), SERVER_SETTINGS + PINNED_SETTINGS.len());
+    let limits = pack_limits(&candidate)?;
+    assert_eq!(
+        limits,
+        vec![
+            ("max_execution_time", "10".to_owned()),
+            ("max_rows_to_read", MAX_ROWS_LIMIT.to_owned()),
+            ("max_bytes_to_read", "1000000".to_owned())
+        ]
+    );
+    let statement = count_statement("SELECT 1 -- x\n;\n", &limits);
+    assert!(
+        statement.starts_with("SELECT count() FROM (\nSELECT 1 -- x\n) SETTINGS max_execution_time = 10, "),
+        "{statement}"
+    );
+    assert!(statement.ends_with(" FORMAT TabSeparated"));
     candidate.cost.max_bytes_read = None;
-    assert!(matches!(server_settings(&candidate), Err(RunError::NoByteLimit)));
+    assert!(matches!(pack_limits(&candidate), Err(RunError::NoByteLimit)));
     let texts = [RunError::UnsupportedSource, RunError::Window, RunError::NoByteLimit, RunError::Malformed];
     texts.iter().for_each(|error| assert!(!error.to_string().is_empty()));
     Ok(())
@@ -411,5 +538,96 @@ fn the_failure_line_names_a_valid_tenant_and_hides_a_bad_one() -> TestResult {
     assert!(failure_line(&pack(), "-x\n", &RunError::Malformed).contains("tenant #:"));
     assert_eq!(shown_tenant("acme"), "acme");
     assert_eq!(shown_tenant("a b"), "#");
+    Ok(())
+}
+
+
+#[test]
+fn a_count_request_that_fails_after_a_clean_check_is_an_outage() -> TestResult {
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let port = bound.local_addr()?.port();
+    let server = std::thread::spawn(move || -> io::Result<()> {
+        serve_check(&bound)?;
+        let (stream, _) = bound.accept()?;
+        drop(stream);
+        Ok(())
+    });
+    let outcome = run(port, "acme", LONG);
+    server.join().map_err(|_| "server thread")??;
+    assert!(matches!(outcome, Err(RunError::Failed(InsertClass::Unavailable))), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn the_word_settings_is_found_at_every_word_boundary_in_any_case() -> TestResult {
+    [
+        "SETTINGS",
+        "settings",
+        "SeTtInGs",
+        "a SETTINGS b",
+        "a\nSETTINGS\tb",
+        "x /* settings */ y",
+        "x -- settings",
+        "'settings'",
+        "(SELECT 1 SETTINGS x = 1)",
+        "a,settings,b",
+        "end settings",
+    ]
+    .iter()
+    .for_each(|text| assert!(mentions_settings(text), "{text}"));
+    [
+        "",
+        "mysettings",
+        "settings_x",
+        "_settings",
+        "settings1",
+        "1settings",
+        "settingsettings",
+        "a SETTING b",
+        "setting s",
+        "sett\u{e9}ings",
+    ]
+    .iter()
+    .for_each(|text| assert!(!mentions_settings(text), "{text}"));
+    Ok(())
+}
+
+
+#[test]
+fn a_configured_database_is_sent_in_the_url_of_the_check_and_the_count() -> TestResult {
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let config = metric_alerts::fetch::FetchSettings {
+        database: Some("events".to_owned()),
+        ..settings(bound.local_addr()?.port())
+    };
+    let server = reply(bound, OK, "", b"3\n".to_vec());
+    let agent = agent_for(&config)?;
+    let outcome = run_pack(&agent, &config, PASSWORD, &pack(), "acme", NOW, LONG)?;
+    let count_request = server.join().map_err(|_| "server thread")??;
+    assert_eq!(outcome.matches, COUNT_FOUND);
+    assert!(count_request.contains("database=events"), "{count_request}");
+    Ok(())
+}
+
+
+#[test]
+fn a_profile_database_is_refused_unless_the_reader_names_that_database() -> TestResult {
+    let body = format!("{}\ndatabase\n", CLEAN_NAMES.join("\n"));
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let server = check_only(bound.try_clone()?, OK, "", body.clone().into_bytes());
+    let outcome = run(bound.local_addr()?.port(), "acme", LONG);
+    server.join().map_err(|_| "server thread")??;
+    assert!(matches!(outcome, Err(RunError::ReaderProfileChanged(1))), "{outcome:?}");
+    let named = TcpListener::bind("127.0.0.1:0")?;
+    let config = metric_alerts::fetch::FetchSettings {
+        database: Some("events".to_owned()),
+        ..settings(named.local_addr()?.port())
+    };
+    let named_server = check_only(named.try_clone()?, OK, "", body.into_bytes());
+    let agent = agent_for(&config)?;
+    let accepted = run_pack(&agent, &config, PASSWORD, &pack(), "acme", NOW, LONG);
+    assert!(!matches!(accepted, Err(RunError::ReaderProfileChanged(_))), "{accepted:?}");
+    named_server.join().map_err(|_| "server thread")??;
     Ok(())
 }
