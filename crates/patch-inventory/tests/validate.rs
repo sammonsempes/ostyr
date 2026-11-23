@@ -4,8 +4,11 @@ mod common;
 use common::{device, limits, skipped_count, FailingReader, TestResult};
 use patch_inventory::apt::parse_apt;
 use patch_inventory::dnf::parse_dnf;
+use patch_inventory::limits::MAX_WINGET_ID_BYTES;
 use patch_inventory::model::{Limits, SkipReason};
-use patch_inventory::validate::{is_dpkg_architecture, is_dpkg_name, is_plain_text, is_rpm_architecture, is_rpm_name};
+use patch_inventory::validate::{
+    is_dpkg_architecture, is_dpkg_name, is_plain_text, is_rpm_architecture, is_rpm_name, is_winget_package_id, is_winget_version,
+};
 
 
 const EMPTY: &[u8] = b"";
@@ -94,5 +97,18 @@ fn exactly_max_lines_with_a_final_newline_is_accepted() -> TestResult {
             .len(),
         1
     );
+    Ok(())
+}
+
+
+#[test]
+fn winget_ids_and_versions_follow_the_ascii_token_grammar() -> TestResult {
+    assert!(is_winget_package_id("Microsoft.VCRedist.2015+.x64") && is_winget_package_id("A~b_c-d") && is_winget_package_id("7zip.7zip"));
+    assert!(!is_winget_package_id("") && !is_winget_package_id("-x") && !is_winget_package_id(".x") && !is_winget_package_id("a b"));
+    assert!(!is_winget_package_id("a;b") && !is_winget_package_id("a\u{e9}") && !is_winget_package_id("a\u{2026}"));
+    assert!(is_winget_package_id(&"a".repeat(MAX_WINGET_ID_BYTES)) && !is_winget_package_id(&"a".repeat(MAX_WINGET_ID_BYTES + 1)));
+    assert!(is_winget_version("2.43.0.windows.2") && is_winget_version("~1.0") && is_winget_version("2024-01-02") && is_winget_version("1"));
+    assert!(!is_winget_version("winget") && !is_winget_version("them.") && !is_winget_version("") && !is_winget_version("-1.0"));
+    assert!(!is_winget_version("1.0 2") && !is_winget_version("1.0\u{2026}") && !is_winget_version(&format!("1{}", "0".repeat(MAX_WINGET_ID_BYTES))));
     Ok(())
 }

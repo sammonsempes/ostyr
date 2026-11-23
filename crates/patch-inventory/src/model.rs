@@ -124,17 +124,27 @@ pub struct WindowsInventory {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WingetSource {
+    Winget,
+    Msstore,
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WingetSkip {
     Malformed,
     UnknownInstalledVersion,
-    OtherSource,
     Duplicate,
+    Truncated,
+    LineTooLong,
+    ControlCharacters,
 }
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WingetInventory {
+pub struct CliInventory {
     pub updates: Vec<Update>,
     pub skipped: WingetSkipCounts,
+    pub preamble_lines: usize,
 }
