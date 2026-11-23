@@ -151,3 +151,24 @@ pub const TAXII_ACCEPT: &str = "application/taxii+json;version=2.1";
 
 
 pub const TAXII_DATE_HEADER: &str = "X-TAXII-Date-Added-Last";
+
+
+pub const MAX_RETRO_MATCHES: usize = 499;
+
+
+pub const MAX_RETRO_SECONDS: u32 = 600;
+
+
+pub const MAX_RETRO_ROWS_TO_READ: u64 = 4_000_000_000;
+
+
+pub const MAX_RETRO_ROWS_TO_GROUP: u64 = 10_000_000;
+
+
+pub const MAX_RETRO_BYTES: u64 = 4_194_304;
+
+
+pub const MAX_RETRO_SCALAR_BYTES: u64 = 64;
+
+
+pub const RETRO_HOST_CHARS: usize = 256;
