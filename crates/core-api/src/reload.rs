@@ -166,21 +166,41 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
 }
 
 
+/// The start-only entry that stands for the module file `tenant`; every other entry is a `settings` key.
+pub const TENANT_START_ONLY: &str = "@tenant";
+
+
+/// The value a start-only entry holds in `module`: the file `tenant` for `TENANT_START_ONLY`, else the `settings` value.
+pub fn start_only_value(module: &ModuleConfig, key: &str) -> Option<String> {
+    if key == TENANT_START_ONLY {
+        module.tenant.clone()
+    } else {
+        module.settings.get(key).cloned()
+    }
+}
+
+
+/// The fixed name a refusal gives the entry.
+pub fn start_only_label(key: &str) -> String {
+    if key == TENANT_START_ONLY {
+        "tenant".to_owned()
+    } else {
+        format!("settings.{key}")
+    }
+}
+
+
 /// Refuses (the engine audits it `denied`) a change of any key the module reads at start only; the baseline is what the start file held.
 pub fn check_start_only(baseline: &BTreeMap<&'static str, Option<String>>, settings: &ApiSettings) -> Result<(), BoxError> {
-    let changed: Vec<&str> = baseline
+    let changed: Vec<String> = baseline
         .iter()
-        .filter(|(key, value)| settings.module.settings.get(**key) != value.as_ref())
-        .map(|(key, _)| *key)
+        .filter(|(key, value)| start_only_value(&settings.module, key) != **value)
+        .map(|(key, _)| start_only_label(key))
         .collect();
     if changed.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "settings.{} is read at start only, restart the service to change it",
-            changed.join(", settings.")
-        )
-        .into())
+        Err(format!("{} is read at start only, restart the service to change it", changed.join(", ")).into())
     }
 }
 
@@ -690,7 +710,7 @@ pub fn open_reload(
     };
     let startup = settings.config.clone();
     let rewatch_slot = Arc::clone(&setup.rewatch);
-    let baseline = start_only.iter().map(|key| (*key, settings.module.settings.get(*key).cloned())).collect();
+    let baseline = start_only.iter().map(|key| (*key, start_only_value(&settings.module, key))).collect();
     let hooks = subscribers(state, startup, setup, module_file.to_path_buf(), context.clone(), log, baseline);
     open_engine(
         first_then_file(settings, module_file.to_path_buf()),
