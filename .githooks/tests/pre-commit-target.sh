@@ -75,7 +75,8 @@ if ! grep -qF "is not" "$SCRATCH/out" || [ -s "$STUB_LOG" ]; then
   FAILS=$((FAILS + 1))
 fi
 
-W="$SCRATCH/wt"
+W="$R/wt"
+echo wt >>.git/info/exclude
 git -c user.name=t -c user.email=t@example.com commit -q -m init
 git worktree add -q "$W" -b side
 cd "$W"

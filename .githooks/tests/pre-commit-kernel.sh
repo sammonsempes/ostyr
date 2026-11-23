@@ -14,6 +14,7 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
+[ -z "${STUB_PLANT:-}" ] || mkdir -p .cargo
 if [[ " $* " == *" clippy "* ]]; then
   previous=""
   clippy_dir=""
@@ -466,6 +467,18 @@ run_hook
 ancestor_refused "a dangling .cargo symlink in $R/wt-parent" "$R/wt-parent"
 rm -f "$R/wt-parent/.cargo"
 cd "$R"
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+echo y >plain.rs
+git add -A
+run_hook STUB_PLANT=1
+if ! grep -qF "$R/.cargo exists" "$SCRATCH/out" || ! grep -qF "FAILED at step: kernel crate" "$SCRATCH/out" || grep -qE 'bpfel-unknown-none|fmt --check --manifest-path|^build ' "$STUB_LOG"; then
+  echo "FAIL: a .cargo created after the first check must be refused by name before the kernel stage runs anything"
+  cat "$SCRATCH/out" "$STUB_LOG"
+  FAILS=$((FAILS + 1))
+fi
+rm -rf .cargo
 
 if [ "$FAILS" -ne 0 ]; then
   echo "pre-commit-kernel: $FAILS failures"
