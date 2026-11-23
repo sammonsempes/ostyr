@@ -5,5 +5,6 @@ pub mod error;
 pub mod model;
 pub mod paths;
 pub mod report;
+pub mod store;
 pub mod tags;
 pub mod types;
