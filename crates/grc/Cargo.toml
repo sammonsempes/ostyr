@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+axum = "0.8"
+core-api = { version = "0.0.0", path = "../core-api" }
+core-audit = { version = "0.0.0", path = "../core-audit" }
+core-auth = { version = "0.0.0", path = "../core-auth" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 csv = "1"
@@ -15,12 +19,19 @@ sha2 = "0.10"
 sla-report = { version = "0.0.0", path = "../sla-report" }
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known", "parsing"] }
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+signal-hook = "0.4.6"
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
 tokio-postgres = "0.7"
-tracing = "0.1"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [lints]
 workspace = true
