@@ -125,6 +125,22 @@ pub enum CommandError {
 }
 
 
+/// Why a service round failed; the feed rows are kept and the round is retried.
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("alert feed: {0}")]
+    Store(#[from] alerts::error::StoreError),
+    #[error("dry run: {0}")]
+    DryRun(#[from] DryRunError),
+    #[error("the dry run task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("cannot write the trace: {0}")]
+    Trace(#[source] io::Error),
+    #[error("cannot append the round record: {0}")]
+    Audit(#[from] core_audit::error::AuditError),
+}
+
+
 #[derive(Debug, Error)]
 pub enum DryRunError {
     #[error("cannot prepare the scratch breaker state: {0}")]

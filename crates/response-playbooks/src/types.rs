@@ -16,3 +16,12 @@ pub type ConnectorFn = dyn Fn(&ConnectorCall) -> Result<ConnectorResult, Connect
 
 
 pub type MonotonicFn = dyn Fn() -> Duration + Send + Sync;
+
+
+pub type NowFn = fn() -> time::OffsetDateTime;
+
+
+pub type WaitFn = fn(Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+
+pub type LiveFn<'a> = &'a (dyn Fn() -> crate::service::Live + Sync);

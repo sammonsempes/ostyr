@@ -5671,6 +5671,7 @@ dependencies = [
 name = "response-playbooks"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "core-audit",
  "core-config",
  "core-pg",
@@ -5684,7 +5685,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
  "unicode-general-category",
 ]
 

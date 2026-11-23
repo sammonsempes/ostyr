@@ -1,3 +1,4 @@
+mod feed;
 mod memory;
 mod types;
 
@@ -34,6 +35,9 @@ const FOUR: usize = 4;
 
 
 const FIVE: usize = 5;
+
+
+const SIX: usize = 6;
 
 
 const SEVEN: usize = 7;
@@ -157,7 +161,17 @@ fn migrations_are_valid_and_namespaced() -> TestResult {
     [FIRST_SQL, NEXT_SQL, GET_SQL]
         .iter()
         .for_each(|sql| assert!(sql.contains("WHERE tenant = $1")));
-    assert_eq!(MIGRATIONS.len(), FIVE);
+    assert_eq!(MIGRATIONS.len(), SIX);
+    let feed = MIGRATIONS.get(FIVE).ok_or("no migration")?;
+    assert!(feed.sql.contains("CREATE TABLE playbook_outbox") && feed.sql.contains("PRIMARY KEY (tenant, id)"));
+    assert!(feed.sql.contains("GENERATED ALWAYS AS IDENTITY") && feed.sql.contains("queued_at timestamptz NOT NULL DEFAULT now()"));
+    assert!(feed.sql.contains("CREATE INDEX playbook_outbox_by_seq ON playbook_outbox (tenant, seq)"));
+    assert!(!INSERT_SQL.contains("playbook_outbox"));
+    assert!(feed.sql.contains("CREATE TRIGGER alerts_playbook_outbox AFTER INSERT ON alerts") && feed.sql.contains("FOR EACH ROW"));
+    assert!(feed
+        .sql
+        .contains("INSERT INTO playbook_outbox (tenant, id) VALUES (NEW.tenant, NEW.id) ON CONFLICT DO NOTHING"));
+    assert!(feed.sql.contains("SET search_path = pg_catalog, public, pg_temp"));
     let triage = MIGRATIONS.get(THREE).ok_or("no migration")?;
     assert!(triage.sql.contains("PRIMARY KEY (tenant, alert_id)") && triage.sql.contains("REFERENCES alerts (tenant, id) ON DELETE CASCADE"));
     assert!(triage.sql.contains("CHECK (status IN ('acknowledged', 'closed'))"));
