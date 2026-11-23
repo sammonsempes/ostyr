@@ -4,8 +4,8 @@ use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, SharedAuditFn};
 use siem_ingest::error::SettingsError;
-use siem_ingest::nats_settings::{check_nats_url, check_optional_path};
-use siem_ingest::settings::{check_order, check_present, check_range};
+use siem_ingest::nats_settings::{check_name, check_nats_url, check_optional_path};
+use siem_ingest::settings::{check_order, check_range};
 use std::path::PathBuf;
 
 
@@ -15,7 +15,7 @@ pub fn check_auth(settings: &GatewaySettings) -> Result<(), SettingsError> {
     let paired = user.is_some() == settings.nats_password_file.is_some();
     let single = user.is_none() || settings.nats_credentials_file.is_none();
     if paired && single {
-        user.map_or(Ok(()), |name| check_present("nats_user", name))
+        user.map_or(Ok(()), |name| check_name("nats_user", name))
     } else {
         Err(SettingsError::Invalid {
             field: "nats_user",

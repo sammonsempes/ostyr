@@ -92,6 +92,7 @@ pub struct StubState {
     pub pulls: Vec<Value>,
     pub queue: VecDeque<Queued>,
     pub connects: Vec<Value>,
+    pub subscribed: Vec<String>,
     pub connections: usize,
     pub sockets: Vec<TcpStream>,
     pub fail_create: bool,
@@ -237,6 +238,7 @@ pub fn step<Stream: Read + Write>(reader: &mut BufReader<Stream>, hub: &Hub, sub
         }
         "PING" => write_all(reader, b"PONG\r\n"),
         "SUB" => {
+            lock(hub).subscribed.push(part(&parts, 1)?.to_owned());
             subscriptions.push((part(&parts, 1)?.to_owned(), part(&parts, parts.len() - 1)?.to_owned()));
             Ok(())
         }

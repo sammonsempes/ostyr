@@ -556,6 +556,19 @@ fn a_user_and_a_password_file_authenticate_the_connection() -> Result<(), Box<dy
     let connect = state.connects.first().ok_or("no CONNECT")?;
     assert_eq!(connect.get("user").and_then(|value| value.as_str()), Some("ops"));
     assert_eq!(connect.get("pass").and_then(|value| value.as_str()), Some("s3cret"));
+    assert!(!state.subscribed.is_empty());
+    assert!(state.subscribed.iter().all(|subject| subject.starts_with("_INBOX_ops.")));
+    Ok(())
+}
+
+
+#[test]
+fn a_connection_without_a_user_keeps_the_default_inbox() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    let state = lock(&rig.stub.hub);
+    assert!(!state.subscribed.is_empty());
+    assert!(state.subscribed.iter().all(|subject| subject.starts_with("_INBOX.")));
     Ok(())
 }
 

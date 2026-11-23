@@ -114,7 +114,7 @@ pub fn check_auth(settings: &IngestSettings) -> Result<(), SettingsError> {
     let paired = user.is_some() == settings.nats_password_file.is_some();
     let single = user.is_none() || settings.nats_credentials_file.is_none();
     if paired && single {
-        user.map_or(Ok(()), |name| check_present("nats_user", name))
+        user.map_or(Ok(()), |name| check_name("nats_user", name))
     } else {
         Err(SettingsError::Invalid {
             field: "nats_user",

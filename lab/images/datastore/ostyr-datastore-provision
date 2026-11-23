@@ -27,6 +27,8 @@ readonly GARAGE_CAPACITY="1G"
 readonly GARAGE_ID_SHORT=16
 readonly SERVICE_USER="ostyr"
 readonly SERVICE_DATABASE="ostyr"
+readonly NATS_ADMIN_USER="admin"
+readonly NATS_STREAM="events"
 readonly DICTIONARY_USER="ostyr_dict"
 readonly DICTIONARY_TABLE="iocs"
 postgres_conf_dir="$(echo /etc/postgresql/*/main/conf.d)"
@@ -68,6 +70,18 @@ else
     s3_access_key="GK$(openssl rand -hex 12)"
     s3_secret_key="$(openssl rand -hex 32)"
 fi
+
+stored_or_new() {
+    local value=""
+    if [[ -s "$LAB_DIR/datastore.env" ]]; then
+        value="$(sed -n "s/^$1=//p" "$LAB_DIR/datastore.env")"
+    fi
+    printf '%s' "${value:-$(openssl rand -hex 16)}"
+}
+nats_gateway_password="$(stored_or_new NATS_GATEWAY_PASSWORD)"
+nats_ingest_password="$(stored_or_new NATS_INGEST_PASSWORD)"
+nats_detection_password="$(stored_or_new NATS_DETECTION_PASSWORD)"
+nats_metrics_password="$(stored_or_new NATS_METRICS_PASSWORD)"
 
 cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
 <clickhouse>
@@ -139,8 +153,71 @@ tls {
     handshake_first: true
 }
 authorization {
-    user: $SERVICE_USER
-    password: "$nats_password"
+    users: [
+        {
+            user: gateway
+            password: "$nats_gateway_password"
+            permissions: {
+                publish: { allow: ["events.*"] }
+                subscribe: { allow: ["_INBOX_gateway.>"] }
+            }
+        }
+        {
+            user: siem_ingest
+            password: "$nats_ingest_password"
+            permissions: {
+                publish: {
+                    allow: [
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.siem-ingest"
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.siem-ingest.>"
+                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.siem-ingest"
+                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.siem-ingest"
+                        "\$JS.ACK.$NATS_STREAM.siem-ingest.>"
+                        "dead.events"
+                    ]
+                }
+                subscribe: { allow: ["_INBOX_siem_ingest.>"] }
+            }
+        }
+        {
+            user: detection
+            password: "$nats_detection_password"
+            permissions: {
+                publish: {
+                    allow: [
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.detection"
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.detection.>"
+                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.detection"
+                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.detection"
+                        "\$JS.ACK.$NATS_STREAM.detection.>"
+                        "dead.events"
+                    ]
+                }
+                subscribe: { allow: ["_INBOX_detection.>"] }
+            }
+        }
+        {
+            user: metrics_ingest
+            password: "$nats_metrics_password"
+            permissions: {
+                publish: {
+                    allow: [
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.metrics-ingest"
+                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.metrics-ingest.>"
+                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.metrics-ingest"
+                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.metrics-ingest"
+                        "\$JS.ACK.$NATS_STREAM.metrics-ingest.>"
+                        "dead.events"
+                    ]
+                }
+                subscribe: { allow: ["_INBOX_metrics_ingest.>"] }
+            }
+        }
+        {
+            user: $NATS_ADMIN_USER
+            password: "$nats_password"
+        }
+    ]
 }
 CONF
 chown nats:nats /etc/nats/nats.conf
@@ -212,8 +289,12 @@ CLICKHOUSE_NATIVE_PORT=$CLICKHOUSE_NATIVE_PORT
 CLICKHOUSE_USER=$SERVICE_USER
 CLICKHOUSE_PASSWORD=$clickhouse_password
 NATS_PORT=$NATS_PORT
-NATS_USER=$SERVICE_USER
+NATS_USER=$NATS_ADMIN_USER
 NATS_PASSWORD=$nats_password
+NATS_GATEWAY_PASSWORD=$nats_gateway_password
+NATS_INGEST_PASSWORD=$nats_ingest_password
+NATS_DETECTION_PASSWORD=$nats_detection_password
+NATS_METRICS_PASSWORD=$nats_metrics_password
 POSTGRES_PORT=$POSTGRES_PORT
 POSTGRES_USER=$SERVICE_USER
 POSTGRES_PASSWORD=$postgres_password

@@ -6,7 +6,7 @@ use async_nats::jetstream::Context;
 use async_nats::{Client, ConnectOptions};
 use core_config::reload::{current_config, ReloadEngine};
 use siem_ingest::error::NatsError;
-use siem_ingest::nats::{bounded, mark_dropped, millis, read_bounded, read_secret_bounded, tls_config, MAX_NATS_FILE_BYTES};
+use siem_ingest::nats::{bounded, mark_dropped, millis, read_bounded, read_secret_bounded, tls_config, with_inbox, MAX_NATS_FILE_BYTES};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,11 +58,10 @@ pub fn connect_options(settings: &GatewaySettings, dropped: Arc<AtomicBool>) -> 
         (Some(user), Some(bytes)) => trusted.user_and_password(user.clone(), String::from_utf8_lossy(&bytes).trim_end().to_owned()),
         _ => trusted,
     };
+    let named = with_inbox(authenticated, settings.nats_user.as_deref());
     match credentials {
-        Some(bytes) => authenticated
-            .credentials(&String::from_utf8_lossy(&bytes))
-            .map_err(NatsError::Credentials),
-        None => Ok(authenticated),
+        Some(bytes) => named.credentials(&String::from_utf8_lossy(&bytes)).map_err(NatsError::Credentials),
+        None => Ok(named),
     }
 }
 

@@ -25,7 +25,11 @@ marker="$(openssl rand -hex "$MARKER_BYTES")"
 previous_marker=""
 [[ ! -s "$marker_file" ]] || previous_marker="$(cat "$marker_file")"
 
-ssh "${ssh_options[@]}" "$client_user@$client_address" "sudo bash -s '$marker' '$previous_marker'" <<'REMOTE'
+admin_password="$(ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo sed -n 's/^NATS_PASSWORD=//p' /etc/ostyr-lab/datastore.env")"
+[[ -n "$admin_password" ]] || die "the datastore VM holds no NATS admin password"
+{
+printf 'export NATS_PASSWORD=%q\n' "$admin_password"
+cat <<'REMOTE'
 set -euo pipefail
 marker="$1"
 previous_marker="$2"
@@ -42,7 +46,7 @@ postgres() {
         --tuples-only --no-align --quiet -c "$1"
 }
 jetstream() {
-    nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" --password "$NATS_PASSWORD" "$@"
+    nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" "$@"
 }
 
 clickhouse 'CREATE TABLE IF NOT EXISTS default.ostyr_check (marker String) ENGINE = MergeTree ORDER BY marker' >/dev/null
@@ -98,6 +102,7 @@ if curl --silent --max-time 3 --user "$CLICKHOUSE_USER:wrong" --data-binary 'SEL
 fi
 step "plaintext and wrong-password access refused"
 REMOTE
+} | ssh "${ssh_options[@]}" "$client_user@$client_address" "sudo bash -s '$marker' '$previous_marker'"
 printf '%s\n' "$marker" >"$marker_file"
 
 port_answers() {

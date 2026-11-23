@@ -45,6 +45,24 @@ pub const REASON_HEADER: &str = "Ostyr-Reason";
 pub const FIRST_TOKEN: AckToken = 1;
 
 
+pub const INBOX_PREFIX: &str = "_INBOX_";
+
+
+/// The reply-subject prefix of one NATS user: a service subscribes only to its own, so no service reads another's replies.
+pub fn inbox_prefix(user: &str) -> String {
+    format!("{INBOX_PREFIX}{user}")
+}
+
+
+/// An authenticated connection gets its user's inbox prefix; one without a user keeps the default.
+pub fn with_inbox(options: ConnectOptions, user: Option<&str>) -> ConnectOptions {
+    match user {
+        Some(name) => options.custom_inbox_prefix(inbox_prefix(name)),
+        None => options,
+    }
+}
+
+
 /// At most `cap` bytes of a reader: a longer one is refused, and the content never reaches an error text.
 pub fn read_capped<Source: Read>(reader: Source, what: &'static str, cap: u64) -> Result<Vec<u8>, NatsError> {
     let mut content = Vec::new();
@@ -156,11 +174,10 @@ pub fn connect_options(settings: &IngestSettings, dropped: Arc<AtomicBool>) -> R
         (Some(user), Some(bytes)) => trusted.user_and_password(user.clone(), String::from_utf8_lossy(&bytes).trim_end().to_owned()),
         _ => trusted,
     };
+    let named = with_inbox(authenticated, settings.nats_user.as_deref());
     match credentials {
-        Some(bytes) => authenticated
-            .credentials(&String::from_utf8_lossy(&bytes))
-            .map_err(NatsError::Credentials),
-        None => Ok(authenticated),
+        Some(bytes) => named.credentials(&String::from_utf8_lossy(&bytes)).map_err(NatsError::Credentials),
+        None => Ok(named),
     }
 }
 

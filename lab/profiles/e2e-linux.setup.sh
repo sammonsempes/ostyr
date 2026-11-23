@@ -87,7 +87,9 @@ subjectAltName=URI:urn:ostyr:agent:$TENANT:$AGENT_ID"
 install -m 644 "$stage/pki/platform.pem" "$datastore_etc/platform-ca.pem"
 install -m 644 "$stage/pki/agent.pem" "$datastore_etc/agent-ca.pem"
 install -m 644 "$stage/pki/server.crt" "$datastore_etc/tls.crt"
-install -m 600 "$stage/pki/server.key" "$datastore_etc/tls.key"
+for name in gateway alerts web; do
+    install -m 600 "$stage/pki/server.key" "$datastore_etc/tls-$name.key"
+done
 install -m 644 "$stage/pki/platform.pem" "$client_etc/platform-ca.pem"
 install -m 644 "$stage/pki/agent-leaf.crt" "$client_etc/agent.crt"
 install -m 600 "$stage/pki/agent-leaf.key" "$client_etc/agent.key"
@@ -100,7 +102,7 @@ install -m 755 "$build_dir/linux_agent" "$stage/client/usr/local/bin/linux_agent
 cat >"$datastore_etc/gateway-server.yaml" <<YAML
 listen: "$datastore_address:$GATEWAY_PORT"
 certificate: /etc/ostyr/tls.crt
-key: /etc/ostyr/tls.key
+key: /etc/ostyr/tls-gateway.key
 agent_ca: /etc/ostyr/agent-ca.pem
 revocation_file: /etc/ostyr/revoked.yaml
 settings_file: /etc/ostyr/channel-settings.yaml
@@ -118,16 +120,20 @@ cat >"$datastore_etc/gateway-settings.yaml" <<YAML
 nats_url: "tls://$DATASTORE_DOMAIN:4222"
 nats_tls_first: true
 nats_ca_file: /etc/ostyr-lab/ca.pem
-nats_user: ostyr
-nats_password_file: /etc/ostyr/nats.password
+nats_user: gateway
+nats_password_file: /etc/ostyr/nats-gateway.password
 YAML
 
-nats_block="nats_url: \"tls://$DATASTORE_DOMAIN:4222\"
+nats_block() {
+    cat <<BLOCK
+nats_url: "tls://$DATASTORE_DOMAIN:4222"
 nats_tls_first: true
 nats_ca_file: /etc/ostyr-lab/ca.pem
-nats_user: ostyr
-nats_password_file: /etc/ostyr/nats.password
-nats_stream: events"
+nats_user: $1
+nats_password_file: /etc/ostyr/nats-$2.password
+nats_stream: events
+BLOCK
+}
 cat >"$datastore_etc/ingest.yaml" <<YAML
 clickhouse_url: "https://$DATASTORE_DOMAIN:8443"
 clickhouse_database: ostyr
@@ -136,7 +142,7 @@ clickhouse_user: ostyr
 clickhouse_password_file: /etc/ostyr/clickhouse.password
 clickhouse_ca_file: /etc/ostyr-lab/ca.pem
 nats_consumer: siem-ingest
-$nats_block
+$(nats_block siem_ingest siem-ingest)
 YAML
 cat >"$datastore_etc/detection.yaml" <<YAML
 audit_file: /var/lib/ostyr/detection/audit.log
@@ -150,17 +156,17 @@ postgres:
   host: $DATASTORE_DOMAIN
   database: ostyr
   user: ostyr
-  password_file: /etc/ostyr/postgres.password
+  password_file: /etc/ostyr/postgres-detection.password
   ca_file: /etc/ostyr-lab/ca.pem
 ingest:
   nats_consumer: detection
-$(sed 's/^/  /' <<<"$nats_block")
+$(nats_block detection detection | sed 's/^/  /')
 YAML
 cat >"$datastore_etc/pg.yaml" <<YAML
 host: $DATASTORE_DOMAIN
 database: ostyr
 user: ostyr
-password_file: /etc/ostyr/postgres.password
+password_file: /etc/ostyr/postgres-alerts.password
 ca_file: /etc/ostyr-lab/ca.pem
 YAML
 cat >"$datastore_etc/alerts.yaml" <<YAML
@@ -170,8 +176,8 @@ tenant: $TENANT
 listen: "$datastore_address:$ALERTS_PORT"
 settings:
   tls_certificate: /etc/ostyr/tls.crt
-  tls_key: /etc/ostyr/tls.key
-  accounts_store: /etc/ostyr/accounts.json
+  tls_key: /etc/ostyr/tls-alerts.key
+  accounts_store: /var/lib/ostyr/alerts/accounts.json
   audit_log: /var/lib/ostyr/alerts/audit.log
   key_file: /etc/ostyr/store.key
   compromised_list: /etc/ostyr/compromised.txt
@@ -181,7 +187,7 @@ cat >"$datastore_etc/web-ui.yaml" <<YAML
 listen: "$datastore_address:$WEB_PORT"
 tls:
   certificate: /etc/ostyr/tls.crt
-  key: /etc/ostyr/tls.key
+  key: /etc/ostyr/tls-web.key
 api:
   base_url: "https://$DATASTORE_DOMAIN:$ALERTS_PORT"
   ca: /etc/ostyr/platform-ca.pem
@@ -253,11 +259,11 @@ WantedBy=multi-user.target
 UNIT
 }
 datastore_units="$stage/datastore/etc/systemd/system"
-unit event-gateway "/usr/local/bin/event_gateway /etc/ostyr/gateway-server.yaml /etc/ostyr/gateway.yaml" >"$datastore_units/ostyr-event-gateway.service"
-unit siem-ingest "/usr/local/bin/ingest_run /etc/ostyr/ingest.yaml /run/ostyr-stop-ingest" >"$datastore_units/ostyr-siem-ingest.service"
-unit detection "/usr/local/bin/detect /etc/ostyr/detection.yaml /run/ostyr-stop-detection" >"$datastore_units/ostyr-detection.service"
-unit alerts-api "/usr/local/bin/alerts_api /etc/ostyr/alerts.yaml" >"$datastore_units/ostyr-alerts-api.service"
-unit web-ui "/usr/local/bin/web_ui /etc/ostyr/web-ui.yaml" >"$datastore_units/ostyr-web-ui.service"
+unit event-gateway "/usr/local/bin/event_gateway /etc/ostyr/gateway-server.yaml /etc/ostyr/gateway.yaml" "User=ostyr-gateway" >"$datastore_units/ostyr-event-gateway.service"
+unit siem-ingest "/usr/local/bin/ingest_run /etc/ostyr/ingest.yaml /run/ostyr-stop-ingest" "User=ostyr-siem" >"$datastore_units/ostyr-siem-ingest.service"
+unit detection "/usr/local/bin/detect /etc/ostyr/detection.yaml /run/ostyr-stop-detection" "User=ostyr-detection" >"$datastore_units/ostyr-detection.service"
+unit alerts-api "/usr/local/bin/alerts_api /etc/ostyr/alerts.yaml" "User=ostyr-alerts" >"$datastore_units/ostyr-alerts-api.service"
+unit web-ui "/usr/local/bin/web_ui /etc/ostyr/web-ui.yaml" "User=ostyr-web" >"$datastore_units/ostyr-web-ui.service"
 
 cat >"$client_etc/agent.yaml" <<YAML
 server: "$datastore_address:$GATEWAY_PORT"
@@ -299,12 +305,32 @@ ssh "${ssh_options[@]}" "$datastore_target" "sudo bash -s $STREAM_DUPLICATE_WIND
 set -euo pipefail
 duplicate_window="$1"
 source /etc/ostyr-lab/datastore.env
-install -d -m 700 /var/lib/ostyr /var/lib/ostyr/gateway /var/lib/ostyr/gateway/commands /var/lib/ostyr/detection /var/lib/ostyr/detection/checkpoints \
-    /var/lib/ostyr/alerts /var/lib/ostyr/web-ui
-printf '%s' "$NATS_PASSWORD" >/etc/ostyr/nats.password
-printf '%s' "$CLICKHOUSE_PASSWORD" >/etc/ostyr/clickhouse.password
-printf '%s' "$POSTGRES_PASSWORD" >/etc/ostyr/postgres.password
-chmod 600 /etc/ostyr/nats.password /etc/ostyr/clickhouse.password /etc/ostyr/postgres.password
+for service_user in ostyr-gateway ostyr-siem ostyr-detection ostyr-alerts ostyr-web; do
+    id "$service_user" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$service_user"
+done
+install -d -m 755 /var/lib/ostyr
+install -d -m 700 -o ostyr-gateway /var/lib/ostyr/gateway /var/lib/ostyr/gateway/commands
+install -d -m 700 -o ostyr-detection /var/lib/ostyr/detection /var/lib/ostyr/detection/checkpoints
+install -d -m 700 -o ostyr-alerts /var/lib/ostyr/alerts
+install -d -m 700 -o ostyr-web /var/lib/ostyr/web-ui
+secret_file() {
+    install -m 400 -o "$2" -g "$2" /dev/null "$3"
+    printf '%s' "$1" >"$3"
+}
+secret_file "$NATS_GATEWAY_PASSWORD" ostyr-gateway /etc/ostyr/nats-gateway.password
+secret_file "$NATS_INGEST_PASSWORD" ostyr-siem /etc/ostyr/nats-siem-ingest.password
+secret_file "$NATS_DETECTION_PASSWORD" ostyr-detection /etc/ostyr/nats-detection.password
+secret_file "$CLICKHOUSE_PASSWORD" ostyr-siem /etc/ostyr/clickhouse.password
+secret_file "$POSTGRES_PASSWORD" ostyr-detection /etc/ostyr/postgres-detection.password
+secret_file "$POSTGRES_PASSWORD" ostyr-alerts /etc/ostyr/postgres-alerts.password
+for name in gateway alerts web; do
+    chown "ostyr-$name:ostyr-$name" "/etc/ostyr/tls-$name.key"
+    chmod 400 "/etc/ostyr/tls-$name.key"
+done
+install -m 600 -o ostyr-alerts -g ostyr-alerts /etc/ostyr/accounts.json /var/lib/ostyr/alerts/accounts.json
+rm -f /etc/ostyr/accounts.json
+chown ostyr-alerts:ostyr-alerts /etc/ostyr/store.key
+chmod 600 /etc/ostyr/store.key
 clickhouse() {
     curl --fail --silent --show-error --cacert "$DATASTORE_CA" --user "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --data-binary "$1" \
         "https://$DATASTORE_DOMAIN:$CLICKHOUSE_HTTPS_PORT/"
@@ -312,9 +338,9 @@ clickhouse() {
 clickhouse 'CREATE DATABASE IF NOT EXISTS ostyr'
 clickhouse "$(cat /tmp/e2e-events.sql)"
 rm -f /tmp/e2e-events.sql
+export NATS_PASSWORD
 nats() {
-    /usr/local/share/ostyr-lab/client/nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" \
-        --password "$NATS_PASSWORD" "$@"
+    /usr/local/share/ostyr-lab/client/nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" "$@"
 }
 nats stream info events >/dev/null 2>&1 || nats stream add events --subjects 'events.>,dead.events' --storage file --retention limits --discard old \
     --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
