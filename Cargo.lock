@@ -4030,6 +4030,8 @@ dependencies = [
 name = "net-topology"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
+ "core-config",
  "core-pg",
  "rustix 1.1.6",
  "serde",

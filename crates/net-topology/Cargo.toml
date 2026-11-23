@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -16,6 +17,7 @@ tracing = "0.1"
 rustix = { version = "1.1", features = ["event", "process"] }
 
 [dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 tempfile = "3"
 
 [lints]
