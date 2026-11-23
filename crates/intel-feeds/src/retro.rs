@@ -27,7 +27,8 @@ use ureq::Agent;
 pub const PARAM_PREFIX: &str = "param_";
 
 
-pub const READONLY_VALUE: &str = "1";
+/// `readonly=2`: a write is still refused, but the in-query `SETTINGS` pins may differ from the profile (under `readonly=1` ClickHouse 26.8 refuses them, code 164).
+pub const READONLY_VALUE: &str = "2";
 
 
 pub const EXCEPTION_IN_BODY: &str = "0";
@@ -37,7 +38,47 @@ pub const OVERFLOW_MODE: &str = "throw";
 
 
 /// Profile settings that cut a reply without an error, reset to no effect: `limit` and `offset` truncate, the filter drops rows.
-pub const RESET_SETTINGS: [(&str, &str); 3] = [("limit", "0"), ("offset", "0"), ("additional_result_filter", "")];
+pub const RESET_SETTINGS: [(&str, &str); 5] = [
+    ("limit", "0"),
+    ("offset", "0"),
+    ("additional_result_filter", "''"),
+    ("filter", "''"),
+    ("additional_table_filters", "{}"),
+];
+
+
+/// The settings a reader profile may have changed: the pins of every statement plus the two the URL sends; a named setting set in the query shows as changed.
+pub const RETRO_ALLOWED_CHANGED: [&str; 22] = [
+    "readonly",
+    "http_write_exception_in_output_format",
+    "max_execution_time",
+    "timeout_overflow_mode",
+    "max_rows_to_read",
+    "read_overflow_mode",
+    "max_rows_to_group_by",
+    "group_by_overflow_mode",
+    "max_result_rows",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "read_overflow_mode_leaf",
+    "timeout_overflow_mode_leaf",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+];
+
+
+/// The settings-check statement may list this many names (the server throws above it) and its reply is read through this many bytes.
+pub const CHANGED_MAX_ROWS: u64 = 64;
+
+
+pub const MAX_CHANGED_BYTES: u64 = 4096;
 
 
 /// Every other overflow mode a profile could set to `break` (a cut sort or set gave a silent partial result, T764BS2).
@@ -112,6 +153,8 @@ pub enum RetroError {
     Malformed,
     #[error("malformed_reply")]
     MalformedReply,
+    #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
+    ReaderProfileChanged(usize),
 }
 
 
@@ -133,9 +176,10 @@ pub struct RetroReply {
 }
 
 
-/// The three statements of a run, all with `tenant`, `start`, `end` (and `limit`) as `param_` values.
+/// The four statements of a run, all with `tenant`, `start`, `end` (and `limit`) as `param_` values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statements {
+    pub changed: String,
     pub foreign: String,
     pub not_an_ip: String,
     pub matches: String,
@@ -282,12 +326,16 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
     let source = qualified(&reader.database, &reader.table)?;
     quote_identifier(&reader.dictionary)?;
     let dictionary = format!("{}.{}", reader.database, reader.dictionary);
+    let scalar_pins = settings_clause(settings, SCALAR_RESULT_ROWS);
+    let match_pins = settings_clause(settings, settings.max_matches as u64 + 1);
+    let changed_pins = settings_clause(settings, CHANGED_MAX_ROWS);
     Ok(Statements {
+        changed: format!("SELECT `name` FROM `system`.`settings` WHERE `changed`{changed_pins} FORMAT TabSeparated"),
         foreign: format!(
-            "SELECT count() FROM (SELECT 1 FROM {source} WHERE `tenant` != {{tenant:String}} AND `checked` = 1 LIMIT 1) FORMAT TabSeparated"
+            "SELECT count() FROM (SELECT 1 FROM {source} WHERE `tenant` != {{tenant:String}} AND `checked` = 1 LIMIT 1){scalar_pins} FORMAT TabSeparated"
         ),
         not_an_ip: format!(
-            "SELECT {} + {} FROM {events} WHERE {WINDOW_FILTER} FORMAT TabSeparated",
+            "SELECT {} + {} FROM {events} WHERE {WINDOW_FILTER}{scalar_pins} FORMAT TabSeparated",
             not_an_ip_count("source.ip"),
             not_an_ip_count("destination.ip")
         ),
@@ -298,7 +346,7 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
              toUInt32(count()) AS `matches`, toUInt32(toUnixTimestamp(min(`ts`))) AS `first_time`, toUInt32(toUnixTimestamp(max(`ts`))) AS `last_time` \
              FROM ({} UNION ALL {}) WHERE dictHas('{dictionary}', `key`) \
              GROUP BY `indicator`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
-             ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
+             ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}}{match_pins} FORMAT JSONEachRow",
             direction_select(&events, "source", "source.ip"),
             direction_select(&events, "destination", "destination.ip")
         ),
@@ -306,23 +354,32 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
 }
 
 
-/// Read-only, every limit from the settings, every overflow mode `throw`: never `break`, which gives silent partial results.
-pub fn server_settings(settings: &RetroSettings, result_rows: u64) -> Vec<(&'static str, String)> {
-    let mut sent = vec![
-        ("readonly", READONLY_VALUE.to_owned()),
+/// The pins of one statement as a `SETTINGS` clause: every limit from the settings, every overflow mode `throw` (never `break`), every cut reset.
+pub fn settings_clause(settings: &RetroSettings, result_rows: u64) -> String {
+    let mode = format!("'{OVERFLOW_MODE}'");
+    let mut pins = vec![
         ("max_execution_time", settings.max_execution_seconds.to_string()),
-        ("timeout_overflow_mode", OVERFLOW_MODE.to_owned()),
+        ("timeout_overflow_mode", mode.clone()),
         ("max_rows_to_read", settings.max_rows_to_read.to_string()),
-        ("read_overflow_mode", OVERFLOW_MODE.to_owned()),
+        ("read_overflow_mode", mode.clone()),
         ("max_rows_to_group_by", settings.max_rows_to_group_by.to_string()),
-        ("group_by_overflow_mode", OVERFLOW_MODE.to_owned()),
+        ("group_by_overflow_mode", mode.clone()),
         ("max_result_rows", result_rows.to_string()),
-        ("result_overflow_mode", OVERFLOW_MODE.to_owned()),
-        ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_owned()),
+        ("result_overflow_mode", mode.clone()),
     ];
-    sent.extend(RESET_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_owned())));
-    sent.extend(EXTRA_OVERFLOW_MODES.iter().map(|name| (*name, OVERFLOW_MODE.to_owned())));
-    sent
+    pins.extend(EXTRA_OVERFLOW_MODES.iter().map(|name| (*name, mode.clone())));
+    pins.extend(RESET_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_owned())));
+    let listed: Vec<String> = pins.iter().map(|(name, value)| format!("{name} = {value}")).collect();
+    format!(" SETTINGS {}", listed.join(", "))
+}
+
+
+/// The URL keeps only the settings a statement cannot carry: `readonly` (changing it in a query is refused) and the exception format.
+pub fn server_settings() -> Vec<(&'static str, String)> {
+    vec![
+        ("readonly", READONLY_VALUE.to_owned()),
+        ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_owned()),
+    ]
 }
 
 
@@ -344,7 +401,6 @@ pub fn fetch(
     elapsed: &ElapsedFn,
     statement: &str,
     params: Vec<(&'static str, String)>,
-    result_rows: u64,
 ) -> Result<RetroReply, RetroError> {
     let remaining = Duration::from_millis(settings.reader.timeout_ms).saturating_sub(elapsed());
     if remaining.is_zero() {
@@ -352,7 +408,7 @@ pub fn fetch(
     } else {
         let reply = send(&RetroRequest {
             statement: statement.to_owned(),
-            settings: server_settings(settings, result_rows),
+            settings: server_settings(),
             params,
             remaining,
         })
@@ -368,6 +424,28 @@ pub fn body_failure(error: &io::Error) -> RetroError {
         RetroError::Timeout
     } else {
         RetroError::Body(error.kind())
+    }
+}
+
+
+/// The reader's changed settings, one name per line: any name outside `RETRO_ALLOWED_CHANGED`, or a reply over the byte cap, is a refusal that counts and never names.
+pub fn read_changed(reply: RetroReply) -> Result<(), RetroError> {
+    let mut bytes = Vec::new();
+    reply
+        .body
+        .take(MAX_CHANGED_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| body_failure(&error))?;
+    let over_cap = usize::from(bytes.len() as u64 > MAX_CHANGED_BYTES);
+    let outside = String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter(|name| !RETRO_ALLOWED_CHANGED.contains(name))
+        .count()
+        + over_cap;
+    if outside > 0 {
+        Err(RetroError::ReaderProfileChanged(outside))
+    } else {
+        Ok(())
     }
 }
 
@@ -469,7 +547,7 @@ pub fn gap_of(previous_end: Option<OffsetDateTime>, start: OffsetDateTime) -> Op
 }
 
 
-/// Foreign check on the source table, then the non-IP count, then the match query, all under the one deadline `reader.timeout_ms`.
+/// Settings check, foreign check on the source table, then the non-IP count, then the match query, all under the one deadline `reader.timeout_ms`.
 pub fn retro_run(
     settings: &RetroSettings,
     start: OffsetDateTime,
@@ -484,16 +562,16 @@ pub fn retro_run(
     let tenant = settings.reader.tenant.as_str();
     let tenant_param = || ("tenant", tenant.to_owned());
     let window_params = || vec![tenant_param(), ("start", first.to_string()), ("end", last.to_string())];
-    let foreign_rows = fetch(send, settings, elapsed, &text.foreign, vec![tenant_param()], SCALAR_RESULT_ROWS).and_then(read_scalar)?;
+    fetch(send, settings, elapsed, &text.changed, Vec::new()).and_then(read_changed)?;
+    let foreign_rows = fetch(send, settings, elapsed, &text.foreign, vec![tenant_param()]).and_then(read_scalar)?;
     if foreign_rows > 0 {
         Err(RetroError::ForeignDictionary)
     } else {
-        let not_an_ip = fetch(send, settings, elapsed, &text.not_an_ip, window_params(), SCALAR_RESULT_ROWS).and_then(read_scalar)?;
+        let not_an_ip = fetch(send, settings, elapsed, &text.not_an_ip, window_params()).and_then(read_scalar)?;
         let limit = settings.max_matches + 1;
         let mut match_params = window_params();
         match_params.push(("limit", limit.to_string()));
-        let collected =
-            fetch(send, settings, elapsed, &text.matches, match_params, limit as u64).and_then(|reply| read_groups(reply, tenant, limit))?;
+        let collected = fetch(send, settings, elapsed, &text.matches, match_params).and_then(|reply| read_groups(reply, tenant, limit))?;
         let truncated = collected.groups.len() > settings.max_matches;
         let mut groups = collected.groups;
         groups.truncate(settings.max_matches);
