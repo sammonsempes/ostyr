@@ -8,8 +8,8 @@ use status_page::app::{run_app_with, AppFile};
 use status_page::error::{StatusPageError, StoreError};
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
 use status_page::publish::{
-    declared_services, error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, render_class, tick,
-    MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
+    declared_services, error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, read_within, render_class,
+    settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
 };
 use status_page::settings::validate_settings;
 use status_page::store_model::PublishedRead;
@@ -24,6 +24,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Instant};
+
+
+const DEFAULT_CONNECT_SECS: u64 = 5;
+
+
+const DEFAULT_STATEMENT_SECS: u64 = 30;
+
+
+const EXPECTED_DEFAULT_CUT_SECS: u64 = 205;
 
 
 const OTHER_TENANT: &str = "globex";
@@ -725,5 +734,28 @@ fn the_read_deadline_outlasts_the_reader_own_cut() -> TestResult {
     let one_query = Duration::from_secs(MAX_DEADLINE_SECS) * QUERY_WINDOWS + CLIENT_DEADLINE_MARGIN;
     let worst = Duration::from_secs(MAX_DEADLINE_SECS) + one_query * u32::try_from(READER_QUERIES)?;
     assert!(READ_DEADLINE >= worst);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_hung_reader_is_cut_at_the_settings_cut_not_the_ceiling() -> TestResult {
+    let cut = settings_cut(DEFAULT_CONNECT_SECS, DEFAULT_STATEMENT_SECS);
+    assert_eq!(cut, Duration::from_secs(EXPECTED_DEFAULT_CUT_SECS));
+    assert!(cut < READ_DEADLINE);
+    let started = Instant::now();
+    let hung = read_within(cut, std::future::pending()).await;
+    assert!(matches!(hung, Err(StoreError::ReadTimeout)));
+    assert_eq!(started.elapsed(), cut);
+    let answered = read_within(cut, async { Ok(PublishedRead::default()) }).await;
+    assert!(answered.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn the_settings_cut_never_exceeds_the_ceiling() -> TestResult {
+    assert_eq!(settings_cut(u64::MAX, u64::MAX), READ_DEADLINE);
+    assert_eq!(settings_cut(MAX_DEADLINE_SECS, MAX_DEADLINE_SECS), READ_DEADLINE);
     Ok(())
 }

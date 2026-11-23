@@ -5,6 +5,7 @@ use core_pg::settings::load_settings;
 use status_page::app::{run_app_with, AppFile};
 use status_page::error::StoreError;
 use status_page::pg::execute;
+use status_page::publish::{read_within, settings_cut};
 use status_page::store::{read_published, MAX_PUBLISHED};
 use status_page::store_model::{PublishedRead, Statement};
 use status_page::types::IncidentReadFn;
@@ -21,9 +22,13 @@ const USAGE: &str = "usage: status_server <server.yaml> <listen-address>";
 async fn read_once(pg_file: &Path, scope: &TenantScope, services: &[String]) -> Result<PublishedRead, StoreError> {
     let settings = load_settings(pg_file)?;
     let deadline = Duration::from_secs(settings.statement_timeout_secs);
-    let client = connect(&settings).await?;
-    let mut exec = |query_scope: &TenantScope, statement: Statement| execute(&client, query_scope.clone(), statement, deadline);
-    read_published(&mut exec, scope, services, MAX_PUBLISHED).await
+    let cut = settings_cut(settings.connect_timeout_secs, settings.statement_timeout_secs);
+    read_within(cut, async {
+        let client = connect(&settings).await?;
+        let mut exec = |query_scope: &TenantScope, statement: Statement| execute(&client, query_scope.clone(), statement, deadline);
+        read_published(&mut exec, scope, services, MAX_PUBLISHED).await
+    })
+    .await
 }
 
 
