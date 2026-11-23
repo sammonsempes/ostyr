@@ -35,6 +35,12 @@ pub const PERMISSION_CASES_WRITE: &str = "cases.write";
 pub const PERMISSION_CMDB_READ: &str = "cmdb.read";
 
 
+pub const PERMISSION_ATTACK_PATHS_READ: &str = "attack_paths.read";
+
+
+pub const PERMISSION_GRC_READ: &str = "grc.read";
+
+
 pub const PERMISSION_ONCALL_READ: &str = "oncall.read";
 
 
@@ -98,6 +104,8 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CASES_READ,
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
+        PERMISSION_ATTACK_PATHS_READ,
+        PERMISSION_GRC_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_ONCALL_ACKNOWLEDGE,
     ];
@@ -120,6 +128,8 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CASES_READ,
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
+        PERMISSION_ATTACK_PATHS_READ,
+        PERMISSION_GRC_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
@@ -133,6 +143,8 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_ALERTS_READ,
         PERMISSION_CASES_READ,
         PERMISSION_CMDB_READ,
+        PERMISSION_ATTACK_PATHS_READ,
+        PERMISSION_GRC_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_AUDIT_READ,
     ];

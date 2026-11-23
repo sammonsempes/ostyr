@@ -574,17 +574,27 @@ name = "attack-paths"
 version = "0.0.0"
 dependencies = [
  "ad-posture",
+ "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-postgres",
+ "tower",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
@@ -2731,19 +2741,29 @@ dependencies = [
 name = "grc"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "csv",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "sla-report",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-postgres",
+ "tower",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
