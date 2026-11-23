@@ -23,4 +23,6 @@ pub enum PlatformError {
     PageFile { reason: &'static str },
     #[error("settings.status.page_file tenant differs from the module file tenant")]
     PageTenantMismatch,
+    #[error("a selected module has no connection semaphore")]
+    MissingPermits,
 }

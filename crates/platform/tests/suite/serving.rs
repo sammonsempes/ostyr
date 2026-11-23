@@ -1,10 +1,8 @@
-use crate::fixture::{body_json, call, fixture, fixture_with_permits, login, ANALYST, AUDITOR, READER};
+use crate::fixture::{body_json, call, empty_permits, fixture, fixture_with_permits, login, ANALYST, AUDITOR, READER};
 use crate::types::TestResult;
 use axum::body::Body;
 use axum::http::StatusCode;
 use platform::merge::MAX_MODULES_CHARS;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 
 const ALL_MODULES: &str =
@@ -114,7 +112,7 @@ async fn the_new_detail_routes_are_mounted_for_an_analyst() -> TestResult {
 
 #[tokio::test]
 async fn the_new_modules_share_one_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let fx = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&fx.router, ANALYST).await?;
     for path in NEW_PATHS {
@@ -130,7 +128,7 @@ async fn the_new_modules_share_one_semaphore_and_answer_429_when_it_is_empty() -
 
 #[tokio::test]
 async fn the_dhcp_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let fx = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&fx.router, ANALYST).await?;
     for path in DHCP_QUERIES {
@@ -146,7 +144,7 @@ async fn the_dhcp_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -
 
 #[tokio::test]
 async fn the_compliance_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let fx = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&fx.router, ANALYST).await?;
     for path in COMPLIANCE_QUERIES {
@@ -162,7 +160,7 @@ async fn the_compliance_routes_share_the_semaphore_and_answer_429_when_it_is_emp
 
 #[tokio::test]
 async fn the_vulnerabilities_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let fx = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&fx.router, ANALYST).await?;
     for path in VULN_QUERIES {
@@ -310,7 +308,7 @@ async fn the_remote_shell_routes_need_audit_read_and_share_the_semaphore() -> Te
         let code = status(&fx.router, "GET", path, Some(&holder)).await?;
         assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
     }
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let limited = fixture_with_permits(ALL_MODULES, &permits)?;
     let auditor = login(&limited.router, AUDITOR).await?;
     for path in SHELL_PATHS {
@@ -346,7 +344,7 @@ async fn the_posture_route_needs_cmdb_read_and_shares_the_semaphore() -> TestRes
     let analyst = login(&fx.router, ANALYST).await?;
     let code = status(&fx.router, "GET", POSTURE_PATH, Some(&analyst)).await?;
     assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{code}");
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let limited = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&limited.router, ANALYST).await?;
     assert_eq!(
@@ -388,7 +386,7 @@ async fn the_grc_and_attack_path_routes_need_their_permission_and_reach_their_ba
 
 #[tokio::test]
 async fn the_grc_and_attack_path_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(ALL_MODULES)?;
     let limited = fixture_with_permits(ALL_MODULES, &permits)?;
     let token = login(&limited.router, ANALYST).await?;
     for path in GRC_PATHS.iter().take(1).chain(ATTACK_PATHS.iter().take(1)).copied() {

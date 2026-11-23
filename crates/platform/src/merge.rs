@@ -1,7 +1,7 @@
 use crate::error::PlatformError;
 use crate::model::Module;
-use crate::types::{MigrationPlan, PageLoader, Parts};
-use alerts::backend::MAX_CONNECTIONS;
+use crate::permits::{counted, permits_of};
+use crate::types::{MigrationPlan, PageLoader, Parts, Permits};
 use alerts::settings::SETTING_PG;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use attack_paths::store::{MIGRATIONS as ATTACK_MIGRATIONS, MIGRATION_NAMESPACE as ATTACK_NAMESPACE};
@@ -236,11 +236,6 @@ pub fn load_page_services(file: &Path) -> Result<Arc<PageServices>, PlatformErro
 }
 
 
-pub fn shared_permits() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(MAX_CONNECTIONS))
-}
-
-
 pub fn module_router(
     module: Module,
     engine: &Arc<ReloadEngine<PgSettings>>,
@@ -355,17 +350,18 @@ pub fn module_document(module: Module) -> OpenApiDocument {
 }
 
 
-/// Routers, merged access table and documents of the selected modules; the tables merge first, so a clash is an error before any router merge.
+/// Routers (each with its own semaphore from `permits`), merged access table and documents of the selected modules; the tables merge first, so a clash is an error before any router merge.
 pub fn module_parts(
     modules: &[Module],
     engine: &Arc<ReloadEngine<PgSettings>>,
-    permits: &Arc<Semaphore>,
+    permits: &Permits,
     weights: Option<&Arc<ReloadEngine<Weights>>>,
     page: Option<&Arc<PageServices>>,
 ) -> Result<Parts, PlatformError> {
     let access = merge_access(modules.iter().map(|module| module_access(*module)).collect())?;
     let router = modules.iter().try_fold(Router::new(), |merged, module| {
-        module_router(*module, engine, permits, weights, page).map(|part| merged.merge(part))
+        let held = permits_of(permits, *module)?;
+        module_router(*module, engine, held, weights, page).map(|part| merged.merge(counted(part, *module)))
     })?;
     Ok((router, access, modules.iter().map(|module| module_document(*module)).collect()))
 }

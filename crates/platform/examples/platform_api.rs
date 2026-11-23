@@ -14,9 +14,9 @@ use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
 use platform::merge::{
-    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, start_only_keys, weights_file_of,
-    ACTOR,
+    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, start_only_keys, weights_file_of, ACTOR,
 };
+use platform::permits::{module_semaphores, start_permits};
 use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
@@ -94,14 +94,13 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         Some(weights_engine) => Some(reload_on_signals(Arc::clone(weights_engine), &[signal_hook::consts::SIGHUP])?),
         None => None,
     };
-    let permits = shared_permits();
-    let held = lease(&engine, &permits).await?;
+    let held = lease(&engine, &start_permits()).await?;
     for (namespace, migrations) in migration_plan(&modules) {
         let applied = migrate(&held.client, namespace, migrations, held.deadline).await?;
         tracing::info!(namespace, applied = applied.len(), "migrations checked");
     }
     drop(held);
-    let (router, access, documents) = module_parts(&modules, &engine, &permits, weights.as_ref(), page.as_ref())?;
+    let (router, access, documents) = module_parts(&modules, &engine, &module_semaphores(&modules), weights.as_ref(), page.as_ref())?;
     tokio::spawn(stop_on_interrupt(listener.clone()));
     let mut startup_reloads = api_startup_reloads(Arc::clone(&engine));
     if let Some(weights_engine) = weights {
