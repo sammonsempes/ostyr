@@ -1,6 +1,6 @@
 use response_playbooks::batch::{dry_run_batch, read_alerts, DryRunLimits};
 use response_playbooks::bundle::{load_bundle, validate_bundle};
-use response_playbooks::render::render_dry_run;
+use response_playbooks::render::write_dry_run;
 use std::env::temp_dir;
 use std::error::Error;
 use std::fs::File;
@@ -55,7 +55,7 @@ fn run(options: &[&str], limits_file: &str, catalogue: &str, inventory: &str, al
         limits,
     )?;
     let mut out = stdout();
-    write!(out, "{}", render_dry_run(&report))?;
+    write_dry_run(&mut out, &report)?;
     notice(&mut out, file.too_long, "line(s) over the line bound were discarded, unparsed")?;
     notice(&mut out, file.refused, "line(s) refused by the shape bounds before parsing")?;
     notice(&mut out, file.unreadable, "line(s) were not JSON and are skipped")?;

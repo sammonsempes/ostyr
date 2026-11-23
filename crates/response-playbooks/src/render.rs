@@ -1,6 +1,7 @@
 use crate::batch::{AlertRun, DryRunReport};
 use crate::model::{ConditionOutcome, Mode, Trace, TraceEvent};
 use crate::types::ParamMap;
+use std::io::{self, Write};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
@@ -33,6 +34,12 @@ pub fn action_name(connector: Option<&str>, action: &str) -> String {
 }
 
 
+/// The text between double quotes, a backslash and a quote escaped, so no value runs into the words around it.
+pub fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace(BACKSLASH, "\\\\").replace('"', "\\\""))
+}
+
+
 pub fn event_line(event: &TraceEvent) -> String {
     match event {
         TraceEvent::Trigger { matched: true, .. } => "trigger matched".to_owned(),
@@ -57,7 +64,7 @@ pub fn event_line(event: &TraceEvent) -> String {
             params_text(params)
         ),
         TraceEvent::NotRun { path, step } => format!("halted {path} {step}: not run"),
-        TraceEvent::UnknownAsset { path, id } => format!("unknown asset {path} {id}: not in the inventory, treated as protected"),
+        TraceEvent::UnknownAsset { path, id } => format!("unknown asset {path} {}: not in the inventory, treated as protected", quoted(id)),
         TraceEvent::Halted { path } => format!("halted {path}: waiting for approval, on-call alert raised"),
         TraceEvent::Failure { path, action } => format!("failure simulated {path} {action}"),
         TraceEvent::ActionFailed { path, action, reason } => format!("failure {path} {action}: {reason}"),
@@ -125,8 +132,7 @@ pub fn alert_block(run: &AlertRun) -> String {
 }
 
 
-/// Plain text, one block per alert (a trace per matching playbook), then every bound that was hit; nothing was executed.
-pub fn render_dry_run(report: &DryRunReport) -> String {
+pub fn header(report: &DryRunReport) -> String {
     let refused = report
         .tenant_refused
         .then(|| "dry run refused: the batch tenant is not a valid tenant name\n".to_owned());
@@ -136,9 +142,18 @@ pub fn render_dry_run(report: &DryRunReport) -> String {
         report.alerts_not_run,
         report.trace_events
     );
-    refused
-        .into_iter()
-        .chain(std::iter::once(summary))
-        .chain(report.alerts.iter().map(alert_block))
-        .collect()
+    refused.into_iter().chain(std::iter::once(summary)).collect()
+}
+
+
+/// Plain text, one block per alert (a trace per matching playbook), then every bound that was hit; nothing was executed.
+pub fn render_dry_run(report: &DryRunReport) -> String {
+    std::iter::once(header(report)).chain(report.alerts.iter().map(alert_block)).collect()
+}
+
+
+/// The same text as `render_dry_run`, written one alert block at a time so the whole output is never held.
+pub fn write_dry_run(out: &mut impl Write, report: &DryRunReport) -> io::Result<()> {
+    out.write_all(header(report).as_bytes())?;
+    report.alerts.iter().try_for_each(|run| out.write_all(alert_block(run).as_bytes()))
 }

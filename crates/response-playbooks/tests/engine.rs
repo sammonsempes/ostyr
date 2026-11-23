@@ -821,7 +821,7 @@ fn probe_three_protection_comes_from_the_inventory_not_from_the_alert() -> TestR
     assert!(!known.contains("unknown asset"), "{known}");
     let ghost = probe_trace(ISOLATE_HOST, r#"{ "host": { "value": "ghost" } }"#, &[])?;
     assert!(
-        ghost.contains("unknown asset steps.0 ghost: not in the inventory, treated as protected"),
+        ghost.contains("unknown asset steps.0 \"ghost\": not in the inventory, treated as protected"),
         "{ghost}"
     );
     assert!(ghost.contains("breakers=needs-approval") && ghost.contains("halted steps.0"), "{ghost}");
@@ -846,7 +846,7 @@ fn accounts_are_looked_up_in_the_inventory_too() -> TestResult {
     assert!(disable(r#"{ "user": { "value": "bob" } }"#)?.contains("breakers=allowed"));
     let ghost = disable(r#"{ "user": { "value": "ghost" } }"#)?;
     assert!(
-        ghost.contains("unknown asset steps.0 ghost") && ghost.contains("protected target tagged `privileged`"),
+        ghost.contains("unknown asset steps.0 \"ghost\"") && ghost.contains("protected target tagged `privileged`"),
         "{ghost}"
     );
     Ok(())

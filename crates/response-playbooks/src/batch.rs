@@ -64,6 +64,9 @@ pub enum SkipReason {
     TooManyNodes,
     TooMuchText,
     OtherTenant,
+    TooLong,
+    Unreadable,
+    DuplicateKey,
 }
 
 
@@ -75,6 +78,9 @@ impl fmt::Display for SkipReason {
             Self::TooManyNodes => write!(formatter, "more than {MAX_ALERT_NODES} values"),
             Self::TooMuchText => write!(formatter, "more than {MAX_ALERT_TEXT_BYTES} bytes of keys and strings"),
             Self::OtherTenant => write!(formatter, "tenant field differs from the batch tenant"),
+            Self::TooLong => write!(formatter, "line longer than {MAX_ALERT_BYTES} bytes, discarded unparsed"),
+            Self::Unreadable => write!(formatter, "line is not JSON"),
+            Self::DuplicateKey => write!(formatter, "duplicate_key: an object repeats a key"),
         }
     }
 }
@@ -108,30 +114,30 @@ pub struct Frontier<'a> {
 }
 
 
-pub struct Progress {
-    pub traces: Vec<Trace>,
-    pub used: usize,
-    pub omitted: usize,
-    pub over_budget: usize,
+struct Progress {
+    traces: Vec<Trace>,
+    used: usize,
+    omitted: usize,
+    over_budget: usize,
 }
 
 
-pub struct Spent {
-    pub runs: Vec<AlertRun>,
-    pub events: usize,
+struct Spent {
+    runs: Vec<AlertRun>,
+    events: usize,
 }
 
 
-pub struct Batch<'a> {
-    pub bundle: &'a Bundle,
-    pub breakers: &'a Breakers,
-    pub tenant: &'a str,
-    pub limits: DryRunLimits,
+struct Batch<'a> {
+    bundle: &'a Bundle,
+    breakers: &'a Breakers,
+    tenant: &'a str,
+    limits: DryRunLimits,
 }
 
 
 pub struct AlertFile {
-    pub alerts: Vec<Value>,
+    pub alerts: Vec<Line>,
     pub too_long: usize,
     pub refused: usize,
     pub unreadable: usize,
@@ -140,12 +146,14 @@ pub struct AlertFile {
 }
 
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum Line {
     Alert(Value),
-    TooLong,
-    Refused(SkipReason),
-    Unreadable,
+    Skipped(SkipReason),
 }
+
+
+static NO_ALERT: Value = Value::Null;
 
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -156,6 +164,8 @@ pub struct Scan {
     pub deepest: usize,
     pub nodes: usize,
     pub text: usize,
+    pub keys: usize,
+    pub after_string: bool,
 }
 
 
@@ -243,7 +253,7 @@ pub fn request_id(position: usize, alert: &Value) -> String {
 
 
 /// One simulation, its events cut to what is left of the batch budget; the cut is counted.
-pub fn simulate_within(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &SimulationInput, progress: Progress) -> Progress {
+fn simulate_within(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &SimulationInput, progress: Progress) -> Progress {
     let trace = simulate(&loaded.playbook, &batch.bundle.catalogue, &batch.bundle.inventory, batch.breakers, input);
     let room = batch.limits.max_trace_events.saturating_sub(progress.used);
     let kept = trace.events.len().min(room);
@@ -262,7 +272,7 @@ pub fn simulate_within(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &Simul
 }
 
 
-pub fn step(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &SimulationInput, progress: Progress) -> Progress {
+fn step(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &SimulationInput, progress: Progress) -> Progress {
     if progress.used >= batch.limits.max_trace_events {
         Progress {
             over_budget: progress.over_budget + 1,
@@ -274,8 +284,14 @@ pub fn step(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &SimulationInput,
 }
 
 
-pub fn run_alert(batch: &Batch<'_>, spent: Spent, position: usize, alert: &Value) -> Spent {
-    let skipped = refusal(alert).or_else(|| foreign_tenant(alert, batch.tenant).then_some(SkipReason::OtherTenant));
+fn run_alert(batch: &Batch<'_>, spent: Spent, position: usize, line: &Line) -> Spent {
+    let (alert, skipped) = match line {
+        Line::Alert(alert) => (
+            alert,
+            refusal(alert).or_else(|| foreign_tenant(alert, batch.tenant).then_some(SkipReason::OtherTenant)),
+        ),
+        Line::Skipped(reason) => (&NO_ALERT, Some(*reason)),
+    };
     let matching: Vec<&LoadedPlaybook> = batch
         .bundle
         .playbooks
@@ -333,7 +349,7 @@ pub fn scratch_breakers(limits_file: &Path, scratch_parent: &Path) -> Result<Scr
 }
 
 
-pub fn run_batch(bundle: &Bundle, breakers: &Breakers, tenant: &str, alerts: &[Value], limits: DryRunLimits) -> DryRunReport {
+fn run_batch(bundle: &Bundle, breakers: &Breakers, tenant: &str, alerts: &[Line], limits: DryRunLimits) -> DryRunReport {
     let batch = Batch {
         bundle,
         breakers,
@@ -356,13 +372,13 @@ pub fn run_batch(bundle: &Bundle, breakers: &Breakers, tenant: &str, alerts: &[V
 }
 
 
-#[doc = "Simulates, never executes: every playbook whose trigger matches, for every alert, in input order. One batch is one tenant.\n\nIt takes the limits file and a directory for its scratch state, never a live `Breakers`, and no `Executor`:\n\n```compile_fail,E0061\nfn call(bundle: &response_playbooks::bundle::Bundle, limits: response_playbooks::batch::DryRunLimits, executor: response_playbooks::model::Executor) {\n    let _ = response_playbooks::batch::dry_run_batch(bundle, std::path::Path::new(\"limits.yaml\"), std::path::Path::new(\".\"), \"acme\", &[], limits, executor);\n}\n```\n"]
+#[doc = "Simulates, never executes: every playbook whose trigger matches, for every alert, in input order. One batch is one tenant.\n\nIt takes the limits file and a directory for its scratch state, never a live `Breakers`, and no `Executor`:\n\n```compile_fail,E0061\nfn call(bundle: &response_playbooks::bundle::Bundle, limits: response_playbooks::batch::DryRunLimits, executor: response_playbooks::model::Executor) {\n    let _ = response_playbooks::batch::dry_run_batch(bundle, std::path::Path::new(\"limits.yaml\"), std::path::Path::new(\".\"), \"acme\", &[], limits, executor);\n}\n```\n\nThe runner under it is private, so a caller's live `Breakers` has no way in:\n\n```compile_fail,E0603\nfn call(bundle: &response_playbooks::bundle::Bundle, breakers: &response_breakers::breakers::Breakers, limits: response_playbooks::batch::DryRunLimits) {\n    let _ = response_playbooks::batch::run_batch(bundle, breakers, \"acme\", &[], limits);\n}\n```\n"]
 pub fn dry_run_batch(
     bundle: &Bundle,
     limits_file: &Path,
     scratch_parent: &Path,
     tenant: &str,
-    alerts: &[Value],
+    alerts: &[Line],
     limits: DryRunLimits,
 ) -> Result<DryRunReport, DryRunError> {
     let tenant_refused = tenant_scope(tenant).is_err();
@@ -379,7 +395,7 @@ pub fn dry_run_batch(
 }
 
 
-pub fn scan_byte(state: Scan, byte: u8) -> Scan {
+fn shape_byte(state: Scan, byte: u8) -> Scan {
     match (state.in_string, state.escaped, byte) {
         (true, true, _) => Scan {
             escaped: false,
@@ -416,6 +432,35 @@ pub fn scan_byte(state: Scan, byte: u8) -> Scan {
 }
 
 
+pub fn scan_byte(state: Scan, byte: u8) -> Scan {
+    let closing = state.in_string && !state.escaped && byte == b'"';
+    let key = state.after_string && byte == b':';
+    let after_string = closing || (state.after_string && byte.is_ascii_whitespace());
+    Scan {
+        keys: state.keys + usize::from(key),
+        after_string,
+        ..shape_byte(state, byte)
+    }
+}
+
+
+/// Strings followed by a colon on the raw bytes of a valid JSON line: every key, a repeated one counted each time.
+pub fn raw_keys(line: &[u8]) -> usize {
+    line.iter().fold(Scan::default(), |state, byte| scan_byte(state, *byte)).keys
+}
+
+
+/// Keys of the parsed value, a repeated key counted once: fewer than `raw_keys` means the line repeated a key.
+pub fn value_keys(alert: &Value) -> usize {
+    (0..=MAX_ALERT_DEPTH)
+        .fold((vec![alert], 0), |(level, keys), _| {
+            let found = level.iter().map(|value| value.as_object().map_or(0, serde_json::Map::len)).sum::<usize>();
+            (level.iter().flat_map(|value| children(value)).collect(), keys + found)
+        })
+        .1
+}
+
+
 /// The shape bounds on the raw bytes of one line, before any `Value` exists: depth, values (openers and commas, over-counted) and key and string bytes.
 pub fn shape_refusal(line: &[u8]) -> Option<SkipReason> {
     let scan = line.iter().fold(Scan::default(), |state, byte| scan_byte(state, *byte));
@@ -433,11 +478,22 @@ pub fn shape_refusal(line: &[u8]) -> Option<SkipReason> {
 }
 
 
+pub fn parsed(buffer: &[u8]) -> Line {
+    serde_json::from_slice::<Value>(buffer).map_or(Line::Skipped(SkipReason::Unreadable), |alert| {
+        if value_keys(&alert) == raw_keys(buffer) {
+            Line::Alert(alert)
+        } else {
+            Line::Skipped(SkipReason::DuplicateKey)
+        }
+    })
+}
+
+
 pub fn classify(buffer: &[u8], too_long: bool) -> Line {
     if too_long {
-        Line::TooLong
+        Line::Skipped(SkipReason::TooLong)
     } else {
-        shape_refusal(buffer).map_or_else(|| serde_json::from_slice(buffer).map_or(Line::Unreadable, Line::Alert), Line::Refused)
+        shape_refusal(buffer).map_or_else(|| parsed(buffer), Line::Skipped)
     }
 }
 
@@ -467,15 +523,27 @@ pub fn count_unread(input: &mut dyn BufRead, max_scan: usize) -> io::Result<usiz
 }
 
 
-pub fn into_value(line: &Line) -> Value {
-    match line {
-        Line::Alert(alert) => alert.clone(),
-        _ => Value::Null,
-    }
+pub fn count_skipped(lines: &[Line], cause: fn(&SkipReason) -> bool) -> usize {
+    lines.iter().filter(|line| matches!(line, Line::Skipped(reason) if cause(reason))).count()
 }
 
 
-/// At most `max_alerts` lines are read; a line that is not an alert stays as a `null` placeholder so positions hold, and is counted by cause.
+pub fn is_too_long(reason: &SkipReason) -> bool {
+    matches!(reason, SkipReason::TooLong)
+}
+
+
+pub fn is_unreadable(reason: &SkipReason) -> bool {
+    matches!(reason, SkipReason::Unreadable)
+}
+
+
+pub fn is_refused(reason: &SkipReason) -> bool {
+    !is_too_long(reason) && !is_unreadable(reason)
+}
+
+
+/// At most `max_alerts` lines are read, each kept once: a line that is not an alert keeps its cause, so positions hold and each is counted.
 pub fn read_alerts(input: &mut dyn BufRead, max_alerts: usize, max_scan: usize) -> io::Result<AlertFile> {
     let lines = (0..max_alerts)
         .map_while(|_| next_line(&mut *input).transpose())
@@ -483,11 +551,11 @@ pub fn read_alerts(input: &mut dyn BufRead, max_alerts: usize, max_scan: usize) 
     let unread = count_unread(&mut *input, max_scan)?;
     let unread_more = !input.fill_buf()?.is_empty();
     Ok(AlertFile {
-        alerts: lines.iter().map(into_value).collect(),
-        too_long: lines.iter().filter(|line| matches!(line, Line::TooLong)).count(),
-        refused: lines.iter().filter(|line| matches!(line, Line::Refused(_))).count(),
-        unreadable: lines.iter().filter(|line| matches!(line, Line::Unreadable)).count(),
+        too_long: count_skipped(&lines, is_too_long),
+        refused: count_skipped(&lines, is_refused),
+        unreadable: count_skipped(&lines, is_unreadable),
         unread,
         unread_more,
+        alerts: lines,
     })
 }
