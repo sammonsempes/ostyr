@@ -1,8 +1,8 @@
 use crate::support::{fakes_with, forbidden_spawn, hold_script, owner_of, private_tempdir, Fakes};
 use crate::types::TestResult;
 use agent_shell::account::{
-    groups_in, lookup_in, primary_in, read_databases, read_databases_at, resolve_account, resolve_in, stat_home, Databases, GroupEntry, HomeFacts,
-    PrimaryGroup,
+    groups_in, lookup_in, primary_in, read_database, read_databases, read_databases_at, resolve_account, resolve_in, stat_home, Databases,
+    GroupEntry, HomeFacts, PrimaryGroup, MAX_DATABASE_BYTES,
 };
 use agent_shell::compose::production_env;
 use agent_shell::error::AccountError;
@@ -293,5 +293,21 @@ fn the_primary_group_is_read_from_both_texts_and_every_malformed_line_refuses() 
                 Err(format!("accepted {bad}"))
             }
         })?;
+    Ok(())
+}
+
+
+#[test]
+fn a_database_over_the_cap_is_refused_by_name() -> TestResult {
+    let directory = private_tempdir()?;
+    let path = directory.path().join("passwd");
+    let file = std::fs::File::create(&path)?;
+    file.set_len(MAX_DATABASE_BYTES)?;
+    assert_eq!(read_database(&path)?.len(), usize::try_from(MAX_DATABASE_BYTES)?);
+    file.set_len(MAX_DATABASE_BYTES + 1)?;
+    let refusal = read_database(&path).err().ok_or("accepted")?;
+    assert_eq!(refusal.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(refusal.to_string(), "the account database is larger than its limit");
+    assert!(read_databases_at(&path, &path).is_err());
     Ok(())
 }
