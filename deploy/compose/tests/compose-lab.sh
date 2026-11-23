@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: deploy/compose/tests/compose-lab.sh <task-id>
-# Live proof inside a booted ubuntu-single lab (LAB_PROFILE=ubuntu-single lab/up.sh <task-id>), never on the host: Docker and the compose plugin come
-# from the Ubuntu archive through the lab proxy. Needs target/deploy-compose/image from deploy/compose/build.sh.
+# Live proof inside a booted ubuntu-docker lab (LAB_PROFILE=ubuntu-docker lab/up.sh <task-id>), never on the host: the image holds Docker, the compose
+# plugin and openssl (the daemon is restarted to read the proxy drop-in cloud-init writes after it started); on another profile they are installed from the Ubuntu archive through the lab proxy. Needs target/deploy-compose/image from deploy/compose/build.sh.
 set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,7 +108,8 @@ remote "sudo rm -rf compose image && sudo mkdir -p compose image"
 copy_into_vm "$COMPOSE_DIR" compose --exclude=secrets
 remote "sudo chown -R root:root compose && sudo chmod -R go-w compose"
 copy_into_vm "$IMAGE_DIR" image
-remote "command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 openssl" >/dev/null
+remote "command -v docker >/dev/null && command -v openssl >/dev/null && docker compose version >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 openssl" >/dev/null
+remote "sudo systemctl daemon-reload && sudo systemctl restart docker" >/dev/null
 remote "cd image && sudo docker build -t ostyr-platform:local ."
 
 expect "init.sh refuses a name starting with a dash before writing" absent remote "cd compose && sudo ./init.sh -x"

@@ -1,0 +1,6 @@
+egress: proxy
+vms:
+  - name: ubuntu
+    base_image: ubuntu-docker.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
