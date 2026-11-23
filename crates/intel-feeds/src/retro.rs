@@ -134,6 +134,8 @@ pub enum Direction {
 #[serde(deny_unknown_fields)]
 pub struct RetroRow {
     pub indicator: String,
+    pub feed: String,
+    pub tlp: String,
     pub matched_ip: String,
     pub direction: Direction,
     pub host: String,
@@ -150,6 +152,8 @@ pub struct RetroRow {
 pub struct MatchGroup {
     pub tenant: String,
     pub indicator: String,
+    pub feed: String,
+    pub tlp: String,
     pub matched_ip: String,
     pub direction: Direction,
     pub host: String,
@@ -274,12 +278,13 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
             not_an_ip_count("destination.ip")
         ),
         matches: format!(
-            "SELECT dictGet('{dictionary}', 'indicator', `key`) AS `indicator`, IPv6NumToString(`key`) AS `matched_ip`, `direction`, \
+            "SELECT dictGet('{dictionary}', 'indicator', `key`) AS `indicator`, dictGet('{dictionary}', 'feed', `key`) AS `feed`, \
+             dictGet('{dictionary}', 'tlp', `key`) AS `tlp`, IPv6NumToString(`key`) AS `matched_ip`, `direction`, \
              substringUTF8(`event_host`, 1, {RETRO_HOST_CHARS}) AS `host`, toUInt8(lengthUTF8(`event_host`) > {RETRO_HOST_CHARS}) AS `host_was_cut`, \
              toString(toDate(`ts`, 'UTC')) AS `event_day`, toUInt8(dictGet('{dictionary}', 'tenant', `key`) != {{tenant:String}}) AS `foreign`, \
              toUInt32(count()) AS `matches`, toUInt32(toUnixTimestamp(min(`ts`))) AS `first_time`, toUInt32(toUnixTimestamp(max(`ts`))) AS `last_time` \
              FROM ({} UNION ALL {}) WHERE dictHas('{dictionary}', `key`) \
-             GROUP BY `indicator`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
+             GROUP BY `indicator`, `feed`, `tlp`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
              ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}}{match_pins} FORMAT JSONEachRow",
             direction_select(&events, "source", "source.ip"),
             direction_select(&events, "destination", "destination.ip")
@@ -430,6 +435,8 @@ pub fn group_of(row: RetroRow, tenant: &str) -> Result<MatchGroup, RetroError> {
     Ok(MatchGroup {
         tenant: tenant.to_owned(),
         indicator: row.indicator,
+        feed: row.feed,
+        tlp: row.tlp,
         matched_ip: row.matched_ip,
         direction: row.direction,
         host: row.host,

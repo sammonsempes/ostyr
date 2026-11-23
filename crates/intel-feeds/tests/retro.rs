@@ -254,6 +254,8 @@ fn failing(code: u32, status: StatusCode) -> Result<RetroReply, InsertClass> {
 fn row_json(indicator: &str, ip: &str, host: &str, foreign: u8, first: u32) -> String {
     json!({
         "indicator": indicator,
+        "feed": "feed-one",
+        "tlp": "amber",
         "matched_ip": ip,
         "direction": "source",
         "host": host,
@@ -365,12 +367,13 @@ fn the_statements_are_exact_and_carry_no_tenant_or_time_text() -> TestResult {
     assert_eq!(
         found.matches,
         format!(
-            "SELECT dictGet('ostyr.ioc_trie', 'indicator', `key`) AS `indicator`, IPv6NumToString(`key`) AS `matched_ip`, `direction`, \
+            "SELECT dictGet('ostyr.ioc_trie', 'indicator', `key`) AS `indicator`, dictGet('ostyr.ioc_trie', 'feed', `key`) AS `feed`, \
+             dictGet('ostyr.ioc_trie', 'tlp', `key`) AS `tlp`, IPv6NumToString(`key`) AS `matched_ip`, `direction`, \
              substringUTF8(`event_host`, 1, 256) AS `host`, toUInt8(lengthUTF8(`event_host`) > 256) AS `host_was_cut`, \
              toString(toDate(`ts`, 'UTC')) AS `event_day`, toUInt8(dictGet('ostyr.ioc_trie', 'tenant', `key`) != {{tenant:String}}) AS `foreign`, \
              toUInt32(count()) AS `matches`, toUInt32(toUnixTimestamp(min(`ts`))) AS `first_time`, toUInt32(toUnixTimestamp(max(`ts`))) AS `last_time` \
              FROM ({} UNION ALL {}) WHERE dictHas('ostyr.ioc_trie', `key`) \
-             GROUP BY `indicator`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
+             GROUP BY `indicator`, `feed`, `tlp`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
              ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}}{} FORMAT JSONEachRow",
             direction("source", "source.ip"),
             direction("destination", "destination.ip"),
@@ -525,6 +528,8 @@ fn matches_become_groups_with_the_summary() -> TestResult {
         Some(&MatchGroup {
             tenant: "tenant-a".to_owned(),
             indicator: "203.0.113.0/24".to_owned(),
+            feed: "feed-one".to_owned(),
+            tlp: "amber".to_owned(),
             matched_ip: "::ffff:203.0.113.9".to_owned(),
             direction: Direction::Source,
             host: "web-1".to_owned(),

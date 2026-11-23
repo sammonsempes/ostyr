@@ -172,3 +172,24 @@ pub const MAX_RETRO_SCALAR_BYTES: u64 = 64;
 
 
 pub const RETRO_HOST_CHARS: usize = 256;
+
+
+pub const MIN_RETRO_INTERVAL_SECONDS: u64 = 60;
+
+
+pub const MAX_RETRO_INTERVAL_SECONDS: u64 = 86_400;
+
+
+pub const DEFAULT_RETRO_MARGIN_SECONDS: u64 = 300;
+
+
+pub const MAX_RETRO_MARGIN_SECONDS: u64 = 3_600;
+
+
+pub const MAX_RETRO_WINDOW_SECONDS: u64 = 604_800;
+
+
+pub const NANOS_PER_MICRO: i128 = 1_000;
+
+
+pub const MAX_PG_SETTINGS_BYTES: usize = 4_096;
