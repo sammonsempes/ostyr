@@ -13,6 +13,8 @@ cap-std = "3"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 core-api = { version = "0.0.0", path = "../core-api" }
+core-audit = { version = "0.0.0", path = "../core-audit" }
+core-auth = { version = "0.0.0", path = "../core-auth" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 getrandom = "0.4.3"
@@ -38,8 +40,6 @@ webpki-roots = "1"
 zeroize = "1"
 
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
-core-auth = { version = "0.0.0", path = "../core-auth" }
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

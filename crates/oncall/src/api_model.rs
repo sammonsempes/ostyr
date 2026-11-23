@@ -1,5 +1,6 @@
-use crate::types::{GetFn, ListFn};
+use crate::types::{ApplyFn, GetFn, ListFn, NowFn};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use utoipa::{IntoParams, ToSchema};
 
 
@@ -8,6 +9,8 @@ use utoipa::{IntoParams, ToSchema};
 pub struct OncallBackend {
     pub list: ListFn,
     pub get: GetFn,
+    pub apply: ApplyFn,
+    pub clock: NowFn,
 }
 
 
@@ -19,6 +22,18 @@ pub struct ListQuery {
     /// Number of alerts, 1 to 1000, default 50.
     pub limit: Option<String>,
 }
+
+
+/// A value no key can hold: deserialising it always fails.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub enum NoField {}
+
+
+/// The body of an acknowledge or resolve: the empty JSON object only; any key and a JSON array are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = Object)]
+pub struct ChangeRequest(pub BTreeMap<String, NoField>);
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
