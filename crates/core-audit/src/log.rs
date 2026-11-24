@@ -19,7 +19,6 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
-use std::time::Duration;
 
 
 #[derive(Debug)]
@@ -30,10 +29,18 @@ pub struct LogState<Output> {
 }
 
 
+/// What a queued entry's caller waits for: its outcome, or the token that makes it the next leader.
+#[derive(Debug, Default)]
+pub struct SlotState {
+    pub outcome: Option<Result<Record, AuditError>>,
+    pub promoted: bool,
+}
+
+
 /// Where a queued entry's outcome is left, with a signal for the caller that waits for it.
 #[derive(Debug, Default)]
 pub struct SlotCell {
-    pub outcome: Mutex<Option<Result<Record, AuditError>>>,
+    pub state: Mutex<SlotState>,
     pub ready: Condvar,
 }
 
@@ -399,74 +406,131 @@ pub fn continue_log(file: File) -> Result<AuditLog<File>, AuditError> {
 pub const MAX_GROUP_RECORDS: usize = 256;
 
 
-pub const MAX_APPEND_ATTEMPTS: usize = 1_000_000;
+pub const MAX_LEAD_ROUNDS: usize = 1_000_000;
 
 
 /// Queues the entry; whoever holds the writer lock seals, writes and syncs a group of queued entries once. Returns only after the sync covering this record.
 pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
-    append_bounded(log, entry, MAX_APPEND_ATTEMPTS)
-}
-
-
-/// `append` with a cap on the lock rounds; an entry still queued when the cap ends is withdrawn, never written unacknowledged.
-pub fn append_bounded<Output: Write>(log: &AuditLog<Output>, entry: NewEntry, attempts: usize) -> Result<Record, AuditError> {
     let slot: Slot = Arc::new(SlotCell::default());
     log.pending.lock().map_err(|_| AuditError::LogPoisoned)?.push(Pending {
         entry,
         slot: Arc::clone(&slot),
     });
-    let outcome = (0..attempts)
-        .find_map(|_| commit_round(log, &slot))
-        .unwrap_or(Err(AuditError::LogPoisoned));
-    withdraw(log, &slot);
-    outcome
-}
-
-
-pub const WAIT_SLICE: Duration = Duration::from_millis(1);
-
-
-/// One turn: lead a group when the writer lock is free, else wait a slice for the leader to finish this entry.
-pub fn commit_round<Output: Write>(log: &AuditLog<Output>, slot: &Slot) -> Option<Result<Record, AuditError>> {
     match log.state.try_lock() {
-        Ok(mut state) => take_outcome(slot).or_else(|| {
-            flush_group(log, &mut state);
-            take_outcome(slot)
-        }),
-        Err(TryLockError::Poisoned(_)) => Some(Err(AuditError::LogPoisoned)),
-        Err(TryLockError::WouldBlock) => wait_outcome(slot),
+        Ok(state) => lead(log, state, &slot),
+        Err(TryLockError::Poisoned(_)) => poisoned_outcome(log, &slot),
+        Err(TryLockError::WouldBlock) => follow(log, &slot),
     }
 }
 
 
-pub fn take_outcome(slot: &Slot) -> Option<Result<Record, AuditError>> {
-    slot.outcome.lock().unwrap_or_else(PoisonError::into_inner).take()
+/// Waits with no timeout for the leader to fill the slot; a promoted follower takes the writer lock and leads the next groups.
+pub fn follow<Output: Write>(log: &AuditLog<Output>, slot: &Slot) -> Result<Record, AuditError> {
+    match await_slot(slot) {
+        Some(outcome) => outcome,
+        None => match log.state.lock() {
+            Ok(state) => lead(log, state, slot),
+            Err(_) => poisoned_outcome(log, slot),
+        },
+    }
 }
 
 
-/// Waits at most `WAIT_SLICE` for the entry's outcome; the writer lock is not needed to learn it.
-pub fn wait_outcome(slot: &Slot) -> Option<Result<Record, AuditError>> {
-    let guard = slot.outcome.lock().unwrap_or_else(PoisonError::into_inner);
-    let (mut waited, _timeout) = slot
-        .ready
-        .wait_timeout_while(guard, WAIT_SLICE, |outcome| outcome.is_none())
-        .unwrap_or_else(PoisonError::into_inner);
-    waited.take()
+/// Flushes groups until the leader's own entry is answered, then hands the lead to the oldest entry still queued.
+pub fn lead<Output: Write>(log: &AuditLog<Output>, mut state: MutexGuard<'_, LogState<Output>>, slot: &Slot) -> Result<Record, AuditError> {
+    (0..MAX_LEAD_ROUNDS).any(|_| {
+        flush_group(log, &mut state);
+        answered(slot)
+    });
+    drop(state);
+    hand_off(log);
+    wait_outcome(slot)
 }
 
 
-pub fn fill_slot(slot: &Slot, outcome: Result<Record, AuditError>) {
-    *slot.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+pub fn answered(slot: &Slot) -> bool {
+    slot.state.lock().unwrap_or_else(PoisonError::into_inner).outcome.is_some()
+}
+
+
+/// Wakes the oldest queued entry's caller to lead: an entry queued after the last leader took its group is never left without one.
+pub fn hand_off<Output>(log: &AuditLog<Output>) {
+    let queue = log.pending.lock().unwrap_or_else(PoisonError::into_inner);
+    queue.first().iter().for_each(|pending| promote(&pending.slot));
+}
+
+
+pub fn promote(slot: &Slot) {
+    slot.state.lock().unwrap_or_else(PoisonError::into_inner).promoted = true;
     slot.ready.notify_all();
 }
 
 
-/// Removes a still queued entry: after the cap or a poisoned writer lock nothing may write it later.
-pub fn withdraw<Output>(log: &AuditLog<Output>, slot: &Slot) {
-    log.pending
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .retain(|pending| !Arc::ptr_eq(&pending.slot, slot));
+/// A panicked writer lock: every queued entry is refused, the entry in the dead leader's group was refused by its guard.
+pub fn poisoned_outcome<Output>(log: &AuditLog<Output>, slot: &Slot) -> Result<Record, AuditError> {
+    fail_pending(log);
+    wait_outcome(slot)
+}
+
+
+pub fn fail_pending<Output>(log: &AuditLog<Output>) {
+    let queue: Vec<Pending> = log.pending.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect();
+    queue.iter().for_each(|pending| fill_slot(&pending.slot, Err(AuditError::LogPoisoned)));
+}
+
+
+/// Refuses the group's callers when the leader panics inside the writer, so no follower waits for an answer that cannot come.
+pub struct InFlight<'log, Output> {
+    pub log: &'log AuditLog<Output>,
+    pub slots: Vec<Slot>,
+}
+
+
+impl<Output> Drop for InFlight<'_, Output> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.slots.iter().for_each(|slot| fill_slot(slot, Err(AuditError::LogPoisoned)));
+            fail_pending(self.log);
+        }
+    }
+}
+
+
+/// `Some(outcome)` once the entry is answered, `None` when the caller is promoted to lead; no timeout, the leader notifies the slot.
+pub fn await_slot(slot: &Slot) -> Option<Result<Record, AuditError>> {
+    let guard = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut waited = slot
+        .ready
+        .wait_while(guard, |state| state.outcome.is_none() && !state.promoted)
+        .unwrap_or_else(PoisonError::into_inner);
+    if waited.promoted {
+        waited.promoted = false;
+        None
+    } else {
+        Some(waited.outcome.take().unwrap_or(Err(AuditError::LogPoisoned)))
+    }
+}
+
+
+/// The entry's outcome, once a leader or a poisoned-log refusal has left one.
+pub fn wait_outcome(slot: &Slot) -> Result<Record, AuditError> {
+    let guard = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut waited = slot
+        .ready
+        .wait_while(guard, |state| state.outcome.is_none())
+        .unwrap_or_else(PoisonError::into_inner);
+    waited.outcome.take().unwrap_or(Err(AuditError::LogPoisoned))
+}
+
+
+pub fn take_outcome(slot: &Slot) -> Option<Result<Record, AuditError>> {
+    slot.state.lock().unwrap_or_else(PoisonError::into_inner).outcome.take()
+}
+
+
+pub fn fill_slot(slot: &Slot, outcome: Result<Record, AuditError>) {
+    slot.state.lock().unwrap_or_else(PoisonError::into_inner).outcome = Some(outcome);
+    slot.ready.notify_all();
 }
 
 
@@ -480,11 +544,16 @@ pub fn take_group<Output>(log: &AuditLog<Output>) -> Vec<Pending> {
 /// Seals each queued entry against the file it lands in, writes the lines, then syncs once for the whole group.
 pub fn flush_group<Output: Write>(log: &AuditLog<Output>, state: &mut MutexGuard<'_, LogState<Output>>) {
     let group = take_group(log);
+    let in_flight = InFlight {
+        log,
+        slots: group.iter().map(|pending| Arc::clone(&pending.slot)).collect(),
+    };
     if state.poisoned {
         group.iter().for_each(|pending| fill_slot(&pending.slot, Err(AuditError::LogPoisoned)));
     } else {
         commit_group(log.sync, state, group);
     }
+    drop(in_flight);
 }
 
 
