@@ -27,6 +27,8 @@ readonly GARAGE_CAPACITY="1G"
 readonly GARAGE_ID_SHORT=16
 readonly SERVICE_USER="ostyr"
 readonly SERVICE_DATABASE="ostyr"
+readonly NATS_ADMIN_USER="admin"
+readonly NATS_STREAM="events"
 readonly DICTIONARY_USER="ostyr_dict"
 readonly DICTIONARY_TABLE="iocs"
 postgres_conf_dir="$(echo /etc/postgresql/*/main/conf.d)"
@@ -68,6 +70,18 @@ else
     s3_access_key="GK$(openssl rand -hex 12)"
     s3_secret_key="$(openssl rand -hex 32)"
 fi
+
+stored_or_new() {
+    local value=""
+    if [[ -s "$LAB_DIR/datastore.env" ]]; then
+        value="$(sed -n "s/^$1=//p" "$LAB_DIR/datastore.env")"
+    fi
+    printf '%s' "${value:-$(openssl rand -hex 16)}"
+}
+nats_gateway_password="$(stored_or_new NATS_GATEWAY_PASSWORD)"
+nats_ingest_password="$(stored_or_new NATS_INGEST_PASSWORD)"
+nats_detection_password="$(stored_or_new NATS_DETECTION_PASSWORD)"
+nats_metrics_password="$(stored_or_new NATS_METRICS_PASSWORD)"
 
 cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
 <clickhouse>
@@ -124,6 +138,54 @@ XML
 chown clickhouse:clickhouse /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
 chmod 640 /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
 
+readonly NATS_JS_PREFIX="JS.EVENTS.API"
+readonly NATS_DEAD_SUBJECT="dead.events"
+readonly NATS_PULL_THRESHOLD="60s"
+readonly NATS_CONSUMERS=("SIEM:siem_ingest:siem-ingest" "DETECTION:detection:detection" "METRICS:metrics_ingest:metrics-ingest")
+
+consumer_exports() {
+    local entry account durable
+    for entry in "${NATS_CONSUMERS[@]}"; do
+        IFS=: read -r account _ durable <<<"$entry"
+        cat <<EXPORTS
+            { service: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable", accounts: [$account] }
+            { service: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable", accounts: [$account], response_type: stream, response_threshold: "$NATS_PULL_THRESHOLD" }
+            { service: "\$JS.ACK.$NATS_STREAM.$durable.>", accounts: [$account] }
+EXPORTS
+    done
+}
+
+consumer_account() {
+    local account="$1" user="$2" password="$3" durable="$4"
+    cat <<ACCOUNT
+    $account {
+        users: [
+            {
+                user: $user
+                password: "$password"
+                permissions: {
+                    publish: {
+                        allow: [
+                            "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable"
+                            "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable"
+                            "\$JS.ACK.$NATS_STREAM.$durable.>"
+                            "$NATS_DEAD_SUBJECT"
+                        ]
+                    }
+                    subscribe: { allow: ["_INBOX_$user.>"] }
+                }
+            }
+        ]
+        imports: [
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.ACK.$NATS_STREAM.$durable.>" } }
+            { service: { account: EVENTS, subject: "$NATS_DEAD_SUBJECT" } }
+        ]
+    }
+ACCOUNT
+}
+
 install -d -m 750 -o nats -g nats /var/lib/nats
 cat >/etc/nats/nats.conf <<CONF
 server_name: ostyr-datastore
@@ -138,9 +200,39 @@ tls {
     ca_file: $LAB_DIR/ca.pem
     handshake_first: true
 }
-authorization {
-    user: $SERVICE_USER
-    password: "$nats_password"
+accounts {
+    EVENTS {
+        jetstream: enabled
+        users: [
+            {
+                user: $NATS_ADMIN_USER
+                password: "$nats_password"
+            }
+        ]
+        exports: [
+            { service: "events.*", accounts: [GATEWAY] }
+            { service: "$NATS_DEAD_SUBJECT", accounts: [SIEM, DETECTION, METRICS] }
+$(consumer_exports)
+        ]
+    }
+    GATEWAY {
+        users: [
+            {
+                user: gateway
+                password: "$nats_gateway_password"
+                permissions: {
+                    publish: { allow: ["events.*"] }
+                    subscribe: { allow: ["_INBOX_gateway.>"] }
+                }
+            }
+        ]
+        imports: [
+            { service: { account: EVENTS, subject: "events.*" } }
+        ]
+    }
+$(consumer_account SIEM siem_ingest "$nats_ingest_password" siem-ingest)
+$(consumer_account DETECTION detection "$nats_detection_password" detection)
+$(consumer_account METRICS metrics_ingest "$nats_metrics_password" metrics-ingest)
 }
 CONF
 chown nats:nats /etc/nats/nats.conf
@@ -212,8 +304,12 @@ CLICKHOUSE_NATIVE_PORT=$CLICKHOUSE_NATIVE_PORT
 CLICKHOUSE_USER=$SERVICE_USER
 CLICKHOUSE_PASSWORD=$clickhouse_password
 NATS_PORT=$NATS_PORT
-NATS_USER=$SERVICE_USER
+NATS_USER=$NATS_ADMIN_USER
 NATS_PASSWORD=$nats_password
+NATS_GATEWAY_PASSWORD=$nats_gateway_password
+NATS_INGEST_PASSWORD=$nats_ingest_password
+NATS_DETECTION_PASSWORD=$nats_detection_password
+NATS_METRICS_PASSWORD=$nats_metrics_password
 POSTGRES_PORT=$POSTGRES_PORT
 POSTGRES_USER=$SERVICE_USER
 POSTGRES_PASSWORD=$postgres_password

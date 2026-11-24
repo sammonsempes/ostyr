@@ -690,6 +690,26 @@ fn settings_are_validated() -> TestResult {
             ..base()
         },
         GatewaySettings {
+            nats_user: Some("a.b".to_owned()),
+            nats_password_file: Some(PathBuf::from("/p")),
+            ..base()
+        },
+        GatewaySettings {
+            nats_user: Some("a b".to_owned()),
+            nats_password_file: Some(PathBuf::from("/p")),
+            ..base()
+        },
+        GatewaySettings {
+            nats_user: Some("a*".to_owned()),
+            nats_password_file: Some(PathBuf::from("/p")),
+            ..base()
+        },
+        GatewaySettings {
+            nats_user: Some("a>".to_owned()),
+            nats_password_file: Some(PathBuf::from("/p")),
+            ..base()
+        },
+        GatewaySettings {
             nats_user: Some(String::new()),
             nats_password_file: Some(PathBuf::from("/p")),
             ..base()
@@ -801,6 +821,9 @@ async fn credentials_and_payloads_never_reach_a_trace_subscriber() -> TestResult
     let first = rig(&yaml(stub.port, &extra))?;
     let event = format!("{{\"marker\":\"{TRACE_PAYLOAD}\"}}");
     publish_batch(&first.gateway, &identity("tenant-a", "agent-1"), &batch(1, &[&event])).await?;
+    let subscribed = lock(&stub.hub).subscribed.clone();
+    assert!(!subscribed.is_empty());
+    assert!(subscribed.iter().all(|subject| subject.starts_with("_INBOX_ops.")));
     let credentials_stub = start_stub(None, |state| state.nonce = true)?;
     let pair = KeyPair::new_user();
     let seed = pair.seed()?;

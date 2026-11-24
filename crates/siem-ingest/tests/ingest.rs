@@ -446,6 +446,26 @@ fn every_setting_is_bounded() -> TestResult {
             settings.nats_credentials_file = Some(PathBuf::from("/etc/nats.creds"));
         },
         |settings| {
+            settings.nats_user = Some("a.b".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
+        |settings| {
+            settings.nats_user = Some("a b".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
+        |settings| {
+            settings.nats_user = Some("a*".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
+        |settings| {
+            settings.nats_user = Some("a>".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
+        |settings| {
+            settings.nats_user = Some("-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
+        |settings| {
             settings.nats_user = Some(String::new());
             settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
         },
