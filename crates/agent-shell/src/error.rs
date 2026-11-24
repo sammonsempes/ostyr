@@ -33,6 +33,12 @@ pub enum ShellError {
     Dial(#[source] ChannelError),
     #[error("the shell could not be started")]
     Spawn(#[source] io::Error),
+    #[error("the remote shell is disabled on this host")]
+    Disabled,
+    #[error("processes of the previous shell account uid {0} are still running: nothing is signalled, ending them is an operator step")]
+    PreviousUidStillRunning(u32),
+    #[error("the shell account is refused: {0}")]
+    Account(#[from] AccountError),
 }
 
 
@@ -76,6 +82,8 @@ pub enum AccountError {
     Missing { name: String },
     #[error("the shell account {name} has uid 0 or gid 0")]
     Privileged { name: String },
+    #[error("the uid of the shell account {name} is held by another passwd line")]
+    SharedUid { name: String },
     #[error("the group database cannot be read")]
     GroupsUnreadable(#[source] io::Error),
     #[error("the shell account {name} is listed in a group")]

@@ -1,4 +1,5 @@
-use crate::model::{PtyHandle, VerifiedOpenShell};
+use crate::error::ShellError;
+use crate::model::{PtyHandle, SessionHooks, VerifiedOpenShell};
 use agent_channel::error::ChannelError;
 use agent_channel::model::ShellClientEnd;
 pub use agent_channel::types::DialFn;
@@ -29,6 +30,14 @@ pub type CleanupFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + Send>>
 
 /// Removes what an earlier session left behind and returns how many processes remain; the real one runs on the blocking pool.
 pub type CleanupFn = dyn Fn() -> CleanupFuture + Send + Sync;
+
+
+/// True while the host enables the remote shell; read at admission and again at the start of every session.
+pub type EnabledFn = dyn Fn() -> bool + Send + Sync;
+
+
+/// Builds the spawn and cleanup hooks of one session from the account name, resolving the account afresh.
+pub type BuildFn = fn(&str) -> Result<SessionHooks, ShellError>;
 
 
 /// The terminal input of the platform, as the chunks its writer delivered.

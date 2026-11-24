@@ -1,4 +1,4 @@
-use crate::types::{AttachFn, CleanupFn, ClockFn, DialFn, SpawnFn};
+use crate::types::{AttachFn, CleanupFn, ClockFn, DialFn, EnabledFn, SpawnFn};
 use agent_channel::model::ShellClientEnd;
 use agent_channel::types::ShellReader;
 use std::future::Future;
@@ -20,6 +20,10 @@ pub const STORE_FILE_NAME: &str = "shell-sessions";
 
 
 pub const ROOT_UID: u32 = 0;
+
+
+/// The one local account the remote shell runs as; a constant, never a setting.
+pub const SHELL_ACCOUNT: &str = "ostyr-shell";
 
 
 /// Fixed terminal size of the session until agent-channel gains a resize hook.
@@ -94,13 +98,34 @@ pub struct PtyHandle {
 }
 
 
-/// The five outside calls of a session, as the composer takes them.
-pub struct ShellHooks<'env> {
+/// The outside calls every session of the process shares, as the composer takes them.
+pub struct SharedHooks<'env> {
     pub clock: &'env ClockFn,
     pub dial: &'env DialFn,
-    pub spawn: &'env SpawnFn,
     pub attach: &'env AttachFn,
-    pub cleanup: &'env CleanupFn,
+    pub enabled: &'env EnabledFn,
+}
+
+
+/// The spawn and cleanup of one session, both built from the one account resolution of that session, with the uid it resolved to.
+pub struct SessionHooks {
+    pub uid: u32,
+    pub running: Box<CleanupFn>,
+    pub spawn: Box<SpawnFn>,
+    pub cleanup: Box<CleanupFn>,
+}
+
+
+/// What every session of the process shares: the identity, the store, the lock, the clock, the dial, the attach and the enable switch.
+pub struct ShellShared<'env> {
+    pub agent_id: String,
+    pub store_directory: PathBuf,
+    pub store_owner: u32,
+    pub store_lock: Mutex<()>,
+    pub clock: &'env ClockFn,
+    pub dial: &'env DialFn,
+    pub attach: &'env AttachFn,
+    pub enabled: &'env EnabledFn,
 }
 
 
@@ -109,7 +134,7 @@ pub struct ShellEnv<'env> {
     pub agent_id: String,
     pub store_directory: PathBuf,
     pub store_owner: u32,
-    pub store_lock: Mutex<()>,
+    pub store_lock: &'env Mutex<()>,
     pub clock: &'env ClockFn,
     pub dial: &'env DialFn,
     pub spawn: &'env SpawnFn,

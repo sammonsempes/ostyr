@@ -4,6 +4,8 @@ mod account;
 mod cgroup;
 #[cfg(target_os = "linux")]
 mod cleanup;
+#[cfg(target_os = "linux")]
+mod hooks;
 mod loopback;
 mod order;
 mod rig;

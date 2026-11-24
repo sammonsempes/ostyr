@@ -110,3 +110,7 @@ pub type JudgeFn = fn(bool, u32, u32, u32) -> Result<(), &'static str>;
 
 /// Runs between the open of a FIM input and its judgement; production does nothing, a test swaps the path there.
 pub type AfterOpenFn = fn(&std::path::Path);
+
+
+/// Reads the metadata of an opened switch handle; a test double injects a failure.
+pub type InspectFn = fn(&std::fs::File) -> std::io::Result<std::fs::Metadata>;

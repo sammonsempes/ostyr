@@ -47,6 +47,7 @@ fn real_fakes(platform: &Platform, handle: agent_shell::model::PtyHandle) -> Res
         attach: attach_fn(),
         cleanup: clean_cleanup(&calls),
         directory: crate::support::private_tempdir()?,
+        store_lock: std::sync::Mutex::new(()),
         calls,
     })
 }

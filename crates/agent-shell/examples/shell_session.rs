@@ -101,7 +101,7 @@ async fn run(channel: Channel, handle: PtyHandle, limits: (u32, u32)) -> Result<
         agent_id: "agent-1".to_owned(),
         store_directory: directory.path().to_path_buf(),
         store_owner: owner_of(directory.path())?,
-        store_lock: Mutex::new(()),
+        store_lock: &Mutex::new(()),
         clock: &|| LOOPBACK_NOW,
         dial: &move || {
             let dialled = channel.clone();

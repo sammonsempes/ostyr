@@ -4,11 +4,11 @@ use agent_channel::model::ExecuteRefusal;
 use agent_command::error::ActionError;
 use agent_command::model::{Action, KeyClass, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS};
 use agent_shell::banner::{printable, shell_banner};
-use agent_shell::error::ShellError;
+use agent_shell::error::{AccountError, ShellError, StoreError};
 use agent_shell::model::{
     approvers_of, asset_of, expires_at_of, idle_seconds_of, max_seconds_of, requester_of, session_id_of, ticket_of, VerifiedOpenShell,
 };
-use agent_shell::queue::{admit_shell, new_slot, shell_execute_fn};
+use agent_shell::queue::{admit_shell, gated_execute_fn, new_slot, shell_execute_fn, shell_refusal};
 use agent_shell::verified::{check_start, is_past, lifetime_ok};
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
@@ -165,7 +165,7 @@ fn an_invalid_command_never_takes_the_slot() -> TestResult {
 
 
 #[test]
-fn the_execute_adapter_only_queues_and_reports_a_refusal_as_false() -> TestResult {
+fn the_execute_adapter_only_queues_and_reports_a_refusal_as_a_named_reason() -> TestResult {
     let slot = new_slot();
     let (queue, mut receiver) = waiting(CAPACITY);
     let execute = shell_execute_fn(slot, queue);
@@ -215,5 +215,56 @@ fn a_closed_queue_is_reported_busy_and_frees_the_slot() -> TestResult {
         Err(ExecuteRefusal::Busy)
     );
     assert!(!slot.load(Ordering::SeqCst));
+    Ok(())
+}
+
+
+#[test]
+fn every_shell_error_maps_to_one_named_refusal() -> TestResult {
+    let invalid = ShellError::Invalid(ActionError::ShellSessionId);
+    let channel = agent_channel::error::ChannelError::Status(Box::new(tonic::Status::unavailable("down")));
+    let cases = [
+        (ShellError::Busy, ExecuteRefusal::Busy),
+        (ShellError::QueueClosed, ExecuteRefusal::Busy),
+        (ShellError::Disabled, ExecuteRefusal::ShellDisabled),
+        (ShellError::NotOpenShell, ExecuteRefusal::Invalid),
+        (invalid, ExecuteRefusal::Invalid),
+        (ShellError::NotSensitive, ExecuteRefusal::Invalid),
+        (ShellError::Lifetime, ExecuteRefusal::Invalid),
+        (ShellError::Expired, ExecuteRefusal::Invalid),
+        (ShellError::Cleanup(std::io::Error::other("x")), ExecuteRefusal::Invalid),
+        (ShellError::Leftover(1), ExecuteRefusal::Invalid),
+        (ShellError::Store(StoreError::Full), ExecuteRefusal::Invalid),
+        (ShellError::Dial(channel), ExecuteRefusal::Invalid),
+        (ShellError::Spawn(std::io::Error::other("x")), ExecuteRefusal::Invalid),
+        (
+            ShellError::Account(AccountError::Missing { name: "a".to_owned() }),
+            ExecuteRefusal::Invalid,
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(shell_refusal(&error), expected, "{error}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_disabled_switch_refuses_by_name_before_anything_is_queued() -> TestResult {
+    let slot = new_slot();
+    let (queue, mut receiver) = waiting(CAPACITY);
+    let on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let switch = std::sync::Arc::clone(&on);
+    let execute = gated_execute_fn(
+        std::sync::Arc::new(move || switch.load(Ordering::SeqCst)),
+        shell_execute_fn(std::sync::Arc::clone(&slot), queue),
+    );
+    let open = || command_of(open_action(SESSION, MAX_SECONDS, IDLE_SECONDS));
+    assert_eq!(execute(open()), Err(ExecuteRefusal::ShellDisabled));
+    assert!(receiver.try_recv().is_err());
+    assert!(!slot.load(Ordering::SeqCst));
+    on.store(true, Ordering::SeqCst);
+    assert_eq!(execute(open()), Ok(()));
+    assert!(receiver.try_recv().is_ok());
     Ok(())
 }

@@ -7,13 +7,19 @@ use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE
 use crate::run::run_source;
 use crate::sensor::{monotonic_seconds, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
+use crate::shell::{shell_dial, store_path, switch_fn, switch_path};
 use crate::types::{RunFn, SpoolLock};
 use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
 use agent_channel::spool_dirs::{open_parent, open_spool_dirs, SpoolDirs};
-use agent_channel::types::PauseFn;
+use agent_channel::types::{ExecuteFn, PauseFn};
+use agent_shell::compose::production_shared;
+use agent_shell::hooks::production_hooks;
+use agent_shell::model::{SharedHooks, SHELL_ACCOUNT};
+use agent_shell::queue::{gated_execute_fn, new_slot, shell_execute_fn};
+use agent_shell::session::{attach_fn, run_shell_worker_with, shell_queue};
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
@@ -27,11 +33,11 @@ use std::time::Duration;
 pub const AGENT_CYCLE_SECONDS: u64 = 5;
 
 
-/// Runs the agent `max_runs` times; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
-pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn) -> u64 {
+/// Runs the agent `max_runs` times, every run with the same shell executor; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
+pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn, shell: Option<&ExecuteFn<'_>>) -> u64 {
     let mut succeeded = 0;
     for _ in 0..max_runs {
-        let outcome = run_agent(agent, checked, pause, None)
+        let outcome = run_agent(agent, checked, pause, shell)
             .await
             .inspect_err(|error| tracing::warn!(%error, "agent run failed"));
         succeeded += u64::from(outcome.is_ok());
@@ -72,7 +78,29 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             .await
             .inspect_err(|error| tracing::error!(%error, "source failed, the agent stops"))
     };
-    let cycles = async { Ok::<u64, SourceError>(run_agent_cycles(&agent, &dirs, max_polls, pause).await) };
+    let enabled = switch_fn(switch_path(path));
+    let dial = shell_dial(&agent);
+    let attach = attach_fn();
+    let slot = new_slot();
+    let (queue, orders) = shell_queue();
+    let executor = gated_execute_fn(Arc::clone(&enabled), shell_execute_fn(Arc::clone(&slot), queue));
+    let shell_shared = production_shared(
+        agent.agent_id.clone(),
+        store_path(&file.cursor_file),
+        SharedHooks {
+            clock: &now_seconds,
+            dial: dial.as_ref(),
+            attach: attach.as_ref(),
+            enabled: enabled.as_ref(),
+        },
+    );
+    let shell = async { Ok::<u64, SourceError>(run_shell_worker_with(orders, slot, &shell_shared, SHELL_ACCOUNT, production_hooks).await) };
+    let (agent_ref, dirs_ref) = (&agent, &dirs);
+    let cycles = async move {
+        let runs = run_agent_cycles(agent_ref, dirs_ref, max_polls, pause, Some(executor.as_ref())).await;
+        drop(executor);
+        Ok::<u64, SourceError>(runs)
+    };
     let env = SensorEnv {
         systemctl: PathBuf::from(SYSTEMCTL_PATH),
         export: file.export_path.clone(),
@@ -131,6 +159,6 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             .await
             .map(|_| ())
     };
-    let (totals, runs, (), (), ()) = tokio::try_join!(source, cycles, sensor, updates, metrics)?;
+    let (totals, runs, (), (), (), _handled) = tokio::try_join!(source, cycles, sensor, updates, metrics, shell)?;
     Ok(Totals { agent_runs: runs, ..totals })
 }

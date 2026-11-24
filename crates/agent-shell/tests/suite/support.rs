@@ -290,6 +290,7 @@ pub struct Fakes {
     pub attach: Box<AttachFn>,
     pub cleanup: Box<CleanupFn>,
     pub directory: TempDir,
+    pub store_lock: Mutex<()>,
 }
 
 
@@ -302,6 +303,7 @@ pub fn fakes_with(spawn: impl FnOnce(&Calls) -> Box<SpawnFn>, script: Script) ->
         attach: scripted_attach(&calls, script),
         cleanup: clean_cleanup(&calls),
         directory: private_tempdir()?,
+        store_lock: Mutex::new(()),
         calls,
     })
 }
@@ -312,7 +314,7 @@ pub fn env_of<'env>(fakes: &'env Fakes) -> Result<ShellEnv<'env>, Box<dyn Error>
         agent_id: AGENT.to_owned(),
         store_directory: fakes.directory.path().to_path_buf(),
         store_owner: owner_of(fakes.directory.path())?,
-        store_lock: Mutex::new(()),
+        store_lock: &fakes.store_lock,
         clock: &*fakes.clock,
         dial: &*fakes.dial,
         spawn: &*fakes.spawn,

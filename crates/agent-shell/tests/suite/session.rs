@@ -5,10 +5,12 @@ use crate::support::{
 use crate::types::TestResult;
 use agent_channel::model::ShellClientEnd;
 use agent_shell::banner::shell_banner;
-use agent_shell::error::{ShellError, StoreError};
-use agent_shell::model::{EndReason, PtyHandle, StoreEntry, VerifiedOpenShell, MAX_SHELL_SESSION_IDS, STORE_FILE_NAME};
+use agent_shell::error::{AccountError, ShellError, StoreError};
+use agent_shell::model::{EndReason, PtyHandle, SessionHooks, ShellShared, StoreEntry, VerifiedOpenShell, MAX_SHELL_SESSION_IDS, STORE_FILE_NAME};
 use agent_shell::queue::{new_slot, shell_execute_fn};
-use agent_shell::session::{cleanup_verdict, forward_input, input_pipe, run_shell_session, run_shell_worker, shell_queue};
+use agent_shell::session::{
+    cleanup_verdict, clear_previous, forward_input, input_pipe, run_shell_session, run_shell_worker, run_shell_worker_with, shell_queue,
+};
 use agent_shell::store::write_entries;
 use futures_util::StreamExt;
 use std::future::Future;
@@ -30,6 +32,16 @@ const LATE: u64 = 10_000;
 
 
 const TWICE: u64 = 2;
+
+
+const PREVIOUS_UID: u32 = 7;
+
+
+const THREE: u64 = 3;
+
+
+#[cfg(unix)]
+const OPEN_DIRECTORY_MODE: u32 = 0o755;
 
 
 const SHORT_IDLE: u32 = 60;
@@ -534,5 +546,314 @@ async fn an_input_that_cannot_be_read_ends_the_session_as_gone() -> TestResult {
     let (input, _typed) = tokio::sync::mpsc::channel(1);
     let ended = forward_input(&input, Ok(Err(io::Error::other("broken")))).await;
     assert_eq!(ended, Err(EndReason::ShellGone));
+    Ok(())
+}
+
+
+fn log_line(directory: &std::path::Path, line: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut log = std::fs::OpenOptions::new().append(true).create(true).open(directory.join("log"))?;
+    writeln!(log, "{line}")
+}
+
+
+fn read_or_empty(path: &std::path::Path) -> io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        other => other,
+    }
+}
+
+
+fn log_of(directory: &std::path::Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(read_or_empty(&directory.join("log"))?.lines().map(str::to_owned).collect())
+}
+
+
+fn leftover_of(directory: &std::path::Path, uid: u32) -> io::Result<usize> {
+    read_or_empty(&directory.join(format!("leftover-{uid}")))?.trim().parse().or(Ok(0))
+}
+
+
+fn logging_hooks(directory: &std::path::Path, uid: u32) -> SessionHooks {
+    let spawn_directory = directory.to_path_buf();
+    let cleanup_directory = directory.to_path_buf();
+    let running_directory = directory.to_path_buf();
+    SessionHooks {
+        uid,
+        running: Box::new(move || {
+            let logged = log_line(&running_directory, &format!("running-{uid}")).and_then(|()| leftover_of(&running_directory, uid));
+            Box::pin(std::future::ready(logged))
+        }),
+        spawn: Box::new(move |_order| {
+            let logged = log_line(&spawn_directory, &format!("spawn-{uid}")).and_then(|()| Err(io::Error::other("no pty")));
+            Box::pin(std::future::ready(logged))
+        }),
+        cleanup: Box::new(move || {
+            let logged = log_line(&cleanup_directory, &format!("cleanup-{uid}")).and_then(|()| leftover_of(&cleanup_directory, uid));
+            Box::pin(std::future::ready(logged))
+        }),
+    }
+}
+
+
+fn build_from_files(account: &str) -> Result<SessionHooks, ShellError> {
+    let directory = std::path::PathBuf::from(account);
+    log_line(&directory, "build").map_err(ShellError::Spawn)?;
+    let text = std::fs::read_to_string(directory.join("account")).map_err(ShellError::Spawn)?;
+    match text.trim() {
+        "missing" => {
+            std::fs::write(directory.join("account"), "8").map_err(ShellError::Spawn)?;
+            Err(ShellError::Account(AccountError::Missing {
+                name: "ostyr-shell".to_owned(),
+            }))
+        }
+        number => Ok(logging_hooks(&directory, number.parse().map_err(|_| ShellError::Disabled)?)),
+    }
+}
+
+
+fn switching_dial(directory: &std::path::Path, steps: Vec<(&'static str, &'static str)>) -> Box<agent_shell::types::DialFn> {
+    let owned = directory.to_path_buf();
+    let position = std::sync::atomic::AtomicUsize::new(0);
+    Box::new(move || {
+        let index = position.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some((account, leftover)) = steps.get(index) {
+            if std::fs::write(owned.join("account"), account)
+                .and_then(|()| std::fs::write(owned.join("leftover-7"), leftover))
+                .and_then(|()| std::fs::write(owned.join("leftover-8"), leftover))
+                .is_err()
+            {
+                tracing::warn!("test state not written");
+            }
+        }
+        Box::pin(async { Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy()) })
+    })
+}
+
+
+async fn worker_log(
+    account: &str,
+    steps: Vec<(&'static str, &'static str)>,
+    sessions: &[&str],
+    enabled: bool,
+) -> Result<(u64, Vec<String>, bool), Box<dyn std::error::Error>> {
+    let directory = std::path::PathBuf::from(account);
+    let fakes = holding_fakes(fake_pty().handle, finishing(ShellClientEnd::ServerClosed))?;
+    let dial = switching_dial(&directory, steps);
+    let shared = ShellShared {
+        agent_id: "agent-1".to_owned(),
+        store_directory: fakes.directory.path().to_path_buf(),
+        store_owner: crate::support::owner_of(fakes.directory.path())?,
+        store_lock: Mutex::new(()),
+        clock: &*fakes.clock,
+        dial: &*dial,
+        attach: &*fakes.attach,
+        enabled: &move || enabled,
+    };
+    let slot = new_slot();
+    slot.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (queue, orders) = shell_queue();
+    let worker = run_shell_worker_with(orders, Arc::clone(&slot), &shared, account, build_from_files);
+    let driver = async {
+        for session in sessions {
+            queue.send(crate::support::order_of(session, MAX_SECONDS, IDLE_SECONDS)?).await?;
+        }
+        drop(queue);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (handled, driven) = tokio::join!(worker, driver);
+    driven?;
+    Ok((handled, log_of(&directory)?, slot.load(std::sync::atomic::Ordering::SeqCst)))
+}
+
+
+fn account_directory(uid: &str) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("account"), uid)?;
+    Ok(directory)
+}
+
+
+fn text_of(directory: &tempfile::TempDir) -> Result<&str, Box<dyn std::error::Error>> {
+    directory.path().to_str().ok_or_else(|| "the directory is not UTF-8".into())
+}
+
+
+fn lines_of(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_account_is_resolved_for_every_session_and_a_changed_uid_checks_the_old_one_first() -> TestResult {
+    let directory = account_directory("7")?;
+    let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "0")], &[SESSION, SECOND_SESSION], true).await?;
+    assert_eq!(handled, TWICE);
+    assert!(!slot);
+    assert_eq!(
+        log,
+        lines_of(&[
+            "build",
+            "cleanup-7",
+            "spawn-7",
+            "cleanup-7",
+            "build",
+            "running-7",
+            "cleanup-8",
+            "spawn-8",
+            "cleanup-8"
+        ])
+    );
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn an_unchanged_uid_is_not_cleaned_an_extra_time() -> TestResult {
+    let directory = account_directory("7")?;
+    let (_handled, log, _slot) = worker_log(text_of(&directory)?, Vec::new(), &[SESSION, SECOND_SESSION], true).await?;
+    assert_eq!(
+        log,
+        lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "cleanup-7", "spawn-7", "cleanup-7"])
+    );
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_live_process_of_the_old_uid_refuses_the_session_and_nothing_is_swept() -> TestResult {
+    let directory = account_directory("7")?;
+    let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "1")], &[SESSION, SECOND_SESSION], true).await?;
+    assert_eq!(handled, TWICE);
+    assert!(!slot);
+    assert_eq!(log, lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "running-7"]));
+    Ok(())
+}
+
+
+const THIRD_SESSION_LOG: [&str; 11] = [
+    "build",
+    "cleanup-7",
+    "spawn-7",
+    "cleanup-7",
+    "build",
+    "running-7",
+    "cleanup-8",
+    "spawn-8",
+    "cleanup-8",
+    "build",
+    "running-8",
+];
+
+
+#[tokio::test(start_paused = true)]
+async fn the_previous_hooks_are_the_last_sessions_and_the_third_session_checks_the_second_uid() -> TestResult {
+    let rising = account_directory("7")?;
+    let (handled, log, slot) = worker_log(
+        text_of(&rising)?,
+        vec![("8", "0"), ("9", "1")],
+        &[SESSION, SECOND_SESSION, "session-3"],
+        true,
+    )
+    .await?;
+    assert_eq!(handled, THREE);
+    assert!(!slot);
+    assert_eq!(log, lines_of(&THIRD_SESSION_LOG));
+    let returning = account_directory("7")?;
+    let (handled_back, log_back, slot_back) = worker_log(
+        text_of(&returning)?,
+        vec![("8", "0"), ("7", "1")],
+        &[SESSION, SECOND_SESSION, "session-3"],
+        true,
+    )
+    .await?;
+    assert_eq!(handled_back, THREE);
+    assert!(!slot_back);
+    assert_eq!(log_back, lines_of(&THIRD_SESSION_LOG));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_resolution_ends_that_session_only_and_keeps_the_old_hooks_for_the_next() -> TestResult {
+    let directory = account_directory("7")?;
+    let (handled, log, slot) = worker_log(
+        text_of(&directory)?,
+        vec![("missing", "0")],
+        &[SESSION, SECOND_SESSION, "session-3"],
+        true,
+    )
+    .await?;
+    assert_eq!(handled, THREE);
+    assert!(!slot);
+    assert_eq!(
+        log,
+        lines_of(&[
+            "build",
+            "cleanup-7",
+            "spawn-7",
+            "cleanup-7",
+            "build",
+            "build",
+            "running-7",
+            "cleanup-8",
+            "spawn-8",
+            "cleanup-8"
+        ])
+    );
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_switch_turned_off_while_queued_refuses_before_any_resolution_and_frees_the_slot() -> TestResult {
+    let directory = account_directory("7")?;
+    let (handled, log, slot) = worker_log(text_of(&directory)?, Vec::new(), &[SESSION], false).await?;
+    assert_eq!(handled, 1);
+    assert!(!slot);
+    assert!(log.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+#[cfg(unix)]
+async fn a_store_directory_open_to_group_or_other_refuses_the_session_before_the_spawn() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let fakes = fakes_with(forbidden_spawn_of, finishing(ShellClientEnd::ServerClosed))?;
+    std::fs::set_permissions(fakes.directory.path(), std::fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+    let refused = run_shell_session(default_order()?, &env_of(&fakes)?).await;
+    assert!(matches!(refused, Err(ShellError::Store(StoreError::Insecure { .. }))));
+    assert!(!calls_of(&fakes)?.contains(&"spawn-forbidden"));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_refusal_names_the_previous_uid_and_a_failed_scan_refuses_too() -> TestResult {
+    let held = account_directory("7")?;
+    let directory = held.path().to_path_buf();
+    let earlier = logging_hooks(&directory, PREVIOUS_UID);
+    let next = logging_hooks(&directory, PREVIOUS_UID + 1);
+    std::fs::write(directory.join(format!("leftover-{PREVIOUS_UID}")), "2")?;
+    assert!(matches!(
+        clear_previous(Some(&earlier), &next).await,
+        Err(ShellError::PreviousUidStillRunning(PREVIOUS_UID))
+    ));
+    assert!(clear_previous(Some(&earlier), &earlier).await.is_ok());
+    assert!(clear_previous(None, &next).await.is_ok());
+    std::fs::write(directory.join(format!("leftover-{PREVIOUS_UID}")), "0")?;
+    assert!(clear_previous(Some(&earlier), &next).await.is_ok());
+    assert_eq!(log_of(&directory)?, lines_of(&["running-7", "running-7"]));
+    let cut = SessionHooks {
+        running: Box::new(|| {
+            Box::pin(std::future::ready(Err(io::Error::other(
+                "the process table is larger than the scan limit",
+            ))))
+        }),
+        ..logging_hooks(&directory, PREVIOUS_UID)
+    };
+    assert!(matches!(clear_previous(Some(&cut), &next).await, Err(ShellError::Cleanup(_))));
     Ok(())
 }

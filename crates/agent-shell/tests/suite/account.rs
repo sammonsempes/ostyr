@@ -1,12 +1,12 @@
 use crate::support::{fakes_with, forbidden_spawn, hold_script, owner_of, private_tempdir, Fakes};
 use crate::types::TestResult;
 use agent_shell::account::{
-    groups_in, lookup_in, primary_in, read_database, read_databases, read_databases_at, resolve_account, resolve_in, stat_home, Databases,
-    GroupEntry, HomeFacts, PrimaryGroup, MAX_DATABASE_BYTES,
+    groups_in, holds_uid, judge_uid, lookup_in, primary_in, read_database, read_databases, read_databases_at, resolve_account, resolve_in, stat_home,
+    uid_holders, Databases, GroupEntry, HomeFacts, PrimaryGroup, MAX_DATABASE_BYTES,
 };
-use agent_shell::compose::production_env;
+use agent_shell::compose::production_shared;
 use agent_shell::error::AccountError;
-use agent_shell::model::{ShellHooks, ROOT_UID};
+use agent_shell::model::{SharedHooks, ROOT_UID};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +24,12 @@ const USERS_GID: u32 = 100;
 
 
 const UNKNOWN_GID: u32 = 77;
+
+
+const HOLDER_UID: u32 = 5;
+
+
+const TWO_HOLDERS: usize = 2;
 
 
 const NAME: &str = "ostyr-shell";
@@ -216,14 +222,13 @@ fn the_home_is_read_without_following_a_link() -> TestResult {
 fn the_composer_pins_the_store_owner_to_root() -> TestResult {
     let (script, _taken) = hold_script();
     let fakes: Fakes = fakes_with(forbidden_spawn, script)?;
-    let hooks = ShellHooks {
+    let hooks = SharedHooks {
         clock: &*fakes.clock,
         dial: &*fakes.dial,
-        spawn: &*fakes.spawn,
         attach: &*fakes.attach,
-        cleanup: &*fakes.cleanup,
+        enabled: &|| true,
     };
-    let env = production_env("agent-1".to_owned(), fakes.directory.path().to_path_buf(), hooks);
+    let env = production_shared("agent-1".to_owned(), fakes.directory.path().to_path_buf(), hooks);
     assert_eq!(env.store_owner, ROOT_UID);
     assert_eq!(env.agent_id, "agent-1");
     assert_eq!(env.store_directory, fakes.directory.path());
@@ -309,5 +314,41 @@ fn a_database_over_the_cap_is_refused_by_name() -> TestResult {
     assert_eq!(refusal.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(refusal.to_string(), "the account database is larger than its limit");
     assert!(read_databases_at(&path, &path).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_uid_held_by_another_passwd_line_is_refused_by_name() -> TestResult {
+    let ordinary_user = format!("{GOOD_PASSWD}bob:x:1001:1500::/home/bob:/bin/sh\n");
+    assert!(matches!(refusal(&ordinary_user, GOOD_GROUP), Some(AccountError::SharedUid { .. })));
+    let alias = format!("{GOOD_PASSWD}ostyr-alias:x:1001:1500::/home/ostyr-shell:/bin/sh\n");
+    assert!(matches!(refusal(&alias, GOOD_GROUP), Some(AccountError::SharedUid { .. })));
+    let twin = format!("{GOOD_PASSWD}ostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\n");
+    assert!(matches!(refusal(&twin, GOOD_GROUP), Some(AccountError::SharedUid { .. })));
+    let broken = format!("{GOOD_PASSWD}bob:x:abc:1500::/home/bob:/bin/sh\n");
+    assert!(matches!(refusal(&broken, GOOD_GROUP), Some(AccountError::Lookup(_))));
+    assert!(refusal(GOOD_PASSWD, GOOD_GROUP).is_none());
+    assert_eq!(
+        refusal(&ordinary_user, GOOD_GROUP).map(|error| error.to_string()),
+        Some(format!("the uid of the shell account {NAME} is held by another passwd line"))
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_uid_holders_are_counted_line_by_line() -> TestResult {
+    assert_eq!(uid_holders(GOOD_PASSWD, ACCOUNT_UID)?, 1);
+    assert_eq!(uid_holders("a:x:5:1::/h:/s\n\nb:x:5:1::/h:/s\n", HOLDER_UID)?, TWO_HOLDERS);
+    assert_eq!(uid_holders("", HOLDER_UID)?, 0);
+    assert!(holds_uid("", HOLDER_UID).is_ok_and(|held| !held));
+    assert!(holds_uid("a:x:5", HOLDER_UID).is_ok_and(|held| held));
+    assert!(holds_uid("a:x", HOLDER_UID).is_err());
+    assert!(holds_uid("a:x:five:1", HOLDER_UID).is_err());
+    assert!(uid_holders("a:x:5:1\nshort\n", HOLDER_UID).is_err());
+    assert!(judge_uid(NAME, 1).is_ok());
+    assert!(matches!(judge_uid(NAME, 0), Err(AccountError::SharedUid { .. })));
+    assert!(matches!(judge_uid(NAME, TWO_HOLDERS), Err(AccountError::SharedUid { .. })));
     Ok(())
 }
