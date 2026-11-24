@@ -320,6 +320,8 @@ expect "the module file selects all fifteen modules the platform mounts" grep -q
 expect "the module file names the status page file" grep -qx '  status.page_file: /etc/ostyr/status-page.yaml' "$COMPOSE_DIR/config/module.yaml"
 expect "the status page belongs to the module file tenant" test "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/status-page.yaml")" = "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/module.yaml")"
 expect "the playbooks service is hardened, runs as 65533 and holds only its password copy and the CA" playbooks_is_hardened
+expect "init.sh compares an existing password copy with its source and refuses a difference by name" \
+    grep -qF 'cmp -s "$SECRETS_DIR/$name" "$SECRETS_DIR/$source"' "$COMPOSE_DIR/init.sh"
 expect "the playbooks service reads the compose tenant" test "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/playbooks.yaml")" = "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/module.yaml")"
 expect "the playbooks database settings name its own password file" grep -qx 'password_file: /run/secrets/playbooks_pg_password' "$COMPOSE_DIR/config/playbooks-pg.yaml"
 expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'

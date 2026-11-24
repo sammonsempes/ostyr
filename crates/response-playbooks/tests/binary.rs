@@ -8,20 +8,24 @@ mod types;
 use alerts::id::alert_id;
 use core_audit::log::open_file_log;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_pg::error::PgError;
+use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
 use pg_fake::certs::{loopback, make_pki};
 use pg_fake::fake::{self, Fake, Mode, Reply};
 use pg_fake::types::Handler;
 use rcgen::SanType;
-use response_playbooks::serve::{boxed_reload_audit, shared_reload_audit, start};
-use response_playbooks::types::InterruptWait;
+use response_playbooks::serve::{boxed_reload_audit, migrate_retrying, shared_reload_audit, start};
+use response_playbooks::types::{InterruptWait, MigrationRun};
 use std::collections::BTreeMap;
 use std::fs;
-use std::future::{pending, ready};
-use std::io::{self, BufRead, BufReader, Read};
+use std::future::{pending, ready, Future};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 use types::TestResult;
@@ -352,5 +356,126 @@ fn both_reload_audit_functions_append_to_the_one_log() -> TestResult {
     shared_reload_audit(&log)(reload_entry())?;
     boxed_reload_audit(&log)(reload_entry())?;
     assert_eq!(fs::read_to_string(dir.path().join("audit.log"))?.lines().count(), TWO_RECORDS);
+    Ok(())
+}
+
+
+const RETRY_ATTEMPTS: u64 = 10;
+
+
+const PAUSE_SECONDS: u64 = 2;
+
+
+const PASSES_ON_THIRD_RUN: u64 = 3;
+
+
+const RUNS_FILE: &str = "runs";
+
+
+fn search_path_error() -> PgError {
+    PgError::FunctionSearchPath {
+        total: 1,
+        functions: "f".to_owned(),
+    }
+}
+
+
+fn count_run(settings: &PgSettings) -> Result<u64, io::Error> {
+    let runs = Path::new(&settings.password_file).with_file_name(RUNS_FILE);
+    fs::OpenOptions::new().create(true).append(true).open(&runs)?.write_all(b"x")?;
+    Ok(fs::metadata(&runs)?.len())
+}
+
+
+fn sleeping(duration: Duration) -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(tokio::time::sleep(duration))
+}
+
+
+fn pg_settings_of(dir: &Path) -> Result<Arc<PgSettings>, Box<dyn std::error::Error>> {
+    Ok(Arc::new(load_pg_settings(&dir.join("pg.yaml"))?))
+}
+
+
+fn passes_on_the_third_run(settings: Arc<PgSettings>) -> MigrationRun {
+    let outcome = match count_run(&settings) {
+        Ok(run) if run < PASSES_ON_THIRD_RUN => Err(search_path_error()),
+        Ok(_run) => Ok(vec!["done".to_owned()]),
+        Err(source) => Err(PgError::Io {
+            file: RUNS_FILE.to_owned(),
+            source,
+        }),
+    };
+    Box::pin(ready(outcome))
+}
+
+
+fn always_search_path(settings: Arc<PgSettings>) -> MigrationRun {
+    let outcome = match count_run(&settings) {
+        Ok(_run) => Err(search_path_error()),
+        Err(source) => Err(PgError::Io {
+            file: RUNS_FILE.to_owned(),
+            source,
+        }),
+    };
+    Box::pin(ready(outcome))
+}
+
+
+fn always_other_error(settings: Arc<PgSettings>) -> MigrationRun {
+    let outcome = match count_run(&settings) {
+        Ok(_run) => Err(PgError::NotRegular { file: "x".to_owned() }),
+        Err(source) => Err(PgError::Io {
+            file: RUNS_FILE.to_owned(),
+            source,
+        }),
+    };
+    Box::pin(ready(outcome))
+}
+
+
+fn runs_so_far(dir: &Path) -> Result<u64, io::Error> {
+    Ok(fs::metadata(dir.join(RUNS_FILE))?.len())
+}
+
+
+fn forget_runs(dir: &Path) -> Result<(), io::Error> {
+    fs::remove_file(dir.join(RUNS_FILE))
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_search_path_check_is_retried_by_name_and_bounded_and_nothing_else_is() -> TestResult {
+    let dir = tempdir()?;
+    write_site(dir.path(), CLOSED_PORT, "")?;
+    let settings = pg_settings_of(dir.path())?;
+
+    let first_start = tokio::time::Instant::now();
+    let done = migrate_retrying(passes_on_the_third_run, &settings, sleeping).await?;
+    assert_eq!(done, vec!["done".to_owned()]);
+    assert_eq!(runs_so_far(dir.path())?, PASSES_ON_THIRD_RUN);
+    assert_eq!(first_start.elapsed(), Duration::from_secs(PAUSE_SECONDS * (PASSES_ON_THIRD_RUN - 1)));
+    forget_runs(dir.path())?;
+
+    let second_start = tokio::time::Instant::now();
+    let capped = migrate_retrying(always_search_path, &settings, sleeping).await;
+    assert!(matches!(capped, Err(PgError::FunctionSearchPath { .. })));
+    assert_eq!(runs_so_far(dir.path())?, RETRY_ATTEMPTS + 1);
+    assert_eq!(second_start.elapsed(), Duration::from_secs(PAUSE_SECONDS * RETRY_ATTEMPTS));
+    forget_runs(dir.path())?;
+
+    let third_start = tokio::time::Instant::now();
+    let other = migrate_retrying(always_other_error, &settings, sleeping).await;
+    assert!(matches!(other, Err(PgError::NotRegular { .. })));
+    assert_eq!(runs_so_far(dir.path())?, 1);
+    assert_eq!(third_start.elapsed(), Duration::ZERO);
+    Ok(())
+}
+
+
+#[test]
+fn start_reads_the_settings_file_once() -> TestResult {
+    let source = fs::read_to_string(fixture("../src/serve.rs"))?;
+    assert_eq!(source.matches("load_settings(").count(), 1);
     Ok(())
 }

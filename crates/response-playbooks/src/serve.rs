@@ -3,8 +3,8 @@
 
 use crate::bundle::{open_playbooks, PlaybookSettings};
 use crate::error::RoundError;
-use crate::service::{open_service_settings, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
-use crate::types::InterruptWait;
+use crate::service::{load_settings, open_service_settings_from, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
+use crate::types::{InterruptWait, MigrateFn, MigrationRun, WaitFn};
 use alerts::backend::LOG_IGNORED_CRATE;
 use alerts::error::StoreError;
 use alerts::pg::pg_executor;
@@ -14,6 +14,7 @@ use core_config::reload::{current_config, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use core_config::watch::watch_files;
 use core_pg::connect::connect;
+use core_pg::error::PgError;
 use core_pg::migrate::migrate;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
@@ -27,13 +28,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 
 const USAGE: &str = "usage: ostyr-playbooks <settings.yaml>";
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
+
+
+const SEARCH_PATH_ATTEMPTS: usize = 10;
+
+
+const SEARCH_PATH_PAUSE: Duration = Duration::from_secs(2);
 
 
 const ROUNDS: usize = usize::MAX;
@@ -84,8 +91,13 @@ pub fn boxed_reload_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 
 
 pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<(), Box<dyn Error>> {
-    let settings_engine_audit_log = Arc::new(open_file_log(&crate::service::load_settings(settings_file)?.audit_file)?);
-    let settings_engine = Arc::new(open_service_settings(settings_file, boxed_reload_audit(&settings_engine_audit_log))?);
+    let baseline = load_settings(settings_file)?;
+    let settings_engine_audit_log = Arc::new(open_file_log(&baseline.audit_file)?);
+    let settings_engine = Arc::new(open_service_settings_from(
+        settings_file,
+        baseline,
+        boxed_reload_audit(&settings_engine_audit_log),
+    )?);
     let start = current_config(&settings_engine);
     let bundle_engine = Arc::new(open_playbooks(PlaybookSettings {
         catalogue_path: start.catalogue.clone(),
@@ -102,13 +114,7 @@ pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait
     let _bundle_signals = keep_signals(&bundle_engine)?;
     let _settings_signals = keep_signals(&settings_engine)?;
     let pg_settings = Arc::new(load_pg_settings(&start.pg_settings)?);
-    migrate(
-        &connect(&pg_settings).await?,
-        ALERT_NAMESPACE,
-        &ALERT_MIGRATIONS,
-        statement_deadline(&pg_settings),
-    )
-    .await?;
+    migrate_retrying(alerts_migration, &pg_settings, pause).await?;
     let tenant = Arc::new(tenant_scope(&start.tenant)?);
     let live = || Live {
         bundle: current_config(&bundle_engine),
@@ -130,6 +136,28 @@ pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait
         waited = interrupt => Ok(waited?),
         () = serve(rounds, &live, &mut next_round, pause) => Ok(()),
     }
+}
+
+
+pub fn alerts_migration(settings: Arc<PgSettings>) -> MigrationRun {
+    Box::pin(async move {
+        let client = connect(&settings).await?;
+        migrate(&client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, statement_deadline(&settings)).await
+    })
+}
+
+
+/// Only the function search path check is retried: the platform may be between two of its migrations; any other error ends the start.
+pub async fn migrate_retrying(attempt_migration: MigrateFn, settings: &Arc<PgSettings>, wait: WaitFn) -> Result<Vec<String>, PgError> {
+    let mut retries = 0;
+    let mut result = attempt_migration(Arc::clone(settings)).await;
+    while matches!(result, Err(PgError::FunctionSearchPath { .. })) && retries < SEARCH_PATH_ATTEMPTS {
+        retries += 1;
+        warn!(attempt = retries, "search path check failed, retrying");
+        wait(SEARCH_PATH_PAUSE).await;
+        result = attempt_migration(Arc::clone(settings)).await;
+    }
+    result
 }
 
 

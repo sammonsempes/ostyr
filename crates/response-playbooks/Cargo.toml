@@ -31,7 +31,7 @@ signal-hook = "0.4.6"
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 proptest = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 
 [lints]
 workspace = true
