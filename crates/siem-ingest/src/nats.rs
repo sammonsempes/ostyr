@@ -1,9 +1,10 @@
 use crate::error::{without_peer_text, NatsError};
-use crate::model::{AckAction, Delivery, Link, Session, Wiring};
+use crate::model::{AckAction, Collected, Delivery, Link, PullCounts, Pulled, Session, Wiring};
 use crate::parse::truncate_reason;
 use crate::settings::{IngestSettings, MODULE};
 use crate::tenant::{dead_letter_token, EVENTS_SUBJECT_PREFIX};
 use crate::types::{AckToken, ConnectionFields};
+use async_nats::jetstream::consumer::pull::Batch;
 use async_nats::jetstream::consumer::{self, pull, AckPolicy};
 use async_nats::jetstream::{self, AckKind};
 use async_nats::Event;
@@ -13,7 +14,7 @@ use core_config::reload::{current_config, ReloadEngine};
 use core_config::secret_file::{open_secret, SecretFileError};
 use core_config::types::BoxError;
 use futures_util::future::try_join_all;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use rustls::crypto::ring::default_provider;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject;
@@ -56,6 +57,24 @@ pub const MESSAGE_ID_HEADER: &str = "Nats-Msg-Id";
 
 
 pub const FIRST_TOKEN: AckToken = 1;
+
+
+/// Subject, reply subject and header framing the server counts against a pull's `max_bytes` on top of `max_payload` (derived in the crate notes).
+pub const PULL_OVERHEAD_BYTES: usize = 1024;
+
+
+/// async-nats reads a `max_bytes` of 0 as no byte limit in the request.
+pub const NO_BYTE_LIMIT: usize = 0;
+
+
+pub const HEAD_PULL_MESSAGES: usize = 1;
+
+
+/// The status the server ends a pull with when the next message would pass its `max_bytes`, as async-nats words it in the error item.
+pub const BYTE_CAP_STATUS: &str = ": 409, ";
+
+
+pub const BYTE_CAP_DESCRIPTION: &str = "Message Size Exceeds MaxBytes";
 
 
 pub const INBOX_PREFIX: &str = "_INBOX_";
@@ -198,9 +217,9 @@ pub fn connect_options(settings: &IngestSettings, dropped: Arc<AtomicBool>) -> R
 }
 
 
-/// A server that accepts payloads above `max_batch_bytes` could send a message the pull request's byte bound can never deliver.
+/// A throughput guard: a server whose payload limit plus the pull overhead passes `max_batch_bytes` could send a message the first pull never delivers.
 pub fn check_payload_limit(server: usize, cap: usize) -> Result<(), NatsError> {
-    if server > cap {
+    if server.saturating_add(PULL_OVERHEAD_BYTES) > cap {
         Err(NatsError::PayloadLimit { server, cap })
     } else {
         Ok(())
@@ -299,8 +318,40 @@ pub async fn release_held(session: Session) {
 }
 
 
+/// True for the error item async-nats yields when the server ends a pull at the byte cap (409 with the byte-cap description); no peer text is kept.
+pub fn is_byte_cap_end(failure: &BoxError) -> bool {
+    failure
+        .downcast_ref::<std::io::Error>()
+        .map(ToString::to_string)
+        .is_some_and(|text| text.contains(BYTE_CAP_STATUS) && text.contains(BYTE_CAP_DESCRIPTION))
+}
+
+
+/// The messages of one pull; the byte-cap end is a normal end, any other error item fails the fetch.
+pub async fn drain(batch: Batch, max: usize) -> Result<Pulled, BoxError> {
+    let items: Vec<Result<jetstream::Message, BoxError>> = batch.take(max).collect().await;
+    items.into_iter().try_fold(
+        Pulled {
+            messages: Vec::new(),
+            byte_cap_end: false,
+        },
+        |mut pulled, item| match item {
+            Ok(message) => {
+                pulled.messages.push(message);
+                Ok(pulled)
+            }
+            Err(failure) if is_byte_cap_end(&failure) => {
+                pulled.byte_cap_end = true;
+                Ok(pulled)
+            }
+            Err(failure) => Err(failure),
+        },
+    )
+}
+
+
 /// One pull request bounded by messages and bytes; the server ends it at the expiry, the guard covers a server that never answers.
-pub async fn collect_batch(session: &Session, settings: &IngestSettings, max: usize) -> Result<Vec<jetstream::Message>, BoxError> {
+pub async fn first_pull(session: &Session, settings: &IngestSettings, max: usize) -> Result<Pulled, BoxError> {
     let batch = session
         .consumer
         .batch()
@@ -309,13 +360,65 @@ pub async fn collect_batch(session: &Session, settings: &IngestSettings, max: us
         .expires(millis(settings.nats_fetch_deadline_ms))
         .messages()
         .await?;
-    batch.take(max).try_collect().await
+    drain(batch, max).await
 }
 
 
-pub async fn pull_messages(session: &Session, settings: &IngestSettings, max: usize) -> Result<Vec<jetstream::Message>, NatsError> {
+/// The head of the stream alone, with no byte limit and no wait: what a byte-cap end with no message left behind.
+pub async fn head_pull(session: &Session, settings: &IngestSettings) -> Result<Pulled, BoxError> {
+    let batch = session
+        .consumer
+        .fetch()
+        .max_messages(HEAD_PULL_MESSAGES)
+        .max_bytes(NO_BYTE_LIMIT)
+        .expires(millis(settings.nats_request_timeout_ms))
+        .messages()
+        .await?;
+    drain(batch, HEAD_PULL_MESSAGES).await
+}
+
+
+/// Joins the first pull with the head pull that followed it, if any.
+pub fn assemble(first: Pulled, head: Option<Pulled>) -> Collected {
+    let head_pulled = head.is_some();
+    let head_capped = head.as_ref().is_some_and(|pulled| pulled.byte_cap_end);
+    let head_messages = head.into_iter().flat_map(|pulled| pulled.messages);
+    Collected {
+        messages: first.messages.into_iter().chain(head_messages).collect(),
+        byte_cap_ends: u64::from(first.byte_cap_end) + u64::from(head_capped),
+        head_pulled,
+    }
+}
+
+
+pub async fn collect_batch(session: &Session, settings: &IngestSettings, max: usize) -> Result<Collected, BoxError> {
+    let first = first_pull(session, settings, max).await?;
+    let alone = first.byte_cap_end && first.messages.is_empty();
+    let head = if alone { Some(head_pull(session, settings).await?) } else { None };
+    Ok(assemble(first, head))
+}
+
+
+pub async fn pull_messages(session: &Session, settings: &IngestSettings, max: usize) -> Result<Collected, NatsError> {
     let guard = millis(settings.nats_fetch_deadline_ms + settings.nats_request_timeout_ms);
     bounded(guard, collect_batch(session, settings, max)).await
+}
+
+
+/// Adds what a fetch found to the counts the pipeline reads each cycle.
+pub fn count_pulls(pulls: &PullCounts, collected: &Collected) {
+    pulls.byte_cap.fetch_add(collected.byte_cap_ends, Ordering::SeqCst);
+    pulls.head_alone.fetch_add(u64::from(collected.head_pulled), Ordering::SeqCst);
+}
+
+
+/// A head pull that delivered nothing: the server will not hand over its own head, the only case left that stalls the consumer.
+pub fn check_head_delivered(collected: &Collected) -> Result<(), NatsError> {
+    if collected.head_pulled && collected.messages.is_empty() {
+        Err(NatsError::HeadTooLarge)
+    } else {
+        Ok(())
+    }
 }
 
 
@@ -384,9 +487,16 @@ pub async fn terminate(message: &jetstream::Message, settings: &IngestSettings) 
 }
 
 
-pub async fn pull_deliveries(session: &mut Session, counter: &AtomicU64, settings: &IngestSettings, max: usize) -> Result<Vec<Delivery>, NatsError> {
-    let messages = pull_messages(session, settings, max).await?;
-    let (deliveries, refused) = admit_messages(session, counter, messages, settings.nats_max_headers);
+pub async fn pull_deliveries(
+    session: &mut Session,
+    (counter, pulls): (&AtomicU64, &PullCounts),
+    settings: &IngestSettings,
+    max: usize,
+) -> Result<Vec<Delivery>, NatsError> {
+    let collected = pull_messages(session, settings, max).await?;
+    count_pulls(pulls, &collected);
+    check_head_delivered(&collected)?;
+    let (deliveries, refused) = admit_messages(session, counter, collected.messages, settings.nats_max_headers);
     warn_refused(refused.len());
     for message in &refused {
         terminate(message, settings).await;
@@ -405,7 +515,7 @@ pub fn warn_refused(count: usize) {
 /// Keeps a live session, else opens one; the token counter lives in the link so tokens never repeat across sessions.
 pub async fn fetch_in(
     slot: &mut Option<Session>,
-    counter: &AtomicU64,
+    (counter, pulls): (&AtomicU64, &PullCounts),
     settings: &Arc<IngestSettings>,
     max: usize,
 ) -> Result<Vec<Delivery>, NatsError> {
@@ -417,8 +527,8 @@ pub async fn fetch_in(
         Some(kept) => kept,
         None => open_session(settings).await?,
     };
-    let outcome = pull_deliveries(&mut session, counter, settings, max).await;
-    if outcome.is_ok() {
+    let outcome = pull_deliveries(&mut session, (counter, pulls), settings, max).await;
+    if matches!(outcome, Ok(_) | Err(NatsError::HeadTooLarge)) {
         *slot = Some(session);
     }
     outcome
@@ -453,7 +563,9 @@ pub fn log_refusal(link: &Link, outcome: &Result<Vec<Delivery>, NatsError>) {
 pub fn fetch_batch(link: &Link, max: usize) -> Result<Vec<Delivery>, BoxError> {
     let mut slot = lock_session(link);
     let settings = current_config(&link.settings);
-    let outcome = link.runtime.block_on(fetch_in(&mut slot, &link.next_token, &settings, max));
+    let outcome = link
+        .runtime
+        .block_on(fetch_in(&mut slot, (&link.next_token, &link.pulls), &settings, max));
     log_refusal(link, &outcome);
     outcome.map_err(BoxError::from)
 }
@@ -536,12 +648,14 @@ pub fn nats_wiring(settings: Arc<ReloadEngine<IngestSettings>>) -> Result<Wiring
         .enable_all()
         .build()
         .map_err(NatsError::Runtime)?;
+    let pulls = Arc::new(PullCounts::default());
     let link = Arc::new(Link {
         runtime,
         settings,
         session: Mutex::new(None),
         next_token: AtomicU64::new(FIRST_TOKEN),
         refused_field: Mutex::new(None),
+        pulls: Arc::clone(&pulls),
     });
     let fetch_link = Arc::clone(&link);
     let ack_link = Arc::clone(&link);
@@ -552,5 +666,6 @@ pub fn nats_wiring(settings: Arc<ReloadEngine<IngestSettings>>) -> Result<Wiring
         ack: Box::new(move |token, action| acknowledge(&ack_link, token, action)),
         dead_letter: Box::new(move |tenant, payload, reason| publish_dead_letter(&dead_link, tenant, payload, reason)),
         progress: Arc::new(move || report_progress(&progress_link)),
+        pulls,
     })
 }

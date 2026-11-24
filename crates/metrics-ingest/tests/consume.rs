@@ -175,6 +175,7 @@ fn make_bus(deliveries: Vec<Delivery>, failing: (Option<u64>, bool)) -> (Wiring,
             }
         }),
         progress: Arc::new(|| Ok(())),
+        pulls: Default::default(),
     };
     (wiring, Bus { acks, dead, asked })
 }

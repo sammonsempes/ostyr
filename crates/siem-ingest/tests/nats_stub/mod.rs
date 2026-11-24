@@ -72,6 +72,9 @@ pub const MAX_ACK_PENDING: u64 = 1000;
 pub const MAX_WAITING: u64 = 512;
 
 
+pub const MESSAGE_OVERHEAD: usize = 64;
+
+
 pub const STORED_NANOS: u64 = 1_790_230_470_084_404_000;
 
 
@@ -374,6 +377,8 @@ pub fn queued_message(state: &mut StubState, queued: Queued, inbox: &str) -> Out
 pub fn pull_reply(state: &mut StubState, reply: Option<&str>, payload: &[u8]) -> io::Result<Vec<Outgoing>> {
     let request: Value = serde_json::from_slice(payload).map_err(io::Error::other)?;
     let wanted = request.get("batch").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let no_wait = request.get("no_wait").and_then(Value::as_bool).unwrap_or(false);
+    let budget = request.get("max_bytes").and_then(Value::as_u64).unwrap_or(0) as usize;
     state.pulls.push(request);
     let inbox = reply.unwrap_or("");
     if state.silent_pull {
@@ -381,11 +386,23 @@ pub fn pull_reply(state: &mut StubState, reply: Option<&str>, payload: &[u8]) ->
     } else if let Some(code) = state.pull_status.clone() {
         Ok(vec![status_message(inbox, &code)])
     } else {
-        let count = wanted.min(state.queue.len());
-        let taken: Vec<Queued> = state.queue.drain(..count).collect();
+        let mut spent = 0;
+        let fitting = state
+            .queue
+            .iter()
+            .take(wanted)
+            .take_while(|queued| {
+                spent += queued.subject.len() + queued.payload.len() + MESSAGE_OVERHEAD;
+                budget == 0 || spent <= budget
+            })
+            .count();
+        let capped = fitting < wanted.min(state.queue.len());
+        let taken: Vec<Queued> = state.queue.drain(..fitting).collect();
         let mut out: Vec<Outgoing> = taken.into_iter().map(|queued| queued_message(state, queued, inbox)).collect();
-        if count < wanted {
-            out.push(status_message(inbox, "408 Request Timeout"));
+        if capped {
+            out.push(status_message(inbox, "409 Message Size Exceeds MaxBytes"));
+        } else if fitting < wanted {
+            out.push(status_message(inbox, if no_wait { "404 No Messages" } else { "408 Request Timeout" }));
         }
         Ok(out)
     }
