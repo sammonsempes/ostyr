@@ -213,7 +213,8 @@ where
     }
     outcome.ok_or(AppError::AttemptsExhausted {
         attempts: failures,
-        last: last.map(Box::new),
+        rate_refused: last.as_ref().is_some_and(is_rate_refusal),
+        last: last.as_ref().map(error_text),
     })
 }
 
@@ -261,7 +262,7 @@ pub fn lost_streams() -> (Result<Delivered, ChannelError>, Result<CommandRun, Ap
 
 /// A run that ended because the server refused on rate: the server answered, so nothing is held down.
 pub fn ended_on_rate(run: &Result<CommandRun, AppError>) -> bool {
-    matches!(run, Err(AppError::AttemptsExhausted { last: Some(last), .. }) if is_rate_refusal(last))
+    matches!(run, Err(AppError::AttemptsExhausted { rate_refused: true, .. }))
 }
 
 
@@ -292,7 +293,7 @@ pub fn settle_events(file: &AgentFile, spool: &Spool, delivery: Result<Delivered
         }
         Err(error) => {
             let text = error_text(&error);
-            tracing::error!(%text, "event delivery failed, the spool is kept for the next run");
+            tracing::error!(?text, "event delivery failed, the spool is kept for the next run");
             Ok(EventsOutcome {
                 acknowledged: Vec::new(),
                 failures: 1,

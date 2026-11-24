@@ -226,6 +226,7 @@ pub fn error_text(error: &ChannelError) -> String {
 fn leaf_text(error: &ChannelError) -> String {
     match error {
         ChannelError::Status(status) => format!("call refused: {:?}: {}", status.code(), bounded_text(status.message())),
+        ChannelError::RetriesExhausted { attempts, .. } => format!("event delivery abandoned after {attempts} consecutive failed attempts"),
         other => other.to_string(),
     }
 }

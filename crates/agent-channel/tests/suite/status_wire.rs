@@ -111,3 +111,59 @@ fn a_rate_refusal_made_by_the_client_itself_is_not_a_server_answer() -> TestResu
     assert!(!is_rate_refusal(&ChannelError::Status(Box::new(local))));
     Ok(())
 }
+
+
+const INNER_ATTEMPTS: u32 = 2;
+
+
+const OUTER_ATTEMPTS: u32 = 3;
+
+
+const FORGED_MESSAGE: &str = "boom\nFORGED-LINE INFO agent all good\u{1b}[2J\u{7}";
+
+
+#[tokio::test]
+async fn control_characters_in_a_status_message_never_reach_the_log_raw() -> TestResult {
+    init_logging()?;
+    let (captured, _guard) = captured_log();
+    let address = hostile_server(FORGED_MESSAGE.to_owned()).await?;
+    let dial = move || -> DialFuture {
+        Box::pin(async move {
+            let channel = Endpoint::from_shared(format!("http://{address}"))
+                .map_err(ChannelError::Transport)?
+                .connect()
+                .await?;
+            Ok(channel)
+        })
+    };
+    let pause = |_delay: Duration| -> PauseFuture { Box::pin(async {}) };
+    let delivery = deliver_events(&dial, &pause, vec![batch(1)]).await;
+    let dir = long_tempdir()?;
+    let agent = fixture(dir.path())?.agent;
+    let spool = claim_spool(&agent)?;
+    settle_events(&agent, &spool, delivery)?;
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert!(log.contains("event delivery failed"), "{log}");
+    assert!(log.contains("FORGED-LINE"), "{log}");
+    assert!(!log.contains('\u{1b}') && !log.contains('\u{7}'), "{log:?}");
+    assert!(log.lines().all(|line| !line.starts_with("FORGED-LINE")), "{log:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_nested_retries_exhausted_is_cut_to_its_count() -> TestResult {
+    let inner = ChannelError::RetriesExhausted {
+        attempts: INNER_ATTEMPTS,
+        last: Box::new(ChannelError::Status(Box::new(Status::new(Code::Internal, "NESTED-MARKER")))),
+    };
+    let outer = ChannelError::RetriesExhausted {
+        attempts: OUTER_ATTEMPTS,
+        last: Box::new(inner),
+    };
+    let text = error_text(&outer);
+    assert!(text.contains("abandoned after 3"), "{text}");
+    assert!(text.contains("abandoned after 2"), "{text}");
+    assert!(!text.contains("NESTED-MARKER"), "{text}");
+    Ok(())
+}

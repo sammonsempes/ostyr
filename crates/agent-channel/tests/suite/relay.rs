@@ -869,12 +869,14 @@ async fn a_rate_refused_redial_does_not_trip_the_endpoint_or_hold_the_internal_o
     assert!(!*receiver.borrow());
     let exhausted = Err(AppError::AttemptsExhausted {
         attempts: 1,
-        last: Some(Box::new(refused)),
+        rate_refused: true,
+        last: Some(error_text(&refused)),
     });
     assert!(ended_on_rate(&exhausted));
     assert!(!ended_on_rate(&Err(AppError::AttemptsExhausted {
         attempts: 1,
-        last: Some(Box::new(ChannelError::EndpointLost))
+        rate_refused: false,
+        last: Some(error_text(&ChannelError::EndpointLost))
     })));
     assert!(!ended_on_rate(&Err(AppError::Channel(ChannelError::EndpointLost))));
     assert!(!ended_on_rate(&Ok(CommandRun::default())));
@@ -887,7 +889,15 @@ async fn a_rate_refused_redial_does_not_trip_the_endpoint_or_hold_the_internal_o
     let hold = HoldDown::default();
     note_run(&hold, &internal, &exhausted);
     assert!(!is_held(&hold));
-    note_run(&hold, &internal, &Err(AppError::AttemptsExhausted { attempts: 1, last: None }));
+    note_run(
+        &hold,
+        &internal,
+        &Err(AppError::AttemptsExhausted {
+            attempts: 1,
+            rate_refused: false,
+            last: None,
+        }),
+    );
     assert!(is_held(&hold));
     stop_server(server).await
 }
