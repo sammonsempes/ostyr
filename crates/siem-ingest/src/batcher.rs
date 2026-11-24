@@ -1,6 +1,6 @@
 use crate::error::PushError;
 use crate::model::{Batch, Batcher, DeadLetter, Document, FlushReport, Message};
-use crate::parse::{check_message, truncate_reason};
+use crate::parse::{check_message, is_host_metrics, truncate_reason};
 use crate::settings::{IngestSettings, MODULE};
 use crate::types::{ClockFn, SinkFn, SleepFn};
 use core_config::reload::{current_config, ReloadEngine};
@@ -41,7 +41,7 @@ pub fn new_batcher(settings: Arc<ReloadEngine<IngestSettings>>, sink: Box<SinkFn
 
 
 pub fn buffered_messages(batch: &Batch) -> usize {
-    batch.documents.len() + batch.dead.len()
+    batch.documents.len() + batch.dead.len() + batch.skipped.len()
 }
 
 
@@ -87,6 +87,14 @@ pub fn admit(batch: &mut Batch, message: &Message, verdict: Result<OffsetDateTim
 }
 
 
+/// A host metric event is acknowledged with no row and no dead letter: metrics-ingest consumes it, here it is expected.
+pub fn skip(batch: &mut Batch, message: &Message, now: OffsetDateTime) {
+    batch.opened_at = batch.opened_at.or(Some(now));
+    batch.tenant = batch.tenant.take().or_else(|| Some(message.tenant.clone()));
+    batch.skipped.push(message.token);
+}
+
+
 /// Oversize and unparsable messages become dead letters; a valid one is refused when the buffer cap would be exceeded.
 pub fn push(batcher: &mut Batcher, message: &Message) -> Result<Option<FlushReport>, PushError> {
     let settings = current_config(&batcher.settings);
@@ -103,6 +111,9 @@ pub fn push(batcher: &mut Batcher, message: &Message) -> Result<Option<FlushRepo
             buffered: batcher.batch.bytes,
             cap: settings.max_buffered_bytes,
         })
+    } else if message.payload.len() <= settings.max_message_bytes && is_host_metrics(&message.payload) {
+        skip(&mut batcher.batch, message, now);
+        Ok(is_due(&batcher.batch, &settings, now).then(|| flush_with(batcher, &settings)))
     } else {
         admit(&mut batcher.batch, message, verdict, now);
         Ok(is_due(&batcher.batch, &settings, now).then(|| flush_with(batcher, &settings)))
@@ -151,6 +162,7 @@ pub fn flush(batcher: &mut Batcher) -> FlushReport {
 pub fn flush_with(batcher: &mut Batcher, settings: &IngestSettings) -> FlushReport {
     let batch = std::mem::take(&mut batcher.batch);
     let tenant = batch.tenant.unwrap_or_else(|| NO_TENANT.to_owned());
+    let skipped = batch.skipped;
     let (tokens, documents): (Vec<_>, Vec<_>) = batch.documents.into_iter().unzip();
     let dead_tokens: Vec<_> = batch.dead.iter().map(|dead| dead.token).collect();
     let failure = if documents.is_empty() {
@@ -166,10 +178,11 @@ pub fn flush_with(batcher: &mut Batcher, settings: &IngestSettings) -> FlushRepo
             debug!(delivered = documents.len(), "batch delivered");
             FlushReport {
                 tenant,
-                acknowledge: tokens.into_iter().chain(dead_tokens).collect(),
+                acknowledge: tokens.into_iter().chain(dead_tokens).chain(skipped.iter().copied()).collect(),
                 unacknowledged: Vec::new(),
                 dead_letters: batch.dead,
                 delivered: documents.len(),
+                skipped: skipped.len(),
                 sink_error: None,
             }
         }
@@ -177,10 +190,11 @@ pub fn flush_with(batcher: &mut Batcher, settings: &IngestSettings) -> FlushRepo
             warn!(messages = tokens.len(), %error, "batch handed back unacknowledged");
             FlushReport {
                 tenant,
-                acknowledge: dead_tokens,
+                acknowledge: dead_tokens.into_iter().chain(skipped.iter().copied()).collect(),
                 unacknowledged: tokens,
                 dead_letters: batch.dead,
                 delivered: 0,
+                skipped: skipped.len(),
                 sink_error: Some(error),
             }
         }

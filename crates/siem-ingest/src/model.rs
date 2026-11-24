@@ -42,6 +42,19 @@ pub struct EcsEnvelope {
 }
 
 
+/// Only `event.dataset`, read to skip the host metrics; every other field is ignored.
+#[derive(Deserialize)]
+pub struct DatasetProbe {
+    pub event: Option<DatasetPart>,
+}
+
+
+#[derive(Deserialize)]
+pub struct DatasetPart {
+    pub dataset: Option<String>,
+}
+
+
 #[derive(Debug, Deserialize)]
 pub struct EcsVersion {
     pub version: String,
@@ -53,6 +66,7 @@ pub struct Batch {
     pub tenant: Option<String>,
     pub documents: Vec<(AckToken, Document)>,
     pub dead: Vec<DeadLetter>,
+    pub skipped: Vec<AckToken>,
     pub bytes: usize,
     pub opened_at: Option<OffsetDateTime>,
 }
@@ -66,6 +80,7 @@ pub struct FlushReport {
     pub unacknowledged: Vec<AckToken>,
     pub dead_letters: Vec<DeadLetter>,
     pub delivered: usize,
+    pub skipped: usize,
     pub sink_error: Option<String>,
 }
 
@@ -94,6 +109,7 @@ pub struct CycleReport {
     pub acknowledged: usize,
     pub redelivered: usize,
     pub dead_lettered: usize,
+    pub skipped: usize,
     pub ack_failures: usize,
 }
 
@@ -102,6 +118,7 @@ pub struct CycleReport {
 pub struct LoopReport {
     pub cycles: u64,
     pub fetch_failures: u64,
+    pub host_metrics_skipped: u64,
 }
 
 

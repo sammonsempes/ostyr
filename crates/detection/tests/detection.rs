@@ -1133,6 +1133,21 @@ fn the_service_refuses_to_start_on_a_bad_file() -> TestResult {
 
 
 #[test]
+fn a_host_metric_event_is_acknowledged_and_never_dead_lettered() -> TestResult {
+    let mut rig = rig(&[WHOAMI, SEEN_ONCE])?;
+    let metrics = r#"{"@timestamp":"2026-01-01T00:00:00Z","event":{"dataset":"ostyr.host_metrics"}}"#;
+    lock(&rig.stub.hub).queue.push_back(queued("events.a", metrics));
+    let report = run_cycle(&mut rig.pipeline)?;
+    wait_until(&rig.stub, |state| !state.acks.is_empty())?;
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.dead_lettered, 0);
+    assert!(lock(&rig.stub.hub).published.is_empty());
+    assert!(records_of(&rig.output)?.is_empty());
+    Ok(())
+}
+
+
+#[test]
 fn a_document_the_batcher_refuses_is_dead_lettered_not_detected() -> TestResult {
     let mut rig = rig(&[WHOAMI, SEEN_ONCE])?;
     lock(&rig.stub.hub).queue.push_back(queued("events.a", "not json"));
