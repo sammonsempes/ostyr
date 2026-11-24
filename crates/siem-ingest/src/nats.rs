@@ -4,7 +4,7 @@ use crate::parse::truncate_reason;
 use crate::settings::{IngestSettings, MODULE};
 use crate::tenant::EVENTS_SUBJECT_PREFIX;
 use crate::types::{AckToken, ConnectionFields};
-use async_nats::jetstream::consumer::{pull, AckPolicy};
+use async_nats::jetstream::consumer::{self, pull, AckPolicy};
 use async_nats::jetstream::{self, AckKind};
 use async_nats::Event;
 use async_nats::{ConnectOptions, HeaderMap};
@@ -46,6 +46,9 @@ pub const FIRST_TOKEN: AckToken = 1;
 
 
 pub const INBOX_PREFIX: &str = "_INBOX_";
+
+
+pub const JS_EVENTS_PREFIX: &str = "JS.EVENTS.API";
 
 
 /// The reply-subject prefix of one NATS user: a service subscribes only to its own, so no service reads another's replies.
@@ -192,14 +195,17 @@ pub fn check_payload_limit(server: usize, cap: usize) -> Result<(), NatsError> {
 }
 
 
-/// Durable, explicit acknowledgement, on the events subjects only.
-pub fn consumer_config(settings: &IngestSettings) -> pull::Config {
-    pull::Config {
-        durable_name: Some(settings.nats_consumer.clone()),
-        ack_policy: AckPolicy::Explicit,
-        ack_wait: millis(settings.nats_ack_wait_ms),
-        filter_subject: format!("{EVENTS_SUBJECT_PREFIX}.>"),
-        ..Default::default()
+/// What the durable pre-created by the operator must be: pull, explicit acknowledgement, the events subjects only, the configured ack wait.
+pub fn check_consumer_config(config: &consumer::Config, settings: &IngestSettings) -> Result<(), NatsError> {
+    let filter = format!("{EVENTS_SUBJECT_PREFIX}.>");
+    if config.ack_policy != AckPolicy::Explicit {
+        Err(NatsError::ConsumerConfig { field: "ack_policy" })
+    } else if config.filter_subject != filter || !config.filter_subjects.is_empty() {
+        Err(NatsError::ConsumerConfig { field: "filter_subject" })
+    } else if config.ack_wait != millis(settings.nats_ack_wait_ms) {
+        Err(NatsError::ConsumerConfig { field: "ack_wait" })
+    } else {
+        Ok(())
     }
 }
 
@@ -217,9 +223,10 @@ pub async fn open_session(settings: &Arc<IngestSettings>) -> Result<Session, Nat
     let options = connect_options(settings, Arc::clone(&dropped))?;
     let client = bounded(millis(settings.nats_request_timeout_ms), options.connect(settings.nats_url.as_str())).await?;
     check_payload_limit(client.max_payload(), settings.max_batch_bytes)?;
-    let context = jetstream::new(client.clone());
-    let creation = context.create_consumer_on_stream(consumer_config(settings), settings.nats_stream.clone());
-    let consumer = bounded(millis(settings.nats_request_timeout_ms), creation).await?;
+    let context = jetstream::with_prefix(client.clone(), JS_EVENTS_PREFIX);
+    let lookup = context.get_consumer_from_stream::<pull::Config, _, _>(settings.nats_consumer.as_str(), settings.nats_stream.as_str());
+    let consumer = bounded(millis(settings.nats_request_timeout_ms), lookup).await?;
+    check_consumer_config(&consumer.cached_info().config, settings)?;
     Ok(Session {
         client,
         jetstream: context,

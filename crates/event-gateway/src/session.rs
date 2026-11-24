@@ -6,7 +6,9 @@ use async_nats::jetstream::Context;
 use async_nats::{Client, ConnectOptions};
 use core_config::reload::{current_config, ReloadEngine};
 use siem_ingest::error::NatsError;
-use siem_ingest::nats::{bounded, mark_dropped, millis, read_bounded, read_secret_bounded, tls_config, with_inbox, MAX_NATS_FILE_BYTES};
+use siem_ingest::nats::{
+    bounded, mark_dropped, millis, read_bounded, read_secret_bounded, tls_config, with_inbox, JS_EVENTS_PREFIX, MAX_NATS_FILE_BYTES,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,7 +73,10 @@ pub async fn open_session(settings: &Arc<GatewaySettings>) -> Result<Session, Ga
     let dropped = Arc::new(AtomicBool::new(false));
     let options = connect_options(settings, Arc::clone(&dropped))?;
     let client = bounded(millis(settings.connect_timeout_ms), options.connect(settings.nats_url.as_str())).await?;
-    let jetstream = ContextBuilder::new().timeout(millis(settings.publish_timeout_ms)).build(client.clone());
+    let jetstream = ContextBuilder::new()
+        .api_prefix(JS_EVENTS_PREFIX)
+        .timeout(millis(settings.publish_timeout_ms))
+        .build(client.clone());
     Ok(Session {
         client,
         jetstream,

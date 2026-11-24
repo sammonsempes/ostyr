@@ -138,6 +138,54 @@ XML
 chown clickhouse:clickhouse /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
 chmod 640 /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
 
+readonly NATS_JS_PREFIX="JS.EVENTS.API"
+readonly NATS_DEAD_SUBJECT="dead.events"
+readonly NATS_PULL_THRESHOLD="60s"
+readonly NATS_CONSUMERS=("SIEM:siem_ingest:siem-ingest" "DETECTION:detection:detection" "METRICS:metrics_ingest:metrics-ingest")
+
+consumer_exports() {
+    local entry account durable
+    for entry in "${NATS_CONSUMERS[@]}"; do
+        IFS=: read -r account _ durable <<<"$entry"
+        cat <<EXPORTS
+            { service: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable", accounts: [$account] }
+            { service: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable", accounts: [$account], response_type: stream, response_threshold: "$NATS_PULL_THRESHOLD" }
+            { service: "\$JS.ACK.$NATS_STREAM.$durable.>", accounts: [$account] }
+EXPORTS
+    done
+}
+
+consumer_account() {
+    local account="$1" user="$2" password="$3" durable="$4"
+    cat <<ACCOUNT
+    $account {
+        users: [
+            {
+                user: $user
+                password: "$password"
+                permissions: {
+                    publish: {
+                        allow: [
+                            "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable"
+                            "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable"
+                            "\$JS.ACK.$NATS_STREAM.$durable.>"
+                            "$NATS_DEAD_SUBJECT"
+                        ]
+                    }
+                    subscribe: { allow: ["_INBOX_$user.>"] }
+                }
+            }
+        ]
+        imports: [
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.ACK.$NATS_STREAM.$durable.>" } }
+            { service: { account: EVENTS, subject: "$NATS_DEAD_SUBJECT" } }
+        ]
+    }
+ACCOUNT
+}
+
 install -d -m 750 -o nats -g nats /var/lib/nats
 cat >/etc/nats/nats.conf <<CONF
 server_name: ostyr-datastore
@@ -152,72 +200,39 @@ tls {
     ca_file: $LAB_DIR/ca.pem
     handshake_first: true
 }
-authorization {
-    users: [
-        {
-            user: gateway
-            password: "$nats_gateway_password"
-            permissions: {
-                publish: { allow: ["events.*"] }
-                subscribe: { allow: ["_INBOX_gateway.>"] }
+accounts {
+    EVENTS {
+        jetstream: enabled
+        users: [
+            {
+                user: $NATS_ADMIN_USER
+                password: "$nats_password"
             }
-        }
-        {
-            user: siem_ingest
-            password: "$nats_ingest_password"
-            permissions: {
-                publish: {
-                    allow: [
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.siem-ingest"
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.siem-ingest.>"
-                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.siem-ingest"
-                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.siem-ingest"
-                        "\$JS.ACK.$NATS_STREAM.siem-ingest.>"
-                        "dead.events"
-                    ]
+        ]
+        exports: [
+            { service: "events.*", accounts: [GATEWAY] }
+            { service: "$NATS_DEAD_SUBJECT", accounts: [SIEM, DETECTION, METRICS] }
+$(consumer_exports)
+        ]
+    }
+    GATEWAY {
+        users: [
+            {
+                user: gateway
+                password: "$nats_gateway_password"
+                permissions: {
+                    publish: { allow: ["events.*"] }
+                    subscribe: { allow: ["_INBOX_gateway.>"] }
                 }
-                subscribe: { allow: ["_INBOX_siem_ingest.>"] }
             }
-        }
-        {
-            user: detection
-            password: "$nats_detection_password"
-            permissions: {
-                publish: {
-                    allow: [
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.detection"
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.detection.>"
-                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.detection"
-                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.detection"
-                        "\$JS.ACK.$NATS_STREAM.detection.>"
-                        "dead.events"
-                    ]
-                }
-                subscribe: { allow: ["_INBOX_detection.>"] }
-            }
-        }
-        {
-            user: metrics_ingest
-            password: "$nats_metrics_password"
-            permissions: {
-                publish: {
-                    allow: [
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.metrics-ingest"
-                        "\$JS.API.CONSUMER.CREATE.$NATS_STREAM.metrics-ingest.>"
-                        "\$JS.API.CONSUMER.INFO.$NATS_STREAM.metrics-ingest"
-                        "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.metrics-ingest"
-                        "\$JS.ACK.$NATS_STREAM.metrics-ingest.>"
-                        "dead.events"
-                    ]
-                }
-                subscribe: { allow: ["_INBOX_metrics_ingest.>"] }
-            }
-        }
-        {
-            user: $NATS_ADMIN_USER
-            password: "$nats_password"
-        }
-    ]
+        ]
+        imports: [
+            { service: { account: EVENTS, subject: "events.*" } }
+        ]
+    }
+$(consumer_account SIEM siem_ingest "$nats_ingest_password" siem-ingest)
+$(consumer_account DETECTION detection "$nats_detection_password" detection)
+$(consumer_account METRICS metrics_ingest "$nats_metrics_password" metrics-ingest)
 }
 CONF
 chown nats:nats /etc/nats/nats.conf

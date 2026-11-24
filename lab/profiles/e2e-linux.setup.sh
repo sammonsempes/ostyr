@@ -22,6 +22,7 @@ readonly CERT_DAYS=30
 readonly MUSL_TARGET="x86_64-unknown-linux-musl"
 readonly STORE_KEY_BYTES=32
 readonly STREAM_DUPLICATE_WINDOW="10m"
+readonly CONSUMER_ACK_WAIT="30s"
 readonly SERVICES=(event-gateway siem-ingest detection alerts-api web-ui)
 
 lab_state="${1:?usage: e2e-linux.setup.sh <lab-state-dir> <lab-prefix>}"
@@ -301,9 +302,10 @@ client_target="$client_user@$client_address"
 log "installing on the datastore VM"
 tar -C "$stage/datastore" --owner=0 --group=0 -cf - . | ssh "${ssh_options[@]}" "$datastore_target" "sudo tar -C / -xpf -"
 scp "${ssh_options[@]}" "$repo_dir/lab/tests/fixtures/e2e-events.sql" "$datastore_target:/tmp/e2e-events.sql"
-ssh "${ssh_options[@]}" "$datastore_target" "sudo bash -s $STREAM_DUPLICATE_WINDOW" <<'REMOTE'
+ssh "${ssh_options[@]}" "$datastore_target" "sudo bash -s $STREAM_DUPLICATE_WINDOW $CONSUMER_ACK_WAIT" <<'REMOTE'
 set -euo pipefail
 duplicate_window="$1"
+ACK_WAIT="$2"
 source /etc/ostyr-lab/datastore.env
 for service_user in ostyr-gateway ostyr-siem ostyr-detection ostyr-alerts ostyr-web; do
     id "$service_user" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$service_user"
@@ -342,9 +344,20 @@ export NATS_PASSWORD
 nats() {
     /usr/local/share/ostyr-lab/client/nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" "$@"
 }
-nats stream info events >/dev/null 2>&1 || nats stream add events --subjects 'events.>,dead.events' --storage file --retention limits --discard old \
-    --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
-    --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+add_stream() {
+    nats stream info "$1" >/dev/null 2>&1 || nats stream add "$1" --subjects "$2" --storage file --retention limits --discard old \
+        --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
+        --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+}
+add_durable() {
+    nats consumer info events "$1" >/dev/null 2>&1 || nats consumer add events "$1" --pull --deliver all --ack explicit --filter 'events.>' --replay instant \
+        --max-deliver=-1 --max-pending 1000 --no-headers-only --wait "$ACK_WAIT" --defaults >/dev/null
+}
+add_stream events 'events.>'
+add_stream dead 'dead.events'
+for durable in siem-ingest detection metrics-ingest; do
+    add_durable "$durable"
+done
 REMOTE
 ssh -n "${ssh_options[@]}" "$datastore_target" "sudo systemctl daemon-reload && sudo systemctl enable --now ${SERVICES[*]/#/ostyr-}" >/dev/null 2>&1 ||
     die "enabling the Ostyr services failed on the datastore VM"
