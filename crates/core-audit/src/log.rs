@@ -411,6 +411,7 @@ pub const MAX_GROUP_RECORDS: usize = 256;
 pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
     let slot: Slot = Arc::new(SlotCell::default());
     let mut queue = log.pending.lock().map_err(|_| AuditError::LogPoisoned)?;
+    let position = queue.entries.len();
     queue.entries.push(Pending {
         entry,
         slot: Arc::clone(&slot),
@@ -420,7 +421,7 @@ pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<
     } else {
         queue.leader_active = true;
         drop(queue);
-        lead(log, &slot)
+        lead(log, &slot, position)
     }
 }
 
@@ -436,22 +437,22 @@ pub fn await_answer<Output: Write>(log: &AuditLog<Output>, held: MutexGuard<'_, 
         take_answer(slot)
     } else {
         queue.leader_active = true;
+        let position = queue.entries.iter().position(|pending| Arc::ptr_eq(&pending.slot, slot)).unwrap_or(0);
         drop(queue);
-        lead(log, slot)
+        lead(log, slot, position)
     }
 }
 
 
-/// Commits groups until the leader's own entry is answered; waiting callers are woken when it stops.
-pub fn lead<Output: Write>(log: &AuditLog<Output>, own: &Slot) -> Result<Record, AuditError> {
+/// Commits groups until the leader's own entry, queued at `position` when the lead began, is answered: at most `position / MAX_GROUP_RECORDS + 1` rounds.
+pub fn lead<Output: Write>(log: &AuditLog<Output>, own: &Slot, position: usize) -> Result<Record, AuditError> {
     let mut leadership = Leadership { log, group: Vec::new() };
     match log.state.lock() {
         Ok(mut state) => {
-            std::iter::repeat_with(|| {
+            (0..position / MAX_GROUP_RECORDS + 1).any(|_| {
                 flush_group(&mut leadership, &mut state);
                 answered(own)
-            })
-            .any(|done| done);
+            });
         }
         Err(_) => fail_pending(log),
     }

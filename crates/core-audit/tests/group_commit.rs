@@ -5,7 +5,9 @@ mod types;
 
 
 use core_audit::error::AuditError;
-use core_audit::log::{append, await_answer, head, leave_outcome, new_log, take_outcome, AuditLog, LogState, Pending, SlotCell, MAX_GROUP_RECORDS};
+use core_audit::log::{
+    append, await_answer, head, lead, leave_outcome, new_log, take_outcome, AuditLog, LogState, Pending, SlotCell, MAX_GROUP_RECORDS,
+};
 use core_audit::model::GENESIS_HASH;
 use core_audit::types::Slot;
 use core_audit::verify::{verify, MAX_RECORD_BYTES};
@@ -13,7 +15,7 @@ use sample::entry;
 use std::error::Error;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -30,6 +32,9 @@ const THREADS: usize = 8;
 
 
 const APPENDS_PER_THREAD: usize = 20;
+
+
+const MAX_MISPLACED: usize = TWO_GROUPS * MAX_GROUP_RECORDS + EXTRA_QUEUED;
 
 
 const SECOND_WRITE: usize = 2;
@@ -50,7 +55,10 @@ fn guarded(body: fn() -> TestResult) -> TestResult {
     drop(detached);
     receiver
         .recv_timeout(Duration::from_secs(HANG_GUARD_SECONDS))
-        .map_err(|error| format!("hang guard expired: {error}"))??;
+        .map_err(|error| match error {
+            RecvTimeoutError::Timeout => "hang guard expired".to_owned(),
+            RecvTimeoutError::Disconnected => "guarded body panicked".to_owned(),
+        })??;
     Ok(())
 }
 
@@ -549,5 +557,58 @@ fn a_waiter_whose_leader_ended_without_answering_it_leads_itself() -> TestResult
     assert!(await_answer(&log, held, slot).is_ok());
     assert!(!log.pending.lock().map_err(|error| error.to_string())?.leader_active);
     assert_eq!(syncs(&log)?, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_entry_queued_beyond_one_group_is_answered_by_the_bounded_lead() -> TestResult {
+    guarded(|| {
+        let log = log_with(None, counting_sync);
+        let slots = queue(&log, MAX_GROUP_RECORDS)?;
+        let own: Slot = Arc::new(SlotCell::default());
+        log.pending.lock().map_err(|error| error.to_string())?.entries.push(Pending {
+            entry: entry(0)?,
+            slot: Arc::clone(&own),
+        });
+        let mut held = log.pending.lock().map_err(|error| error.to_string())?;
+        held.leader_active = false;
+        await_answer(&log, held, &own)?;
+        assert_eq!(syncs(&log)?, TWO_GROUPS);
+        assert!(slots.iter().all(|slot| matches!(take_outcome(slot), Some(Ok(_)))));
+        assert!(log.pending.lock().map_err(|error| error.to_string())?.entries.is_empty());
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_lead_stops_at_its_own_answer_and_leaves_later_entries_queued() -> TestResult {
+    let log = log_with(None, counting_sync);
+    let own: Slot = Arc::new(SlotCell::default());
+    log.pending.lock().map_err(|error| error.to_string())?.entries.push(Pending {
+        entry: entry(0)?,
+        slot: Arc::clone(&own),
+    });
+    queue(&log, MAX_MISPLACED)?;
+    log.pending.lock().map_err(|error| error.to_string())?.leader_active = true;
+    assert!(lead(&log, &own, MAX_MISPLACED).is_ok());
+    assert_eq!(syncs(&log)?, 1);
+    assert_eq!(
+        log.pending.lock().map_err(|error| error.to_string())?.entries.len(),
+        MAX_MISPLACED + 1 - MAX_GROUP_RECORDS
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_waiter_absent_from_the_queue_leads_one_round_and_is_told_nothing_was_left() -> TestResult {
+    let log = log_with(None, counting_sync);
+    let stranger: Slot = Arc::new(SlotCell::default());
+    let mut held = log.pending.lock().map_err(|error| error.to_string())?;
+    held.leader_active = false;
+    assert!(matches!(await_answer(&log, held, &stranger), Err(AuditError::LogPoisoned)));
+    assert!(!log.pending.lock().map_err(|error| error.to_string())?.leader_active);
     Ok(())
 }
