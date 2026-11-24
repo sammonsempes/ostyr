@@ -1716,3 +1716,79 @@ async fn an_unknown_method_is_audited_as_other_and_known_methods_keep_their_name
     assert!(!targets.iter().any(|target| target.contains("MMMM") || target.starts_with("get ")));
     Ok(())
 }
+
+
+fn empty_cache(digest: String) -> core_api::model::StoreCache {
+    core_api::model::StoreCache {
+        digest,
+        accounts: core_auth::types::AccountMap::new(),
+        credentials: core_auth::types::CredentialMap::new(),
+    }
+}
+
+
+#[test]
+fn a_store_rewritten_in_place_with_the_same_size_and_mtime_is_seen_on_the_next_refresh() -> TestResult {
+    let fx = fixture()?;
+    let path = fx.config.accounts_store.clone();
+    let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+    core_api::state::refresh_accounts(&fx.state, &mut auth)?;
+    assert!(auth.accounts.get(READER).is_some_and(|account| account.roles.contains("reader")));
+    let before = fs::metadata(&path)?;
+    let rewritten = String::from_utf8(fs::read(&path)?)?.replace("\"reader\"\n", "\"Reader\"\n");
+    fs::write(&path, rewritten)?;
+    File::options().write(true).open(&path)?.set_modified(before.modified()?)?;
+    let after = fs::metadata(&path)?;
+    assert_eq!((after.len(), after.modified()?), (before.len(), before.modified()?));
+    core_api::state::refresh_accounts(&fx.state, &mut auth)?;
+    assert!(auth.accounts.get(READER).is_some_and(|account| account.roles.contains("Reader")));
+    assert!(auth.accounts.get(READER).is_some_and(|account| !account.roles.contains("reader")));
+    Ok(())
+}
+
+
+#[test]
+fn bytes_hashing_as_the_cached_digest_reuse_the_parsed_maps_and_a_clear_forgets_them() -> TestResult {
+    let fx = fixture()?;
+    let bytes = fs::read(&fx.config.accounts_store)?;
+    let digest = core_api::reload::content_digest(&bytes);
+    *fx.state.store_cache.lock().map_err(|_| "poisoned")? = Some(empty_cache(digest));
+    assert!(core_api::state::parse_store_cached(&fx.state, &bytes)?.0.is_empty());
+    core_api::state::clear_store_cache(&fx.state);
+    assert!(fx.state.store_cache.lock().map_err(|_| "poisoned")?.is_none());
+    assert!(core_api::state::parse_store_cached(&fx.state, &bytes)?.0.contains_key(READER));
+    assert!(fx.state.store_cache.lock().map_err(|_| "poisoned")?.is_some());
+    *fx.state.store_cache.lock().map_err(|_| "poisoned")? = Some(empty_cache("other".to_owned()));
+    assert!(core_api::state::parse_store_cached(&fx.state, &bytes)?.0.contains_key(READER));
+    Ok(())
+}
+
+
+#[test]
+fn bytes_that_do_not_parse_are_refused_and_never_cached() -> TestResult {
+    let fx = fixture()?;
+    assert!(matches!(
+        core_api::state::parse_store_cached(&fx.state, b"not json"),
+        Err(AuthError::Format(_))
+    ));
+    assert!(fx.state.store_cache.lock().map_err(|_| "poisoned")?.is_none());
+    Ok(())
+}
+
+
+#[test]
+fn a_store_over_the_size_cap_refuses_the_refresh_and_keeps_the_accounts() -> TestResult {
+    let fx = fixture()?;
+    let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+    core_api::state::refresh_accounts(&fx.state, &mut auth)?;
+    File::options()
+        .write(true)
+        .open(&fx.config.accounts_store)?
+        .set_len(core_auth::store::MAX_STORE_BYTES + 1)?;
+    assert!(matches!(
+        core_api::state::refresh_accounts(&fx.state, &mut auth),
+        Err(AuthError::StoreTooLarge { .. })
+    ));
+    assert!(auth.accounts.contains_key(READER));
+    Ok(())
+}

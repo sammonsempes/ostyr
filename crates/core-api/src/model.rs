@@ -33,6 +33,14 @@ use tracing::Dispatch;
 use utoipa::ToSchema;
 
 
+/// The maps parsed from the store bytes whose SHA-256 is `digest`: reused while the file's bytes hash the same.
+pub struct StoreCache {
+    pub digest: String,
+    pub accounts: core_auth::types::AccountMap,
+    pub credentials: core_auth::types::CredentialMap,
+}
+
+
 pub struct ApiState {
     pub identity: ArcSwap<ApiIdentity>,
     pub auth: std::sync::Mutex<State>,
@@ -52,6 +60,7 @@ pub struct ApiState {
     pub limits: SharedLimits,
     pub oidc: ArcSwapOption<OidcRuntime>,
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
+    pub store_cache: std::sync::Mutex<Option<StoreCache>>,
     pub forwarders: ArcSwap<Vec<IpNet>>,
     pub ignored_forwarding: AtomicU64,
     pub detached: DetachedPool,

@@ -25,6 +25,14 @@ pub const TEMP_SUFFIX_BYTES: usize = 8;
 pub const LOCK_SUFFIX: &str = ".lock";
 
 
+/// The largest store file read or written (64 MiB).
+pub const MAX_STORE_BYTES: u64 = 67_108_864;
+
+
+/// What a missing store file reads as.
+pub const EMPTY_STORE: &[u8] = br#"{"version":2,"accounts":[]}"#;
+
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreFile {
@@ -101,13 +109,44 @@ pub fn save_accounts<Output: Write>(output: Output, accounts: &AccountMap) -> Re
 }
 
 
-/// A missing file is an empty store; an existing file goes through `open_secret` (no symlink, regular file, owner, no group or other bit).
-pub fn load_store_file(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
+/// Reads at most `max` bytes of `input` (and one more to notice a larger one) in one buffer sized from `expected`.
+pub fn read_limited<Input: Read>(input: Input, expected: u64, max: u64) -> Result<Vec<u8>, AuthError> {
+    let capacity = usize::try_from(expected.min(max).saturating_add(1)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    input.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if read > max {
+        Err(AuthError::StoreTooLarge {
+            size: read.max(expected),
+            max,
+        })
+    } else {
+        Ok(bytes)
+    }
+}
+
+
+/// The bytes of the store through `open_secret` (no symlink, regular file, owner, no group or other bit), at most `max`; a missing file reads as an empty store.
+pub fn read_store_bytes_with(path: &Path, max: u64) -> Result<Vec<u8>, AuthError> {
     match open_secret(path) {
-        Ok(file) => load_store(file),
-        Err(SecretFileError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok((AccountMap::new(), CredentialMap::new())),
+        Ok(file) => {
+            let expected = file.metadata()?.len();
+            read_limited(file, expected, max)
+        }
+        Err(SecretFileError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok(EMPTY_STORE.to_vec()),
         Err(error) => Err(AuthError::StoreFile(error)),
     }
+}
+
+
+pub fn read_store_bytes(path: &Path) -> Result<Vec<u8>, AuthError> {
+    read_store_bytes_with(path, MAX_STORE_BYTES)
+}
+
+
+/// A missing file is an empty store; an existing file is read once, bounded, through `open_secret`.
+pub fn load_store_file(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
+    read_store_bytes(path).and_then(|bytes| load_store(bytes.as_slice()))
 }
 
 
@@ -150,13 +189,38 @@ pub fn save_store_file_with(
     random: RandomFn,
     sync_parent: fn(&Path) -> io::Result<()>,
 ) -> Result<(), AuthError> {
+    save_store_file_limited(path, accounts, credentials, random, sync_parent, MAX_STORE_BYTES)
+}
+
+
+/// Like `save_store_file_with`, refusing a document larger than `max` bytes before anything is created.
+pub fn save_store_file_limited(
+    path: &Path,
+    accounts: &AccountMap,
+    credentials: &CredentialMap,
+    random: RandomFn,
+    sync_parent: fn(&Path) -> io::Result<()>,
+    max: u64,
+) -> Result<(), AuthError> {
+    let mut document = Vec::new();
+    save_store(&mut document, accounts, credentials)?;
+    let size = u64::try_from(document.len()).unwrap_or(u64::MAX);
+    if size > max {
+        Err(AuthError::StoreTooLarge { size, max })
+    } else {
+        write_store_document(path, &document, random, sync_parent)
+    }
+}
+
+
+fn write_store_document(path: &Path, document: &[u8], random: RandomFn, sync_parent: fn(&Path) -> io::Result<()>) -> Result<(), AuthError> {
     let name = path
         .file_name()
         .ok_or_else(|| AuthError::Usage("store path has no file name".to_owned()))?;
     let suffix = HEXLOWER.encode(&random_array::<TEMP_SUFFIX_BYTES>(random)?);
     let temporary = path.with_file_name(format!(".{}.{suffix}.tmp", name.to_string_lossy()));
-    let file = owner_only(OpenOptions::new().write(true).create_new(true)).open(&temporary)?;
-    save_store(&file, accounts, credentials)?;
+    let mut file = owner_only(OpenOptions::new().write(true).create_new(true)).open(&temporary)?;
+    file.write_all(document)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
     sync_parent(parent_directory(path))?;
@@ -189,8 +253,14 @@ pub fn lock_store(path: &Path) -> Result<File, AuthError> {
 
 /// Reads the store while holding the store lock, so a concurrent writer is never seen half done.
 pub fn read_store_locked(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
+    read_store_bytes_locked(path).and_then(|bytes| load_store(bytes.as_slice()))
+}
+
+
+/// The store bytes read once under the store lock, for a caller that caches by digest.
+pub fn read_store_bytes_locked(path: &Path) -> Result<Vec<u8>, AuthError> {
     let _lock = lock_store(path)?;
-    load_store_file(path)
+    read_store_bytes(path)
 }
 
 
