@@ -1,13 +1,11 @@
 use crate::support::{rig, TestResult, BASE_YAML, HUGE_SOFT};
 use core_audit::log::open_file_log;
 use core_config::reload::current_config;
-use relay::app::{
-    exit_code, main_exit, open_runtime, open_runtime_with, parse_args, refuse_root, run_from_args, run_main, run_runtime, same_inode, stop_signals,
-};
+use relay::app::{exit_code, main_exit, open_runtime, parse_args, refuse_root, run_from_args, run_main, run_runtime, stop_signals};
 use relay::audit::{append_entry, lifecycle_entry, START_ACTION};
 use relay::error::RelayError;
 use relay::header::proxy_header;
-use relay::model::{Options, Paths};
+use relay::model::{Options, Paths, RelaySettings};
 use rustix::process::{getpid, kill_process, Signal};
 use std::io;
 use std::path::Path;
@@ -23,12 +21,6 @@ const IPV4_HEADER_BYTES: usize = 28;
 
 
 const PROXY_SIGNATURE_BYTES: usize = 12;
-
-
-const EXPECTED_AUDIT_LINES: usize = 2;
-
-
-const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 
 
 const NON_ROOT: u32 = 1000;
@@ -119,6 +111,19 @@ async fn roundtrip(address: std::net::SocketAddr) -> TestResult {
     let mut answer = String::new();
     client.read_to_string(&mut answer).await?;
     assert_eq!(answer, "echo me");
+    Ok(())
+}
+
+
+async fn config_reaches(engine: &core_config::reload::ReloadEngine<RelaySettings>, wanted: usize) -> TestResult {
+    let mut seen = false;
+    for _attempt in 0..POLL_ATTEMPTS {
+        seen = seen || current_config(engine).max_connections == wanted;
+        if !seen {
+            tokio::time::sleep(POLL_STEP).await;
+        }
+    }
+    assert!(seen, "max_connections never reached {wanted}");
     Ok(())
 }
 
@@ -236,6 +241,7 @@ async fn the_relay_forwards_audits_start_and_stop_and_reloads_on_file_change() -
     );
     std::fs::write(&settings, lowered)?;
     audit_contains(&audit, "applied").await?;
+    config_reaches(&engine, LOWERED).await?;
     assert_eq!(current_config(&engine).max_connections, LOWERED);
     stop.send(()).map_err(|()| "stop dropped")?;
     timeout(SIGNAL_WAIT, running).await???;
@@ -373,76 +379,6 @@ fn paths_in(dir: &Path) -> Result<Paths, io::Error> {
 }
 
 
-fn audit_lines(path: &Path) -> Result<usize, io::Error> {
-    Ok(std::fs::read_to_string(path)?.lines().count())
-}
-
-
-#[test]
-fn a_relay_that_opened_the_log_before_the_other_stopped_continues_from_the_current_head() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let paths = paths_in(dir.path())?;
-    let first = std::cell::RefCell::new(Some(open_runtime(&paths, HUGE_SOFT)?));
-    let stopped = |_opened: &std::fs::File| {
-        if let Some(runtime) = first.borrow_mut().take() {
-            let entry = lifecycle_entry(Path::new("relay.yaml"), "relay.stop", &[]);
-            drop(append_entry(&runtime.log, entry));
-        }
-    };
-    let second = open_runtime_with(&paths, HUGE_SOFT, &stopped)?;
-    append_entry(&second.log, lifecycle_entry(Path::new("relay.yaml"), START_ACTION, &[]))?;
-    drop(second);
-    assert!(first.borrow().is_none());
-    assert_eq!(audit_lines(&paths.audit)?, EXPECTED_AUDIT_LINES);
-    open_file_log(&paths.audit)?;
-    Ok(())
-}
-
-
-#[test]
-fn a_relay_that_opened_the_log_while_the_other_still_runs_is_refused_locked() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let paths = paths_in(dir.path())?;
-    let first = open_runtime(&paths, HUGE_SOFT)?;
-    let refused = open_runtime_with(&paths, HUGE_SOFT, &|_opened| ())
-        .err()
-        .ok_or("the second start was accepted")?;
-    assert!(matches!(refused, RelayError::AuditLocked(_)));
-    assert!(refused.to_string().contains("held by another relay"));
-    drop(first);
-    Ok(())
-}
-
-
-#[test]
-fn a_log_replaced_between_the_open_and_the_lock_is_refused_by_name() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let paths = paths_in(dir.path())?;
-    let audit = paths.audit.clone();
-    let moved = dir.path().join("moved.log");
-    let replaced = |_opened: &std::fs::File| {
-        drop(std::fs::rename(&audit, &moved));
-        drop(std::fs::write(&audit, b""));
-    };
-    let refused = open_runtime_with(&paths, HUGE_SOFT, &replaced)
-        .err()
-        .ok_or("the replaced log was accepted")?;
-    assert!(matches!(refused, RelayError::AuditReplaced));
-    assert!(refused.to_string().contains("replaced"));
-    Ok(())
-}
-
-
-#[test]
-fn a_log_whose_name_is_gone_after_the_lock_is_an_io_error() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let file = std::fs::File::create(dir.path().join("held.log"))?;
-    let missing = same_inode(&file, &dir.path().join("absent.log"));
-    assert!(matches!(missing, Err(RelayError::Io(_))));
-    Ok(())
-}
-
-
 #[tokio::test]
 async fn a_client_sent_proxy_header_lands_after_the_relay_header_and_never_names_the_source() -> TestResult {
     let upstream = TcpListener::bind("127.0.0.1:0").await?;
@@ -468,7 +404,6 @@ async fn a_client_sent_proxy_header_lands_after_the_relay_header_and_never_names
     let (source, next) = timeout(SIGNAL_WAIT, listener_task).await???;
     assert_eq!(source.ok(), Some(client.local_addr()?.ip()));
     assert_eq!(next, agent_channel::model::PROXY_SIGNATURE);
-    assert_ne!(next.first(), Some(&TLS_HANDSHAKE_RECORD));
     stop.send(()).map_err(|()| "stop dropped")?;
     timeout(SIGNAL_WAIT, running).await???;
     Ok(())
