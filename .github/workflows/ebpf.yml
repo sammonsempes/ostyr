@@ -38,3 +38,15 @@ jobs:
         run: cargo "+$EBPF_NIGHTLY" clippy --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST" -- -D warnings
       - name: Fail loudly when the runner kernel has no BTF
         run: test -r /sys/kernel/btf/vmlinux || { echo "::error::this runner kernel has no BTF (/sys/kernel/btf/vmlinux is missing), the live probe tests cannot run"; exit 1; }
+      - name: Check the license section of the object is exactly Dual MIT/GPL
+        run: |
+          OBJECT=crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel
+          BIN="$(rustc "+$EBPF_NIGHTLY" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+          SCRATCH="$(mktemp -d)"
+          "$BIN/llvm-objcopy" --dump-section "license=$SCRATCH/license.bin" "$OBJECT" "$SCRATCH/copy.o"
+          printf 'Dual MIT/GPL\0' > "$SCRATCH/expected.bin"
+          cmp "$SCRATCH/license.bin" "$SCRATCH/expected.bin"
+      - name: Lint the host crate with the live feature
+        run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-live -- -D warnings
+      - name: Run the live exec test as root, failing when it cannot run
+        run: sudo env "PATH=$PATH" "HOME=$HOME" "EBPF_PROBES_OBJECT=$PWD/crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel" cargo test --locked -p ebpf-probes --features ebpf-live --test live_exec

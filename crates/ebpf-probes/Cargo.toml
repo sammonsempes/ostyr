@@ -6,7 +6,10 @@ license.workspace = true
 publish = false
 
 [features]
-ebpf-live = []
+ebpf-live = ["dep:aya"]
+
+[dependencies]
+aya = { version = "=0.16.0", default-features = false, optional = true }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
