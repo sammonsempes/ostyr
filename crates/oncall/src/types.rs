@@ -68,3 +68,14 @@ pub type ApplyFn =
 
 
 pub type Refused = Box<axum::response::Response>;
+
+
+/// Resolves when the process is asked to stop (SIGINT or SIGTERM).
+pub type StartRead = fn(&std::path::Path) -> Result<crate::serve::ServiceSettings, core_config::error::ConfigError>;
+
+
+pub type InterruptWait = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>>>>;
+
+
+/// Appends one declared audit entry, whatever the sink.
+pub type AppendFn<'append> = &'append dyn Fn(core_audit::model::NewEntry) -> Result<(), core_audit::error::AuditError>;
