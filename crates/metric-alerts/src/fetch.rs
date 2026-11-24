@@ -121,6 +121,8 @@ pub enum FetchError {
         .0.columns, .0.timestamp, .0.value, .0.non_finite
     )]
     Malformed(LineFaults),
+    #[error("the service is stopping, no query was sent")]
+    Stopped,
 }
 
 

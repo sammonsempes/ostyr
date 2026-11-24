@@ -357,6 +357,7 @@ async fn a_pass_that_reaches_neither_store_runs_nothing_and_counts_it() -> TestR
     let live = Live {
         settings: Arc::new(settings),
         rules: Arc::new(metric_alerts::rules::load_rules(&site.dir.join("rules.yaml"))?),
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let pg = Arc::new(core_pg::settings::load_settings(&site.dir.join("pg.yaml"))?);
     let states = Arc::new(Mutex::new(metric_alerts::types::TenantStates::new()));

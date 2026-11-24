@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::ready;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
@@ -134,6 +135,7 @@ fn live_of(tenants: &[&str], rules: Vec<Rule>) -> Live {
     Live {
         settings: Arc::new(settings_of(tenants)),
         rules: Arc::new(RuleFile { rules }),
+        stop: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -480,12 +482,12 @@ async fn a_recovery_fault_is_retried_next_round_and_the_evaluation_still_runs() 
         rules: vec![threshold_rule(), absence_rule()],
     };
     let fetch = |_query: &MetricQuery| -> FetchResult { Ok(vec![(NOW, BREACH)]) };
-    let ok = tenant_round(&exec, &fetch, &scope, &rules, NOW, &mut states).await;
+    let ok = tenant_round(&exec, &fetch, &AtomicBool::new(false), &scope, &rules, NOW, &mut states).await;
     assert!(ok);
     assert!(!states.recovered);
     assert_eq!(stored_by(&store)?, vec![("a".to_owned(), "metric.disk".to_owned())]);
     *store.failing_recovery.lock().map_err(|_poisoned| "poisoned")? = None;
-    assert!(tenant_round(&exec, &fetch, &scope, &rules, NOW, &mut states).await);
+    assert!(tenant_round(&exec, &fetch, &AtomicBool::new(false), &scope, &rules, NOW, &mut states).await);
     assert!(states.recovered);
     assert_eq!(store.recoveries.lock().map_err(|_poisoned| "poisoned")?.len(), 1);
     Ok(())
@@ -522,5 +524,62 @@ async fn a_clock_step_backwards_runs_nothing_that_round_and_each_round_pauses() 
     );
     assert_eq!(*passes.borrow(), vec![FIRST_READING, LATER_READING]);
     assert_eq!(*pauses.borrow(), vec![Duration::from_secs(ROUND_SECONDS); FOUR_ROUNDS as usize]);
+    Ok(())
+}
+
+
+const NO_CALLS: usize = 0;
+
+
+const RULES_PER_TENANT: usize = 4;
+
+
+fn four_rules() -> Vec<Rule> {
+    (0..RULES_PER_TENANT)
+        .map(|index| Rule {
+            id: format!("disk{index}"),
+            ..threshold_rule()
+        })
+        .collect()
+}
+
+
+#[tokio::test]
+async fn a_stop_set_inside_a_fetch_ends_the_pass_before_the_next_fetch_and_stores_nothing() -> TestResult {
+    let store = Store::default();
+    let exec = executor(&store);
+    let mut states = TenantStates::new();
+    let live = live_of(&["a", "b"], four_rules());
+    let calls = Cell::new(NO_CALLS);
+    let fetch = |_query: &MetricQuery| -> FetchResult {
+        calls.set(calls.get() + 1);
+        live.stop.store(true, Ordering::SeqCst);
+        Ok(vec![(NOW, BREACH)])
+    };
+    let report = run_pass(&exec, &fetch, &live, NOW, &mut states).await;
+    assert_eq!(calls.get(), 1);
+    assert_eq!(report.failed, 1);
+    assert!(stored_by(&store)?.is_empty());
+    assert_eq!(states.keys().map(String::as_str).collect::<Vec<_>>(), vec!["a"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stop_already_set_runs_no_tenant_and_sends_no_query() -> TestResult {
+    let store = Store::default();
+    let exec = executor(&store);
+    let mut states = TenantStates::new();
+    let live = live_of(&["a", "b"], four_rules());
+    live.stop.store(true, Ordering::SeqCst);
+    let calls = Cell::new(NO_CALLS);
+    let fetch = |_query: &MetricQuery| -> FetchResult {
+        calls.set(calls.get() + 1);
+        Ok(vec![(NOW, BREACH)])
+    };
+    run_pass(&exec, &fetch, &live, NOW, &mut states).await;
+    assert_eq!(calls.get(), NO_CALLS);
+    assert!(states.is_empty());
+    assert!(stored_by(&store)?.is_empty());
     Ok(())
 }

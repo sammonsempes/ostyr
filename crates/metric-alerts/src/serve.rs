@@ -20,6 +20,7 @@ use std::io::stderr;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use thiserror::Error;
@@ -107,6 +108,21 @@ pub struct NoSignals;
 #[cfg(not(unix))]
 pub fn keep_signals<Config>(_engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<NoSignals> {
     Ok(NoSignals)
+}
+
+
+/// Sets the flag at the signal itself, so blocking fetches see a stop that the runtime cannot poll.
+#[cfg(unix)]
+pub fn flag_on_stop_signals(stop: &Arc<AtomicBool>) -> std::io::Result<()> {
+    [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT]
+        .iter()
+        .try_for_each(|signal| signal_hook::flag::register(*signal, Arc::clone(stop)).map(|_id| ()))
+}
+
+
+#[cfg(not(unix))]
+pub fn flag_on_stop_signals(_stop: &Arc<AtomicBool>) -> std::io::Result<()> {
+    Ok(())
 }
 
 
@@ -205,9 +221,12 @@ pub async fn serving(
     )
     .await?;
     let states = Arc::new(Mutex::new(TenantStates::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    flag_on_stop_signals(&stop)?;
     let live = || Live {
         settings: current_config(&settings_engine),
         rules: current_config(&rules_engine),
+        stop: Arc::clone(&stop),
     };
     let mut pass = |snapshot: Live, at: Timestamp| -> PassFuture { Box::pin(one_pass(Arc::clone(&pg), Arc::clone(&states), snapshot, at)) };
     let tenants = first.tenants.len();

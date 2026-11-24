@@ -1,12 +1,13 @@
 //! The service rounds: settings, the rules and settings reload engines, one pass over every tenant and the round loop.
 
 use crate::error::RuleError;
+use crate::fetch::FetchError;
 use crate::model::RuleFile;
-use crate::query::parse_tenant_id;
+use crate::query::{parse_tenant_id, MetricQuery};
 use crate::recover::{recover_states, recovery_class};
 use crate::round::{evaluate_round, store_round, RoundError, RoundStates};
 use crate::rules::load_rules;
-use crate::types::{FetchFn, LiveFn, NowFn, PassFn, TenantStates, Timestamp, WaitFn};
+use crate::types::{FetchFn, FetchResult, LiveFn, NowFn, PassFn, TenantStates, Timestamp, WaitFn};
 use alerts::error::StoreError;
 use alerts::types::Executor;
 use core_config::error::ConfigError;
@@ -18,6 +19,7 @@ use serde::Deserialize;
 use siem_schema::metrics::MetricsRetention;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -62,11 +64,12 @@ pub struct ServiceSettings {
 }
 
 
-/// One round's snapshot: the settings and the rules in force when it starts.
+/// One round's snapshot: the settings and the rules in force when it starts, and the stop flag the signal path sets.
 #[derive(Debug, Clone)]
 pub struct Live {
     pub settings: Arc<ServiceSettings>,
     pub rules: Arc<RuleFile>,
+    pub stop: Arc<AtomicBool>,
 }
 
 
@@ -103,6 +106,8 @@ pub enum TenantFault {
     Round(#[from] RoundError),
     #[error("the alerts could not be stored")]
     Store(#[from] StoreError),
+    #[error("the service is stopping, the evaluation was dropped")]
+    Stopped,
 }
 
 
@@ -279,14 +284,26 @@ pub fn fault_class(fault: &TenantFault) -> &'static str {
     match fault {
         TenantFault::Round(_) => "tenant_mismatch",
         TenantFault::Store(_) => "store",
+        TenantFault::Stopped => "stopped",
     }
 }
 
 
-/// A store fault of the recovery is logged by class and retried next round; the evaluation still runs.
+/// Answers a fetch only while the service runs: once the flag is set no query is sent.
+pub fn guarded_fetch(stop: &AtomicBool, fetch: FetchFn<'_>, query: &MetricQuery) -> FetchResult {
+    if stop.load(Ordering::SeqCst) {
+        Err(FetchError::Stopped)
+    } else {
+        fetch(query)
+    }
+}
+
+
+/// A store fault of the recovery is logged by class and retried next round; the evaluation still runs. A stop drops the evaluation unstored.
 pub async fn attempt(
     exec: Executor<'_, '_>,
     fetch: FetchFn<'_>,
+    stop: &AtomicBool,
     scope: &TenantScope,
     rules: &RuleFile,
     now: Timestamp,
@@ -300,8 +317,13 @@ pub async fn attempt(
         }
         other => other,
     }?;
-    let outcome = evaluate_round(rules, scope, now, &MetricsRetention::default(), fetch, states)?;
-    let stored = store_round(exec, scope, &outcome, now).await?;
+    let guarded = |query: &MetricQuery| guarded_fetch(stop, fetch, query);
+    let outcome = evaluate_round(rules, scope, now, &MetricsRetention::default(), &guarded, states)?;
+    let stored = if stop.load(Ordering::SeqCst) {
+        Err(TenantFault::Stopped)
+    } else {
+        Ok(store_round(exec, scope, &outcome, now).await?)
+    }?;
     Ok(TenantReport {
         recovered,
         evaluated: outcome.counts.evaluated,
@@ -315,13 +337,14 @@ pub async fn attempt(
 pub async fn tenant_round(
     exec: Executor<'_, '_>,
     fetch: FetchFn<'_>,
+    stop: &AtomicBool,
     scope: &TenantScope,
     rules: &RuleFile,
     now: Timestamp,
     states: &mut RoundStates,
 ) -> bool {
     let tenant = tenant_of(scope);
-    match attempt(exec, fetch, scope, rules, now, states).await {
+    match attempt(exec, fetch, stop, scope, rules, now, states).await {
         Ok(report) => {
             let TenantReport {
                 recovered,
@@ -341,15 +364,16 @@ pub async fn tenant_round(
 }
 
 
-/// One round over every tenant of the snapshot, each with its own `RoundStates`; tenants that left the list leave the map.
+/// One round over every tenant, each with its own `RoundStates`; the stop flag is read before each tenant and each fetch.
 pub async fn run_pass(exec: Executor<'_, '_>, fetch: FetchFn<'_>, live: &Live, now: Timestamp, states: &mut TenantStates) -> PassReport {
     let (scopes, refused) = tenants_of(&live.settings);
     let listed: BTreeSet<&String> = scopes.iter().map(|(name, _)| name).collect();
     states.retain(|name, _| listed.contains(name));
     let mut failed = 0;
-    for (name, scope) in &scopes {
+    let stop: &AtomicBool = &live.stop;
+    for (name, scope) in scopes.iter().take_while(|_| !stop.load(Ordering::SeqCst)) {
         let tenant_states = states.entry(name.clone()).or_default();
-        if !tenant_round(exec, fetch, scope, &live.rules, now, tenant_states).await {
+        if !tenant_round(exec, fetch, stop, scope, &live.rules, now, tenant_states).await {
             failed += 1;
         }
     }
