@@ -1,6 +1,8 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
 use crate::error::SourceError;
+#[cfg(target_os = "linux")]
+use crate::exec_probe::{run_exec_controller, spawn_thread, ProbeEnv, PRODUCTION_PROBE};
 use crate::hostmetrics::statvfs_path;
 use crate::metrics::run_metrics;
 use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
@@ -68,7 +70,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
     let _audit_dir = open_parent(&file.audit_file)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
-    let (engine, shared, sensor_settings, update_settings, _osquery, metrics_settings) =
+    let (engine, shared, sensor_settings, update_settings, _osquery, metrics_settings, exec_probe_settings) =
         open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
@@ -161,6 +163,19 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             .await
             .map(|_| ())
     };
-    let (totals, runs, (), (), (), _handled) = tokio::try_join!(source, cycles, sensor, updates, metrics, shell)?;
+    #[cfg(target_os = "linux")]
+    let exec_env = ProbeEnv {
+        tenant: agent.tenant.clone(),
+        probe: PRODUCTION_PROBE,
+        spawn: spawn_thread,
+    };
+    #[cfg(target_os = "linux")]
+    let exec_audit = shared_log_audit(&log);
+    let exec_probe = async {
+        #[cfg(target_os = "linux")]
+        run_exec_controller(&exec_probe_settings, &exec_env, exec_audit.as_ref(), max_polls, pause, &monotonic_seconds).await;
+        Ok::<(), SourceError>(())
+    };
+    let (totals, runs, (), (), (), _handled, ()) = tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe)?;
     Ok(Totals { agent_runs: runs, ..totals })
 }

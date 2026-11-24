@@ -22,6 +22,7 @@ pub enum LoadError {
     MissingProgram,
     WrongProgramType,
     TakeMap(&'static str),
+    NotBuilt,
 }
 
 
@@ -38,6 +39,7 @@ impl fmt::Display for LoadError {
             LoadError::MissingProgram => write!(formatter, "program {PROGRAM_NAME} is missing"),
             LoadError::WrongProgramType => write!(formatter, "program {PROGRAM_NAME} is not a tracepoint"),
             LoadError::TakeMap(name) => write!(formatter, "map {name} is missing or has the wrong type"),
+            LoadError::NotBuilt => write!(formatter, "exec probe is not built into this agent"),
         }
     }
 }
@@ -107,4 +109,22 @@ pub fn program_load_error(error: &(dyn std::error::Error + 'static)) -> LoadErro
 /// An attach failure keeps its errno.
 pub fn attach_error(error: &(dyn std::error::Error + 'static)) -> LoadError {
     LoadError::Attach { errno: errno_of(error) }
+}
+
+
+/// The fixed variant name of a load error, for audit records; never an errno, a path or any text of the cause.
+pub fn load_error_name(error: &LoadError) -> &'static str {
+    match error {
+        LoadError::Object(_) => "Object",
+        LoadError::Shape(_) => "Shape",
+        LoadError::Btf(_) => "Btf",
+        LoadError::Parse => "Parse",
+        LoadError::MapCreate { .. } => "MapCreate",
+        LoadError::ProgramLoad { .. } => "ProgramLoad",
+        LoadError::Attach { .. } => "Attach",
+        LoadError::MissingProgram => "MissingProgram",
+        LoadError::WrongProgramType => "WrongProgramType",
+        LoadError::TakeMap(_) => "TakeMap",
+        LoadError::NotBuilt => "NotBuilt",
+    }
 }

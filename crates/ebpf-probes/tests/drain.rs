@@ -1,6 +1,6 @@
 use ebpf_probes::drain::{
-    decode_batch, finish_drain, kernel_dropped, poll_loop, report_of, wait_after, warning_text, Batch, DrainReport, Drained, KernelDropped,
-    MAX_DRAIN_PER_POLL, POLL_INTERVAL_MILLIS, REASON_UNKNOWN, REASON_WENT_DOWN,
+    decode_batch, finish_drain, kernel_dropped, may_proceed, poll_loop, report_of, sum_per_cpu, wait_after, warning_text, Batch, DrainReport,
+    Drained, KernelDropped, MAX_DRAIN_PER_POLL, POLL_INTERVAL_MILLIS, REASON_UNKNOWN, REASON_WENT_DOWN,
 };
 use ebpf_probes::limiter::{Limiter, MAX_EXEC_EVENTS_PER_SECOND, NANOS_PER_SECOND};
 use ebpf_probes::record::EXEC_RECORD_BYTES;
@@ -374,5 +374,27 @@ fn the_kernel_dropped_names_print_fixed_text() -> Result<(), Box<dyn Error>> {
     assert_eq!(KernelDropped::Counted(LOST_BY_KERNEL).to_string(), LOST_BY_KERNEL.to_string());
     assert_eq!(KernelDropped::Unknown.to_string(), REASON_UNKNOWN);
     assert_eq!(KernelDropped::CounterWentDown.to_string(), REASON_WENT_DOWN);
+    Ok(())
+}
+
+
+#[test]
+fn the_per_cpu_drop_counter_is_summed_and_saturates() -> Result<(), Box<dyn Error>> {
+    assert_eq!(sum_per_cpu(&[]), 0);
+    assert_eq!(
+        sum_per_cpu(&[AVAILABLE.into(), SHORT_LENGTH as u64]),
+        u64::from(AVAILABLE) + SHORT_LENGTH as u64
+    );
+    assert_eq!(sum_per_cpu(&[u64::MAX, 1]), u64::MAX);
+    Ok(())
+}
+
+
+#[test]
+fn a_stop_seen_before_attach_refuses_the_attach() -> Result<(), Box<dyn Error>> {
+    let stop = AtomicBool::new(false);
+    assert!(may_proceed(&stop));
+    stop.store(true, Ordering::Relaxed);
+    assert!(!may_proceed(&stop));
     Ok(())
 }
