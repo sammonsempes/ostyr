@@ -6,9 +6,6 @@ use types::TestResult;
 use web_ui::api::{valid_report_framework, MAX_REPORT_FRAMEWORK_CHARS};
 
 
-const GRC_MAX_ID_CHARS: usize = 64;
-
-
 fn corpus() -> Vec<String> {
     let mut samples: Vec<String> = (0..=u8::MAX).map(|byte| char::from(byte).to_string()).collect();
     samples.extend((0..=u8::MAX).map(|byte| format!("a{}", char::from(byte))));
@@ -24,11 +21,11 @@ fn corpus() -> Vec<String> {
 
 #[test]
 fn the_framework_grammar_agrees_with_grc_on_a_corpus() -> TestResult {
-    assert_eq!(MAX_REPORT_FRAMEWORK_CHARS, GRC_MAX_ID_CHARS);
+    assert_eq!(MAX_REPORT_FRAMEWORK_CHARS, grc::load::MAX_ID_CHARS);
     for sample in corpus() {
         assert_eq!(
             valid_report_framework(&sample),
-            grc::load::is_identifier(&sample, GRC_MAX_ID_CHARS),
+            grc::load::is_identifier(&sample, grc::load::MAX_ID_CHARS),
             "{sample:?}"
         );
     }

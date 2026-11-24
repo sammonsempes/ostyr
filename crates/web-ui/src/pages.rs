@@ -2367,6 +2367,9 @@ pub fn shell_detail_page(language: Language, csrf: &str, view: &ShellSessionView
 pub const REPORT_COLUMNS: u32 = 7;
 
 
+pub const GRC_COLUMNS: u32 = 6;
+
+
 /// A boolean as the fixed yes or no text.
 pub fn yes_no(language: Language, value: bool) -> &'static str {
     text(language, if value { "cert_yes" } else { "cert_no" })
@@ -2387,7 +2390,7 @@ pub fn grc_row(language: Language, item: &GrcReportItem) -> Markup {
             }
         }
     } else {
-        html! { tr { td colspan=(REPORT_COLUMNS) { (text(language, "report_unreadable")) } } }
+        html! { tr { td colspan=(GRC_COLUMNS) { (text(language, "report_unreadable")) } } }
     }
 }
 

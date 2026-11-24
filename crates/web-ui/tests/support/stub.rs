@@ -2263,14 +2263,21 @@ pub async fn grc_list_handler(State(state): State<Arc<StubState>>, headers: Head
 
 
 pub async fn grc_get_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
-    let body = |framework: &str| {
+    let body = |framework: &str, generated: &str| {
         json!({
-            "tenant": "a", "framework": framework, "version": REPORT_VERSION, "generated": "2026-03-01",
+            "tenant": "a", "framework": framework, "version": REPORT_VERSION, "generated": generated,
             "counts": {"compliant": REPORT_COUNT, "partially_compliant": REPORT_COUNT_PARTIAL, "non_compliant": REPORT_COUNT_FAILED, "not_assessable": REPORT_COUNT_UNKNOWN},
             "controls": [{"id": "a"}, {"id": "b"}, {"id": "c"}], "gaps": [{"id": "g"}], "plan": [],
         })
     };
-    report_get_reply(&state, &uri, &headers, &id, body("iso27001"), body(&report_hostile_text()))
+    report_get_reply(
+        &state,
+        &uri,
+        &headers,
+        &id,
+        body("iso27001", "2026-03-01"),
+        body(&report_hostile_text(), &report_hostile_text()),
+    )
 }
 
 
