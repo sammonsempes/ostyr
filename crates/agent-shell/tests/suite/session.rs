@@ -8,7 +8,9 @@ use agent_shell::banner::shell_banner;
 use agent_shell::error::{AccountError, ShellError, StoreError};
 use agent_shell::model::{EndReason, PtyHandle, SessionHooks, ShellShared, StoreEntry, VerifiedOpenShell, MAX_SHELL_SESSION_IDS, STORE_FILE_NAME};
 use agent_shell::queue::{new_slot, shell_execute_fn};
-use agent_shell::session::{cleanup_verdict, forward_input, input_pipe, run_shell_session, run_shell_worker, run_shell_worker_with, shell_queue};
+use agent_shell::session::{
+    cleanup_verdict, clear_previous, forward_input, input_pipe, run_shell_session, run_shell_worker, run_shell_worker_with, shell_queue,
+};
 use agent_shell::store::write_entries;
 use futures_util::StreamExt;
 use std::future::Future;
@@ -30,6 +32,9 @@ const LATE: u64 = 10_000;
 
 
 const TWICE: u64 = 2;
+
+
+const PREVIOUS_UID: u32 = 7;
 
 
 const THREE: u64 = 3;
@@ -570,12 +575,16 @@ fn leftover_of(directory: &std::path::Path, uid: u32) -> io::Result<usize> {
 }
 
 
-fn logging_hooks(directory: &std::path::Path, uid: u32, previous_holders: usize) -> SessionHooks {
+fn logging_hooks(directory: &std::path::Path, uid: u32) -> SessionHooks {
     let spawn_directory = directory.to_path_buf();
     let cleanup_directory = directory.to_path_buf();
+    let running_directory = directory.to_path_buf();
     SessionHooks {
         uid,
-        previous_holders,
+        running: Box::new(move || {
+            let logged = log_line(&running_directory, &format!("running-{uid}")).and_then(|()| leftover_of(&running_directory, uid));
+            Box::pin(std::future::ready(logged))
+        }),
         spawn: Box::new(move |_order| {
             let logged = log_line(&spawn_directory, &format!("spawn-{uid}")).and_then(|()| Err(io::Error::other("no pty")));
             Box::pin(std::future::ready(logged))
@@ -588,7 +597,7 @@ fn logging_hooks(directory: &std::path::Path, uid: u32, previous_holders: usize)
 }
 
 
-fn build_from_files(account: &str, previous: Option<u32>) -> Result<SessionHooks, ShellError> {
+fn build_from_files(account: &str) -> Result<SessionHooks, ShellError> {
     let directory = std::path::PathBuf::from(account);
     log_line(&directory, "build").map_err(ShellError::Spawn)?;
     let text = std::fs::read_to_string(directory.join("account")).map_err(ShellError::Spawn)?;
@@ -599,10 +608,7 @@ fn build_from_files(account: &str, previous: Option<u32>) -> Result<SessionHooks
                 name: "ostyr-shell".to_owned(),
             }))
         }
-        number => {
-            let holders = usize::from(previous.is_some() && directory.join("reassigned").exists());
-            Ok(logging_hooks(&directory, number.parse().map_err(|_| ShellError::Disabled)?, holders))
-        }
+        number => Ok(logging_hooks(&directory, number.parse().map_err(|_| ShellError::Disabled)?)),
     }
 }
 
@@ -679,7 +685,7 @@ fn lines_of(lines: &[&str]) -> Vec<String> {
 
 
 #[tokio::test(start_paused = true)]
-async fn the_account_is_resolved_for_every_session_and_a_changed_uid_cleans_the_old_one_first() -> TestResult {
+async fn the_account_is_resolved_for_every_session_and_a_changed_uid_checks_the_old_one_first() -> TestResult {
     let directory = account_directory("7")?;
     let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "0")], &[SESSION, SECOND_SESSION], true).await?;
     assert_eq!(handled, TWICE);
@@ -692,7 +698,7 @@ async fn the_account_is_resolved_for_every_session_and_a_changed_uid_cleans_the_
             "spawn-7",
             "cleanup-7",
             "build",
-            "cleanup-7",
+            "running-7",
             "cleanup-8",
             "spawn-8",
             "cleanup-8"
@@ -715,12 +721,12 @@ async fn an_unchanged_uid_is_not_cleaned_an_extra_time() -> TestResult {
 
 
 #[tokio::test(start_paused = true)]
-async fn a_leftover_of_the_old_uid_refuses_the_session_by_name_and_frees_the_slot() -> TestResult {
+async fn a_live_process_of_the_old_uid_refuses_the_session_and_nothing_is_swept() -> TestResult {
     let directory = account_directory("7")?;
     let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "1")], &[SESSION, SECOND_SESSION], true).await?;
     assert_eq!(handled, TWICE);
     assert!(!slot);
-    assert_eq!(log, lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "cleanup-7"]));
+    assert_eq!(log, lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "running-7"]));
     Ok(())
 }
 
@@ -746,7 +752,7 @@ async fn a_failed_resolution_ends_that_session_only_and_keeps_the_old_hooks_for_
             "cleanup-7",
             "build",
             "build",
-            "cleanup-7",
+            "running-7",
             "cleanup-8",
             "spawn-8",
             "cleanup-8"
@@ -781,25 +787,29 @@ async fn a_store_directory_open_to_group_or_other_refuses_the_session_before_the
 
 
 #[tokio::test(start_paused = true)]
-async fn a_previous_uid_held_by_another_passwd_line_is_not_swept_and_refuses_the_session() -> TestResult {
-    let directory = account_directory("7")?;
-    std::fs::write(directory.path().join("reassigned"), "")?;
-    let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "0")], &[SESSION, SECOND_SESSION], true).await?;
-    assert_eq!(handled, TWICE);
-    assert!(!slot);
-    assert_eq!(log, lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build"]));
-    Ok(())
-}
-
-
-#[tokio::test(start_paused = true)]
-async fn a_held_uid_that_did_not_change_runs_as_before() -> TestResult {
-    let directory = account_directory("7")?;
-    std::fs::write(directory.path().join("reassigned"), "")?;
-    let (_handled, log, _slot) = worker_log(text_of(&directory)?, Vec::new(), &[SESSION, SECOND_SESSION], true).await?;
-    assert_eq!(
-        log,
-        lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "cleanup-7", "spawn-7", "cleanup-7"])
-    );
+async fn the_refusal_names_the_previous_uid_and_a_failed_scan_refuses_too() -> TestResult {
+    let held = account_directory("7")?;
+    let directory = held.path().to_path_buf();
+    let earlier = logging_hooks(&directory, PREVIOUS_UID);
+    let next = logging_hooks(&directory, PREVIOUS_UID + 1);
+    std::fs::write(directory.join(format!("leftover-{PREVIOUS_UID}")), "2")?;
+    assert!(matches!(
+        clear_previous(Some(&earlier), &next).await,
+        Err(ShellError::PreviousUidStillRunning(PREVIOUS_UID))
+    ));
+    assert!(clear_previous(Some(&earlier), &earlier).await.is_ok());
+    assert!(clear_previous(None, &next).await.is_ok());
+    std::fs::write(directory.join(format!("leftover-{PREVIOUS_UID}")), "0")?;
+    assert!(clear_previous(Some(&earlier), &next).await.is_ok());
+    assert!(!directory.join(format!("cleanup-{PREVIOUS_UID}")).exists());
+    let cut = SessionHooks {
+        running: Box::new(|| {
+            Box::pin(std::future::ready(Err(io::Error::other(
+                "the process table is larger than the scan limit",
+            ))))
+        }),
+        ..logging_hooks(&directory, PREVIOUS_UID)
+    };
+    assert!(matches!(clear_previous(Some(&cut), &next).await, Err(ShellError::Cleanup(_))));
     Ok(())
 }

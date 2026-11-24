@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{attempt_with, bounded, client_paths, custom_client, finish, init_logging, make_platform, server_paths, start_single, Platform};
 use crate::pki::{agent_spec, issue, make_authority, write_leaf, LeafSpec, AGENT_URI, SERVER_NAME};
 use crate::types::TestResult;
@@ -20,7 +21,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -162,7 +162,7 @@ fn agent_config(dir: &Path, platform: &Platform) -> Result<SharedClientConfig, B
 #[tokio::test]
 async fn a_hostile_server_certificate_name_never_reaches_the_client_error() -> TestResult {
     init_logging()?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let address = hostile_server(dir.path(), &platform).await?;
     let error = connect_channel(address, agent_config(dir.path(), &platform)?, SERVER_NAME)
@@ -178,7 +178,7 @@ async fn a_hostile_server_certificate_name_never_reaches_the_client_error() -> T
 #[tokio::test]
 async fn raw_rustls_still_carries_the_peer_name_so_the_test_proves_something() -> TestResult {
     init_logging()?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let address = hostile_server(dir.path(), &platform).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -199,7 +199,7 @@ async fn raw_rustls_still_carries_the_peer_name_so_the_test_proves_something() -
 
 #[tokio::test]
 async fn a_hostile_client_certificate_never_reaches_the_server_error() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let rogue = make_authority()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
@@ -237,7 +237,7 @@ fn a_non_utf8_events_line_keeps_no_bytes_in_its_error() -> TestResult {
 
 #[test]
 fn a_non_utf8_rejected_batch_keeps_no_bytes_in_its_error() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let batch = EventBatch {
         sequence: 1,
         ecs_json: HOSTILE_LINE.to_vec(),

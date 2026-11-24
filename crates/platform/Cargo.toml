@@ -24,8 +24,10 @@ oncall = { version = "0.0.0", path = "../oncall" }
 remote-shell = { version = "0.0.0", path = "../remote-shell" }
 risk-score = { version = "0.0.0", path = "../risk-score" }
 status-page = { version = "0.0.0", path = "../status-page" }
+strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
 utoipa = "5"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
 

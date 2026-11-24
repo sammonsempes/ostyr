@@ -82,7 +82,7 @@ analyst_code() {
 
 login_token() {
     local body
-    body="$(printf '{"username":"analyst","password":"%s","totp_code":"%s"}' "$ANALYST_PASSWORD" "$1")"
+    body="$(printf '{"username":"%s","password":"%s","totp_code":"%s"}' "${2:-analyst}" "$ANALYST_PASSWORD" "$1")"
     remote "sudo curl --silent --fail --cacert compose/secrets/ca.crt -H 'Content-Type: application/json' -d '$body' https://localhost:$API_PORT/auth/login" \
         | sed -n 's/.*"token":"\([^"]*\)".*/\1/p'
 }
@@ -176,7 +176,8 @@ compose "up -d"
 expect "the API answers /health over TLS" wait_ready
 compose "ps"
 
-analyst_secret="$(remote "cd compose && sudo bash tests/lab-accounts.sh '$ADMIN_PASSWORD' '$ANALYST_PASSWORD'")"
+lab_accounts="$(remote "cd compose && sudo bash tests/lab-accounts.sh '$ADMIN_PASSWORD' '$ANALYST_PASSWORD'")"
+analyst_secret="$(sed -n 's/^analyst //p' <<<"$lab_accounts")"
 printf 'info analyst enrolled: %s\n' "$([[ -n "$analyst_secret" ]] && echo yes || echo no)"
 token="$(login_token "$(analyst_code "$analyst_secret")")"
 printf 'info analyst token obtained: %s\n' "$([[ -n "$token" ]] && echo yes || echo no)"
@@ -251,6 +252,52 @@ expect "the web service mounts exactly the three secret files" test "$(remote "s
 expect "the web service mounts no database or store secret" absent remote "sudo docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' $web_container | grep -e pg_password -e pg_service -e pg_server -e store_key"
 expect "the web service sits at the address the platform trusts" test "$(remote "sudo docker inspect --format '{{(index .NetworkSettings.Networks \"ostyr_default\").IPAddress}}' $web_container")" = 172.29.63.10
 expect "a client on the compose network without the service password cannot open the database" absent remote "sudo docker run --rm --network ostyr_default -e PGPASSWORD=wrong -e PGSSLMODE=require $PG_IMAGE psql -h postgres -U ostyr_service -d ostyr -c 'select 1'"
+
+role_token() {
+    local role="$1" secret
+    secret="$(sed -n "s/^$role //p" <<<"$lab_accounts")"
+    login_token "$(analyst_code "$secret")" "$role"
+}
+
+query_migrations() {
+    local script
+    script="PGPASSWORD=\"\$(cat /run/pgtls/service_password)\" psql \"host=postgres dbname=ostyr user=ostyr_service sslmode=verify-full sslrootcert=/run/secrets/pg_ca\" -At -c \"$1\""
+    remote_stdin "cd compose && sudo docker compose exec -T postgres bash -s" <<<"$script"
+}
+
+readonly MODULE_COUNT=15
+module_tokens=""
+for role in analyst auditor responder reader; do
+    expect "the next TOTP step began for the $role login" wait_after_step "$(totp_step)"
+    module_tokens="$module_tokens $(role_token "$role")"
+done
+module_lines="$(remote_stdin "cd compose && sudo bash -s -- secrets/ca.crt $module_tokens" <"$TESTS_DIR/module-proof.sh")"
+printf '%s\n' "$module_lines"
+expect "the proof printed one line per mounted module" test "$(grep -c -E '^[a-z_]+ [01] [0-9]{3} [0-9]{3} [0-9]{3}$' <<<"$module_lines")" -eq "$MODULE_COUNT"
+module_field() {
+    awk -v module="$1" -v field="$2" '$1 == module { print $field }' <<<"$module_lines"
+}
+for module in alerts cases cmdb risk hunts certificates oncall dhcp compliance vulnerabilities remote_shell posture status grc attack_paths; do
+    expect "$module: its path is in the OpenAPI document" test "$(module_field "$module" 2)" = 1
+    expect "$module: no token is 401" test "$(module_field "$module" 3)" = 401
+    expected_ok=200
+    [[ "$module" == status ]] && expected_ok=201
+    expect "$module: the owning role is answered $expected_ok" test "$(module_field "$module" 4)" = "$expected_ok"
+    if [[ "$module" != hunts ]]; then
+        expect "$module: the reader role (events.read only) is 403" test "$(module_field "$module" 5)" = 403
+    fi
+done
+expect "the analyst has no audit.read: the remote shell list is 403" test "$(sed -n 's/^analyst_on_audit_route //p' <<<"$module_lines")" = 403
+expect "the analyst has no status.write: opening an incident is 403" test "$(sed -n 's/^analyst_on_status_write //p' <<<"$module_lines")" = 403
+migrations="$(query_migrations 'select namespace || chr(32) || count(*) from public.schema_migrations group by namespace order by namespace')"
+printf 'migrations applied:\n%s\n' "$migrations"
+readonly MIGRATION_NAMESPACES=14
+expect "the 14 modules with a store (risk reads alerts) applied their migrations, each in its own namespace" test "$(grep -c -E '^[a-z_]+ [0-9]+$' <<<"$migrations")" -eq "$MIGRATION_NAMESPACES"
+migrations_before="$(query_migrations 'select count(*) from public.schema_migrations')"
+compose "restart"
+expect "the API answers after a restart on the same pgdata" wait_ready
+migrations_after="$(query_migrations 'select count(*) from public.schema_migrations')"
+expect "a restart on an existing pgdata applies no migration again" test "$migrations_before" = "$migrations_after"
 
 if [[ "$failures" -ne 0 ]]; then
     printf '%s check(s) failed\n' "$failures" >&2

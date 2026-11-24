@@ -3,9 +3,10 @@ version: 0.0.0
 tenant: default
 listen: 0.0.0.0:8443
 settings:
-  modules: alerts, cases, cmdb, risk
+  modules: alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths
   pg_settings: /etc/ostyr/pg.yaml
   risk.weights_file: /etc/ostyr/risk-weights.yaml
+  status.page_file: /etc/ostyr/status-page.yaml
   tls_certificate: /run/secrets/api_tls_cert
   tls_key: /run/secrets/api_tls_key
   accounts_store: /var/lib/ostyr/accounts.json

@@ -2,8 +2,8 @@ use crate::support::{owner_of, private_tempdir};
 use crate::types::TestResult;
 use agent_shell::account::ShellAccount;
 use agent_shell::cleanup::{
-    account_processes, account_processes_within, cleanup_fn, parse_status, production_plan, read_facts, signal_process, sweep, tolerate_gone,
-    ProcessFacts, SweepPlan, MAX_SWEEP_ROUNDS,
+    account_processes, account_processes_within, cleanup_fn, parse_status, production_plan, read_facts, running_count, running_fn, signal_process,
+    sweep, tolerate_gone, ProcessFacts, SweepPlan, MAX_SWEEP_ROUNDS,
 };
 use rustix::process::{Pid, Signal};
 use std::io::{BufRead, BufReader, Read};
@@ -349,5 +349,14 @@ fn a_process_whose_main_thread_exited_is_found_signalled_and_killed() -> TestRes
     assert_eq!(account_processes(root.path(), own_uid()?)?, vec![pid]);
     assert_eq!(sweep(&plan_for(root.path(), own_uid()?, 0, GROUP_PLAN_ROUNDS))?, 0);
     assert!(child.wait()?.signal().is_some());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_running_check_counts_the_real_table_and_signals_nothing() -> TestResult {
+    assert!(running_fn(own_uid()?)().await? > 0);
+    assert_eq!(running_fn(UNUSED_UID)().await?, 0);
+    assert!(running_count(Path::new("/nonexistent-proc"), UNUSED_UID).is_err());
     Ok(())
 }

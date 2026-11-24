@@ -193,11 +193,17 @@ pub fn check_enabled(shared: &ShellShared<'_>) -> Result<(), ShellError> {
 }
 
 
-/// When the account now resolves to another uid, the earlier uid is swept only if no passwd line holds it any more (a reassigned uid is an operator step); a leftover refuses the session.
+/// When the account now resolves to another uid, the earlier uid is only counted, never swept: a live process of it refuses the session.
 pub async fn clear_previous(previous: Option<&SessionHooks>, hooks: &SessionHooks) -> Result<(), ShellError> {
     match previous {
-        Some(earlier) if earlier.uid != hooks.uid && hooks.previous_holders > 0 => Err(ShellError::PreviousUidReassigned),
-        Some(earlier) if earlier.uid != hooks.uid => cleanup_verdict((earlier.cleanup)().await),
+        Some(earlier) if earlier.uid != hooks.uid => match (earlier.running)().await.map_err(ShellError::Cleanup)? {
+            0 => Ok(()),
+            _alive => {
+                let previous_uid = earlier.uid;
+                tracing::warn!(previous_uid, "processes of the previous shell uid are still running");
+                Err(ShellError::PreviousUidStillRunning(previous_uid))
+            }
+        },
         _ => Ok(()),
     }
 }
@@ -211,7 +217,7 @@ pub async fn prepare_session(
     previous: Option<&SessionHooks>,
 ) -> Result<SessionHooks, ShellError> {
     check_enabled(shared)?;
-    let hooks = build(account, previous.map(|earlier| earlier.uid))?;
+    let hooks = build(account)?;
     clear_previous(previous, &hooks).await?;
     Ok(hooks)
 }

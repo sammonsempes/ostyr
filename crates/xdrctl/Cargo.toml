@@ -25,6 +25,8 @@ axum = "0.8"
 cmdb = { path = "../cmdb" }
 core-api = { path = "../core-api" }
 core-auth = { path = "../core-auth" }
+grc = { path = "../grc" }
+status-page = { path = "../status-page" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

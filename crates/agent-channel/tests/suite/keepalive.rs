@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, stop_server,
 };
@@ -12,7 +13,6 @@ use agent_channel::types::SharedState;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -85,7 +85,7 @@ async fn wait_for_connections(state: &SharedState, expected: usize) -> TestResul
 async fn blackholed_agent_connections_are_dropped_by_the_server_keepalive() -> TestResult {
     let _logging = scoped_logging();
     let (state, _stored) = recording_state(settings(|base| base.max_connections_per_agent = AGENT_CONNECTIONS));
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_server_state(&paths, empty_revocation(&paths)?, Arc::clone(&state)).await?;

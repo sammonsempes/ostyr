@@ -77,6 +77,111 @@ pub enum Command {
         #[command(subcommand)]
         action: VulnsCommand,
     },
+    Grc {
+        #[command(subcommand)]
+        action: GrcCommand,
+    },
+    AttackPaths {
+        #[command(subcommand)]
+        action: AttackPathsCommand,
+    },
+}
+
+
+#[derive(Subcommand)]
+pub enum GrcCommand {
+    /// Lists the newest stored compliance reports (there is no cursor).
+    List {
+        #[arg(long)]
+        framework: Option<String>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: Option<u32>,
+    },
+    /// Shows the summary of one stored compliance report.
+    Show { id: String },
+}
+
+
+#[derive(Subcommand)]
+pub enum AttackPathsCommand {
+    /// Lists the newest stored attack-path reports (there is no cursor).
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: Option<u32>,
+    },
+    /// Shows the summary of one stored attack-path report.
+    Show { id: String },
+}
+
+
+#[derive(Deserialize)]
+pub struct GrcItemView {
+    pub id: i64,
+    pub framework: String,
+    pub version: u32,
+    pub generated: String,
+    pub digest: String,
+    pub bytes: u64,
+    pub stored_at: i64,
+}
+
+
+#[derive(Deserialize)]
+pub struct GrcListReply {
+    pub items: Vec<GrcItemView>,
+}
+
+
+#[derive(Deserialize)]
+pub struct GrcCountsView {
+    pub compliant: u64,
+    pub partially_compliant: u64,
+    pub non_compliant: u64,
+    pub not_assessable: u64,
+}
+
+
+#[derive(Deserialize)]
+pub struct GrcBodyView {
+    pub framework: String,
+    pub version: u32,
+    pub generated: String,
+    pub counts: GrcCountsView,
+    pub controls: Vec<serde::de::IgnoredAny>,
+    pub gaps: Vec<serde::de::IgnoredAny>,
+    pub plan: Vec<serde::de::IgnoredAny>,
+}
+
+
+#[derive(Deserialize)]
+pub struct AttackItemView {
+    pub id: i64,
+    pub graph_digest: String,
+    pub generated: String,
+    pub digest: String,
+    pub bytes: u64,
+    pub truncated: bool,
+    pub budget_reached: bool,
+    pub unsearched_count: u64,
+    pub stored_at: i64,
+}
+
+
+#[derive(Deserialize)]
+pub struct AttackListReply {
+    pub items: Vec<AttackItemView>,
+}
+
+
+#[derive(Deserialize)]
+pub struct AttackBodyView {
+    pub graph_digest: String,
+    pub truncated: bool,
+    pub budget_reached: bool,
+    pub unsearched: Vec<serde::de::IgnoredAny>,
+    pub paths: Vec<serde::de::IgnoredAny>,
+    pub choke_points: Vec<serde::de::IgnoredAny>,
+    pub recommendations: Vec<serde::de::IgnoredAny>,
 }
 
 

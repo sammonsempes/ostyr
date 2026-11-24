@@ -285,3 +285,8 @@ pub fn chained_agent(dir: &Path, platform: &Platform, intermediate: &Authority, 
         intermediate_serial: serial_from_certificate(intermediate_der.as_ref())?,
     })
 }
+
+
+pub fn long_tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+}

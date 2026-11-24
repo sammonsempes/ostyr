@@ -69,7 +69,7 @@ const NOT_UTF8: [u8; 2] = [0xff, 0xfe];
 const TIMEOUT_MS: u64 = 120_000;
 
 
-const ROW: &str = r#"{"indicator":"203.0.113.0/24","matched_ip":"::ffff:203.0.113.9","direction":"destination","host":"web-1","host_was_cut":1,"event_day":"2026-11-03","foreign":0,"matches":3,"first_time":1793664060,"last_time":1793664120}"#;
+const ROW: &str = r#"{"indicator":"203.0.113.0/24","feed":"feed-one","tlp":"amber","matched_ip":"::ffff:203.0.113.9","direction":"destination","host":"web-1","host_was_cut":1,"event_day":"2026-11-03","foreign":0,"matches":3,"first_time":1793664060,"last_time":1793664120}"#;
 
 
 struct Rig {

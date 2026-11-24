@@ -431,6 +431,111 @@ pub struct OncallListView {
 }
 
 
+/// One row of `GET /grc/reports`: metadata only, the body is never listed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GrcReportItem {
+    pub id: i64,
+    pub framework: String,
+    pub version: u32,
+    pub generated: String,
+    pub bytes: u64,
+    pub stored_at: i64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GrcListView {
+    pub items: Vec<GrcReportItem>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct GrcCounts {
+    pub compliant: u64,
+    pub partially_compliant: u64,
+    pub non_compliant: u64,
+    pub not_assessable: u64,
+}
+
+
+/// The stored report body read for its counts only: the lists are counted on raw slices, never decoded.
+#[derive(Debug, Deserialize)]
+pub struct GrcBodyScan<'a> {
+    pub framework: String,
+    pub version: u32,
+    pub generated: String,
+    pub counts: GrcCounts,
+    #[serde(borrow)]
+    pub controls: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub gaps: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub plan: Vec<&'a RawValue>,
+}
+
+
+/// What the report page shows: the summary fields and the sizes of the lists, never the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrcReportView {
+    pub id: i64,
+    pub framework: String,
+    pub version: u32,
+    pub generated: String,
+    pub counts: GrcCounts,
+    pub controls: usize,
+    pub gaps: usize,
+    pub plan: usize,
+}
+
+
+/// One row of `GET /attack-paths/reports`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AttackReportItem {
+    pub id: i64,
+    pub generated: String,
+    pub bytes: u64,
+    pub truncated: bool,
+    pub budget_reached: bool,
+    pub unsearched_count: u64,
+    pub stored_at: i64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AttackListView {
+    pub items: Vec<AttackReportItem>,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct AttackBodyScan<'a> {
+    pub graph_digest: String,
+    pub truncated: bool,
+    pub budget_reached: bool,
+    #[serde(borrow)]
+    pub unsearched: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub paths: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub choke_points: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub recommendations: Vec<&'a RawValue>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttackReportView {
+    pub id: i64,
+    pub graph_digest: String,
+    pub truncated: bool,
+    pub budget_reached: bool,
+    pub unsearched: usize,
+    pub paths: usize,
+    pub choke_points: usize,
+    pub recommendations: usize,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FindingsView {
     pub items: Vec<FindingView>,

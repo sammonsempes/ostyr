@@ -1,3 +1,4 @@
+mod reports;
 mod support;
 mod transport_text;
 mod vulns;

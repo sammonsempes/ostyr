@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, awaited, bounded, chained_agent, client_paths, empty_revocation, finish, make_platform, server_paths, start_server_with, start_single,
     start_single_state, start_single_with, stop_server,
@@ -15,7 +16,6 @@ use agent_channel::revocation::{canonical_serial, is_revoked, parse_serial, revo
 use agent_channel::tls::client_config;
 use core_audit::model::Outcome;
 use core_config::reload::{reload, ReloadOutcome};
-use tempfile::tempdir;
 
 
 const SERIAL_COUNT: usize = 2;
@@ -68,7 +68,7 @@ fn chain_without_certificate_has_no_serial() -> TestResult {
 
 #[test]
 fn opening_with_an_invalid_file_fails() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     assert!(open_revocation(dir.path(), &["not-hex"]).is_err());
     Ok(())
 }
@@ -76,7 +76,7 @@ fn opening_with_an_invalid_file_fails() -> TestResult {
 
 #[tokio::test]
 async fn revoked_serial_is_refused_at_the_handshake() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let serial = agent_serial(&paths)?;
@@ -92,7 +92,7 @@ async fn revoked_serial_is_refused_at_the_handshake() -> TestResult {
 
 #[tokio::test]
 async fn revoking_a_connected_agent_closes_its_connection_within_the_bound() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let serial = agent_serial(&paths)?;
@@ -111,7 +111,7 @@ async fn revoking_a_connected_agent_closes_its_connection_within_the_bound() -> 
 
 #[tokio::test]
 async fn invalid_file_keeps_the_old_list_and_is_audited_denied() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let serial = agent_serial(&paths)?;
@@ -134,7 +134,7 @@ async fn invalid_file_keeps_the_old_list_and_is_audited_denied() -> TestResult {
 
 #[tokio::test]
 async fn removing_the_serial_lets_the_agent_reconnect() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let serial = agent_serial(&paths)?;
@@ -153,7 +153,7 @@ async fn removing_the_serial_lets_the_agent_reconnect() -> TestResult {
 
 #[tokio::test]
 async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let patient = settings(|base| base.first_request_timeout_seconds = PATIENT_SECONDS);
@@ -173,7 +173,7 @@ async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
 
 #[tokio::test]
 async fn a_chain_with_an_intermediate_is_accepted_when_nothing_is_revoked() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let intermediate = make_intermediate(&platform.agent_ca)?;
     let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;
@@ -188,7 +188,7 @@ async fn a_chain_with_an_intermediate_is_accepted_when_nothing_is_revoked() -> T
 
 #[tokio::test]
 async fn a_revoked_intermediate_is_refused_at_the_handshake() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let intermediate = make_intermediate(&platform.agent_ca)?;
     let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;
@@ -204,7 +204,7 @@ async fn a_revoked_intermediate_is_refused_at_the_handshake() -> TestResult {
 
 #[tokio::test]
 async fn revoking_the_intermediate_of_a_connected_agent_closes_its_connection() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let intermediate = make_intermediate(&platform.agent_ca)?;
     let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;

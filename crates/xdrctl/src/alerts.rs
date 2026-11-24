@@ -31,6 +31,26 @@ pub const STATUS_TOO_MANY: u16 = 429;
 pub const UTF16_UNITS_MAX: usize = 2;
 
 
+/// Letters that render blank (a pinned copy of status-page `INVISIBLE_CHARACTERS`).
+pub const BLANK_LETTERS: [char; 15] = [
+    '\u{034F}',
+    '\u{115F}',
+    '\u{1160}',
+    '\u{17B4}',
+    '\u{17B5}',
+    '\u{2800}',
+    '\u{180F}',
+    '\u{3164}',
+    '\u{FFA0}',
+    '\u{13441}',
+    '\u{13442}',
+    '\u{13443}',
+    '\u{13444}',
+    '\u{13445}',
+    '\u{13446}',
+];
+
+
 /// True for control, format (Cf, bidirectional and zero-width included) and line or paragraph separator characters.
 pub fn is_hidden(character: char) -> bool {
     matches!(
@@ -40,11 +60,17 @@ pub fn is_hidden(character: char) -> bool {
 }
 
 
+/// What is printed escaped: every hidden character and the blank-rendering letters.
+pub fn is_escaped(character: char) -> bool {
+    is_hidden(character) || BLANK_LETTERS.contains(&character)
+}
+
+
 /// Escapes control, hidden characters and backslashes so a hostile value cannot drive the terminal.
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|character| {
-            if is_hidden(character) {
+            if is_escaped(character) {
                 character.escape_unicode().to_string()
             } else if character == '\\' {
                 "\\\\".to_owned()
@@ -60,7 +86,7 @@ pub fn printable(text: &str) -> String {
 pub fn escape_json(json: &str) -> String {
     json.chars()
         .map(|character| {
-            if is_hidden(character) {
+            if is_escaped(character) {
                 character
                     .encode_utf16(&mut [0; UTF16_UNITS_MAX])
                     .iter()

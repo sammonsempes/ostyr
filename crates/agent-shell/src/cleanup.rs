@@ -221,6 +221,25 @@ pub fn production_plan(account: &ShellAccount) -> SweepPlan {
 }
 
 
+/// How many live processes of the uid the table holds, from at most `MAX_SCANNED_PROCESSES` entries; nothing is signalled.
+pub fn running_count(proc_root: &Path, uid: u32) -> io::Result<usize> {
+    account_processes(proc_root, uid).map(|found| found.len())
+}
+
+
+/// The check of an earlier uid: a count on the blocking pool, never a signal.
+pub fn running_fn(uid: u32) -> Box<CleanupFn> {
+    Box::new(move || {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || running_count(Path::new(PROC_ROOT), uid))
+                .await
+                .map_err(io::Error::other)
+                .and_then(std::convert::identity)
+        })
+    })
+}
+
+
 /// The production `CleanupFn`: the session cgroups, then the sweep, on the blocking pool.
 pub fn cleanup_fn(account: &ShellAccount, host: CgroupHost) -> Box<CleanupFn> {
     let plan = production_plan(account);

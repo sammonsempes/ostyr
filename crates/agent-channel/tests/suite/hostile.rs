@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, stop_server, Platform,
 };
@@ -21,7 +22,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{oneshot, Notify};
@@ -176,7 +176,7 @@ fn stalling_sink(entered: Arc<Notify>) -> EventSink {
 #[tokio::test]
 async fn a_server_holding_the_stream_open_without_acknowledging_ends_in_give_up() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -239,7 +239,7 @@ async fn start_mute_server(platform: &Platform, dir: &Path) -> Result<SocketAddr
 #[tokio::test]
 async fn a_server_that_goes_mute_is_detected_by_the_keepalive() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let address = start_mute_server(&platform, dir.path()).await?;
@@ -312,7 +312,7 @@ fn the_busiest_source_gives_its_oldest_handshake() -> TestResult {
 #[tokio::test]
 async fn a_flooding_source_is_refused_while_an_agent_from_another_address_connects() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;

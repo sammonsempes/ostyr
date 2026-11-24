@@ -7,11 +7,11 @@ use crate::api::{
     VULN_EPSS_MAX,
 };
 use crate::model::{
-    Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView,
-    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LinksPanel, LookupView, ObservableView,
-    ObservablesPanel, OncallAlertView, OncallListView, PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView,
-    RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView,
-    VulnAssetView, VulnListView, VulnView,
+    Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, AttackListView, AttackReportItem, AttackReportView,
+    CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, GrcListView,
+    GrcReportItem, GrcReportView, Language, LeaseView, LinksPanel, LookupView, ObservableView, ObservablesPanel, OncallAlertView, OncallListView,
+    PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts,
+    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
@@ -200,6 +200,8 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/dhcp", text(language, "nav_dhcp")))
                         (go("/posture", text(language, "nav_posture")))
                         (go("/oncall", text(language, "nav_oncall")))
+                        (go("/grc", text(language, "nav_grc")))
+                        (go("/attack-paths", text(language, "nav_attack_paths")))
                         (go("/remote-shell", text(language, "nav_shell")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
@@ -2357,6 +2359,191 @@ pub fn shell_detail_page(language: Language, csrf: &str, view: &ShellSessionView
                 div { (text(language, "shell_unreadable")) }
             }
             (go("/remote-shell", text(language, "shell_back")))
+        },
+    )
+}
+
+
+pub const REPORT_COLUMNS: u32 = 7;
+
+
+pub const GRC_COLUMNS: u32 = 6;
+
+
+/// A boolean as the fixed yes or no text.
+pub fn yes_no(language: Language, value: bool) -> &'static str {
+    text(language, if value { "cert_yes" } else { "cert_no" })
+}
+
+
+/// One row of the grc list: a negative id is the fixed unreadable row, every text goes through `clip_identity`.
+pub fn grc_row(language: Language, item: &GrcReportItem) -> Markup {
+    if item.id >= 0 {
+        html! {
+            tr {
+                td { (go(&format!("/grc/{}", item.id), &item.id.to_string())) }
+                td { (clip_identity(language, &item.framework, MAX_FIELD_CHARS)) }
+                td { (item.version) }
+                td { (clip_identity(language, &item.generated, MAX_FIELD_CHARS)) }
+                td { (item.bytes) }
+                td { (format_time(language, item.stored_at)) }
+            }
+        }
+    } else {
+        html! { tr { td colspan=(GRC_COLUMNS) { (text(language, "report_unreadable")) } } }
+    }
+}
+
+
+pub fn grc_page(language: Language, csrf: &str, list: &GrcListView, framework: Option<&str>) -> Markup {
+    layout(
+        language,
+        "title_grc",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_grc")) }
+            form method="get" action="/grc" {
+                label { (text(language, "report_framework")) input type="text" name="framework" value=(framework.unwrap_or("")) maxlength="64"; }
+                button type="submit" { (text(language, "report_filter")) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, "report_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_report_id")) }
+                            th { (text(language, "col_framework")) }
+                            th { (text(language, "col_version")) }
+                            th { (text(language, "col_generated")) }
+                            th { (text(language, "col_report_bytes")) }
+                            th { (text(language, "col_stored_at")) }
+                        }
+                    }
+                    tbody {
+                        @for item in &list.items { (grc_row(language, item)) }
+                    }
+                }
+            }
+        },
+    )
+}
+
+
+/// One labelled row of a report page.
+pub fn fact_row(language: Language, key: &str, value: &str) -> Markup {
+    html! { tr { th { (text(language, key)) } td { (value) } } }
+}
+
+
+pub fn grc_report_page(language: Language, csrf: &str, report: &GrcReportView) -> Markup {
+    layout(
+        language,
+        "title_grc_report",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_grc_report")) " " (report.id) }
+            table {
+                tbody {
+                    (fact_row(language, "col_framework", &clip_identity(language, &report.framework, MAX_FIELD_CHARS)))
+                    (fact_row(language, "col_version", &report.version.to_string()))
+                    (fact_row(language, "col_generated", &clip_identity(language, &report.generated, MAX_FIELD_CHARS)))
+                    (fact_row(language, "grc_compliant", &report.counts.compliant.to_string()))
+                    (fact_row(language, "grc_partial", &report.counts.partially_compliant.to_string()))
+                    (fact_row(language, "grc_non_compliant", &report.counts.non_compliant.to_string()))
+                    (fact_row(language, "grc_not_assessable", &report.counts.not_assessable.to_string()))
+                    (fact_row(language, "grc_controls", &report.controls.to_string()))
+                    (fact_row(language, "grc_gaps", &report.gaps.to_string()))
+                    (fact_row(language, "grc_plan", &report.plan.to_string()))
+                }
+            }
+            (go("/grc", text(language, "report_back_grc")))
+        },
+    )
+}
+
+
+/// One row of the attack-path list: a negative id or a time outside UTC years 0 to 9999 is the fixed unreadable row.
+pub fn attack_row(language: Language, item: &AttackReportItem) -> Markup {
+    match window_time(&item.generated).filter(|_| item.id >= 0) {
+        Some(generated) => html! {
+            tr {
+                td { (go(&format!("/attack-paths/{}", item.id), &item.id.to_string())) }
+                td { (generated) }
+                td { (item.bytes) }
+                td { (yes_no(language, item.truncated)) }
+                td { (yes_no(language, item.budget_reached)) }
+                td { (item.unsearched_count) }
+                td { (format_time(language, item.stored_at)) }
+            }
+        },
+        None => html! { tr { td colspan=(REPORT_COLUMNS) { (text(language, "report_unreadable")) } } },
+    }
+}
+
+
+/// The loud line shown when a stored search did not finish: never read as "no path".
+pub fn incomplete_notice(language: Language, truncated: bool, budget_reached: bool, unsearched: bool) -> Markup {
+    html! {
+        @if truncated || budget_reached || unsearched {
+            div class="notice" { (text(language, "attack_incomplete")) }
+        }
+    }
+}
+
+
+pub fn attack_page(language: Language, csrf: &str, list: &AttackListView) -> Markup {
+    layout(
+        language,
+        "title_attack",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_attack")) }
+            @if list.items.is_empty() {
+                div { (text(language, "report_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_report_id")) }
+                            th { (text(language, "col_generated")) }
+                            th { (text(language, "col_report_bytes")) }
+                            th { (text(language, "col_truncated")) }
+                            th { (text(language, "col_budget_reached")) }
+                            th { (text(language, "col_unsearched")) }
+                            th { (text(language, "col_stored_at")) }
+                        }
+                    }
+                    tbody {
+                        @for item in &list.items { (attack_row(language, item)) }
+                    }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn attack_report_page(language: Language, csrf: &str, report: &AttackReportView) -> Markup {
+    layout(
+        language,
+        "title_attack_report",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_attack_report")) " " (report.id) }
+            (incomplete_notice(language, report.truncated, report.budget_reached, report.unsearched > 0))
+            table {
+                tbody {
+                    (fact_row(language, "col_graph_digest", &clip_identity(language, &report.graph_digest, MAX_FIELD_CHARS)))
+                    (fact_row(language, "col_truncated", yes_no(language, report.truncated)))
+                    (fact_row(language, "col_budget_reached", yes_no(language, report.budget_reached)))
+                    (fact_row(language, "col_unsearched", &report.unsearched.to_string()))
+                    (fact_row(language, "attack_paths", &report.paths.to_string()))
+                    (fact_row(language, "attack_choke_points", &report.choke_points.to_string()))
+                    (fact_row(language, "attack_recommendations", &report.recommendations.to_string()))
+                }
+            }
+            (go("/attack-paths", text(language, "report_back_attack")))
         },
     )
 }

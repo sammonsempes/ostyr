@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, attempt_with, bounded, client_paths, custom_client, empty_revocation, finish, init_logging, make_platform, server_paths, start_server,
     start_single, stop_server,
@@ -16,7 +17,6 @@ use futures_util::stream;
 use rustls::version::{TLS12, TLS13};
 use std::io;
 use std::net::SocketAddr;
-use tempfile::tempdir;
 use tonic::transport::Endpoint;
 use tonic::{Code, Request};
 
@@ -35,7 +35,7 @@ const FOREIGN_URI: &str = "https://example.com/agent";
 
 #[tokio::test]
 async fn mutual_handshake_and_heartbeat_succeed() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_server(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -48,7 +48,7 @@ async fn mutual_handshake_and_heartbeat_succeed() -> TestResult {
 
 #[tokio::test]
 async fn certificate_with_a_dns_name_and_one_identity_uri_is_accepted() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_server(&server_paths(dir.path(), &platform)?).await?;
     let spec = LeafSpec {
@@ -64,7 +64,7 @@ async fn certificate_with_a_dns_name_and_one_identity_uri_is_accepted() -> TestR
 
 #[tokio::test]
 async fn client_without_certificate_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -78,7 +78,7 @@ async fn client_without_certificate_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn certificate_from_another_authority_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let intruder = make_authority()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
@@ -93,7 +93,7 @@ async fn certificate_from_another_authority_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn expired_certificate_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let spec = LeafSpec {
@@ -111,7 +111,7 @@ async fn expired_certificate_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn certificate_without_identity_uri_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[]))?;
@@ -125,7 +125,7 @@ async fn certificate_without_identity_uri_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn certificate_with_two_uris_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI, SECOND_URI]))?;
@@ -139,7 +139,7 @@ async fn certificate_with_two_uris_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn certificate_with_a_foreign_uri_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[FOREIGN_URI]))?;
@@ -153,7 +153,7 @@ async fn certificate_with_a_foreign_uri_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn tls_12_only_client_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -167,7 +167,7 @@ async fn tls_12_only_client_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn server_certificate_for_another_name_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_server(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -184,7 +184,7 @@ async fn server_certificate_for_another_name_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn invalid_server_name_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let address: SocketAddr = CLOSED_PORT_ADDRESS.parse()?;
@@ -196,7 +196,7 @@ async fn invalid_server_name_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn connection_to_a_closed_port_fails() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let address: SocketAddr = CLOSED_PORT_ADDRESS.parse()?;
@@ -249,7 +249,7 @@ async fn beat_answers_with_the_identity_in_the_request_extensions() -> TestResul
 #[tokio::test]
 async fn accept_errors_are_logged_and_serving_goes_on() -> TestResult {
     init_logging()?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let config = server_config(&paths)?;
@@ -279,7 +279,7 @@ fn connection_outcomes_are_logged() -> TestResult {
 
 #[tokio::test]
 async fn connection_ends_cleanly_when_the_agent_disconnects() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let server = start_single(&server_paths(dir.path(), &platform)?).await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;

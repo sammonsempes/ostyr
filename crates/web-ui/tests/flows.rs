@@ -10,6 +10,8 @@ mod logging;
 mod observable_flows;
 #[path = "support/posture_flows.rs"]
 mod posture_flows;
+#[path = "support/report_flows.rs"]
+mod report_flows;
 #[cfg(unix)]
 #[path = "support/served.rs"]
 mod served;

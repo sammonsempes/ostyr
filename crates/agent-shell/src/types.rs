@@ -37,7 +37,7 @@ pub type EnabledFn = dyn Fn() -> bool + Send + Sync;
 
 
 /// Builds the spawn and cleanup hooks of one session from the account name, resolving the account afresh.
-pub type BuildFn = fn(&str, Option<u32>) -> Result<SessionHooks, ShellError>;
+pub type BuildFn = fn(&str) -> Result<SessionHooks, ShellError>;
 
 
 /// The terminal input of the platform, as the chunks its writer delivered.
