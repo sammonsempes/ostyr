@@ -95,7 +95,7 @@ fn step(walk: Walk, line: &[u8], headers: &[Header<'_>], first: usize) -> Option
     } else {
         header_line(walk, text, headers, first + walk.position).map(|next_header| Walk {
             next_header,
-            seen: true,
+            seen: !text.starts_with(MBOX_FROM),
             ..moved
         })
     }

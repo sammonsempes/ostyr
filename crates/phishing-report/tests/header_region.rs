@@ -245,6 +245,21 @@ fn an_mbox_line_is_allowed_only_first_and_only_as_an_unknown_name() -> Result<()
     all_flagged(&[
         ("later in the region", b"From: a@x.test\r\nFrom a b: c\r\n\r\nhi\r\n".to_vec()),
         ("a known header name", b"From : a@x.test\r\nSubject: s\r\n\r\nhi\r\n".to_vec()),
+        (
+            "a fold right after the mbox line",
+            b"From a@x.test 00:00\r\n Content-Type: text/html; charset=shift_jis\r\nFrom: a@x.test\r\n\r\nhi\r\n".to_vec(),
+        ),
+        (
+            "a tab fold right after the mbox line",
+            b"From a@x.test 00:00\r\n\tContent-Transfer-Encoding: base64\r\nFrom: a@x.test\r\n\r\nhi\r\n".to_vec(),
+        ),
+        (
+            "a fold right after the mbox line of an attached eml",
+            mixed(&[
+                b"--b1\r\nContent-Type: application/octet-stream; name=\"a.eml\"\r\n\r\nFrom a@x.test 00:00\r\n Content-Type: text/html\r\nFrom: z@y.test\r\n\r\nbody\r\n",
+                END,
+            ]),
+        ),
     ])
 }
 
