@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage (on the lab VM, as a normal user): secret-readers-remote.sh <directory holding auth_tool, oncall_send and oncall_link>
+# Usage (on the lab VM, as a normal user): secret-readers-remote.sh <directory holding ostyr-auth, oncall_send and oncall_link>
 # Proves that the accounts store, the oncall secret files and the acknowledgement-link key go through the checked open: a mode 644 file, a
 # symlink to another 600 file, a FIFO and a file of another user are refused, a swap between two runs is caught, a 600 file still works.
 set -euo pipefail
@@ -22,8 +22,8 @@ umask 077
 head -c 32 /dev/urandom >key
 printf 'passwordpassword\n' >words
 
-store_run() { printf 'bootstrap admin2 %s\n' "$PASSWORD" | timeout 20 "$DIR/auth_tool" "$1" "$DIR/audit.log" key words 2>&1 || true; }
-printf 'bootstrap admin %s\n' "$PASSWORD" | timeout 20 "$DIR/auth_tool" "$DIR/accounts.json" "$DIR/audit.log" key words >/dev/null
+store_run() { printf 'bootstrap admin2 %s\n' "$PASSWORD" | timeout 20 "$DIR/ostyr-auth" "$1" "$DIR/audit.log" key words 2>&1 || true; }
+printf 'bootstrap admin %s\n' "$PASSWORD" | timeout 20 "$DIR/ostyr-auth" "$DIR/accounts.json" "$DIR/audit.log" key words >/dev/null
 check "store control (600)" "$(store_run "$DIR/accounts.json")" "error the store already holds accounts"
 cp accounts.json loose.json
 chmod 644 loose.json

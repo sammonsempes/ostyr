@@ -67,7 +67,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    command: ["/usr/local/bin/web_ui", "/etc/ostyr/web-ui.yaml"]
+    command: ["/usr/local/bin/ostyr-web-ui", "/etc/ostyr/web-ui.yaml"]
     depends_on:
       - platform
     secrets: [pg_ca, api_tls_key, api_tls_cert]

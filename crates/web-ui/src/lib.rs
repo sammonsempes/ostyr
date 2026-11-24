@@ -7,6 +7,7 @@ pub mod error;
 pub mod model;
 pub mod pages;
 pub mod routes;
+pub mod serve;
 pub mod server;
 pub mod session;
 pub mod strings;

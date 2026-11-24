@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Usage (on the lab VM): store-lock-remote.sh <directory holding auth_tool, module_api and stored-passkey.json>
-# Proves that module_api and auth_tool share the account store without losing updates: a passkey removed, a passkey added and a role
+# Usage (on the lab VM): store-lock-remote.sh <directory holding ostyr-auth, module_api and stored-passkey.json>
+# Proves that module_api and ostyr-auth share the account store without losing updates: a passkey removed, a passkey added and a role
 # change made through the file while the API runs all survive API logins.
 set -euo pipefail
 
@@ -41,7 +41,7 @@ settings:
   compromised_list: $DIR/words
 EOF
 
-coproc TOOL { "$DIR/auth_tool" "$STORE" "$DIR/tool-audit.log" key words webauthn.yaml; }
+coproc TOOL { "$DIR/ostyr-auth" "$STORE" "$DIR/tool-audit.log" key words webauthn.yaml; }
 ask() {
     printf '%s\n' "$1" >&"${TOOL[1]}"
     IFS= read -r -u "${TOOL[0]}" reply

@@ -230,7 +230,7 @@
         "ALL"
       ],
       "command": [
-        "/usr/local/bin/web_ui",
+        "/usr/local/bin/ostyr-web-ui",
         "/etc/ostyr/web-ui.yaml"
       ],
       "depends_on": {

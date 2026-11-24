@@ -48,7 +48,7 @@ pub const CLI_REQUEST_ID: &str = "cli";
 pub const READ_ONLY_COMMANDS: [&str; 6] = ["totp", "check", "wa-list", "wa-register-start", "wa-login-start", "passkey-start"];
 
 
-pub const USAGE: &str = "usage: auth_tool <store> <audit-log> <key-file> <compromised-list> [<webauthn-config> [<roles-file>]]; commands on stdin";
+pub const USAGE: &str = "usage: ostyr-auth <store> <audit-log> <key-file> <compromised-list> [<webauthn-config> [<roles-file>]]; commands on stdin";
 
 
 pub fn parse_roles(text: &str) -> RoleSet {

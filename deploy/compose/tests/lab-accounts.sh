@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Usage: lab-accounts.sh <admin-password> <analyst-password>   (run in the compose directory, as root, by compose-lab.sh inside the lab VM)
-# Drives one auth_tool process through the shared account store: bootstraps an administrator, logs in, creates the four lab accounts and enrols their TOTP.
+# Drives one ostyr-auth process through the shared account store: bootstraps an administrator, logs in, creates the four lab accounts and enrols their TOTP.
 # The sessions live in the tool's memory, so one process serves every command. Creates an analyst, an auditor, a responder and a reader with the analyst password and prints one `<role> <TOTP secret>` line each.
 set -euo pipefail
 
 readonly ADMIN_PASSWORD="${1:?usage: lab-accounts.sh <admin-password> <analyst-password>}"
 readonly ANALYST_PASSWORD="${2:?usage: lab-accounts.sh <admin-password> <analyst-password>}"
-readonly TOOL=/usr/local/bin/auth_tool
+readonly TOOL=/usr/local/bin/ostyr-auth
 readonly SOURCE=lab
 
 reply=""

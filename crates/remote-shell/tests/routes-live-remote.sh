@@ -37,7 +37,7 @@ YAML
     printf 'passwordpassword\n' >"$WORK/compromised.txt"
     head -c 32 /dev/urandom >"$WORK/store.key"
     chmod 600 "$WORK/store.key"
-    tool() { $WORK/auth_tool "$WORK/accounts.json" "$WORK/auth-audit.log" "$WORK/store.key" "$WORK/compromised.txt" "$@"; }
+    tool() { $WORK/ostyr-auth "$WORK/accounts.json" "$WORK/auth-audit.log" "$WORK/store.key" "$WORK/compromised.txt" "$@"; }
     bootstrap_output="$(tool <<<"bootstrap admin $PASSWORD_USER")"
     secret="$(awk '$1 == "secret" {print $2}' <<<"$bootstrap_output")"
     code="$(tool <<<"totp $secret")"

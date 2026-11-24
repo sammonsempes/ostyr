@@ -1,4 +1,4 @@
-//! Live proof driver: runs `auth_tool` with a software passkey; usage `soft_proof <auth_tool> <directory> <rp id> <origin>`.
+//! Live proof driver: runs `ostyr-auth` with a software passkey; usage `soft_proof <ostyr-auth> <directory> <rp id> <origin>`.
 
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::{json, Value};
@@ -296,6 +296,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match arguments.as_slice() {
         [binary, directory, rp_id, origin] => run(binary, directory, rp_id, origin),
-        _ => Err("usage: soft_proof <auth_tool> <directory> <rp id> <origin>".into()),
+        _ => Err("usage: soft_proof <ostyr-auth> <directory> <rp id> <origin>".into()),
     }
 }
