@@ -26,6 +26,7 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+serde-saphyr = "2"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }

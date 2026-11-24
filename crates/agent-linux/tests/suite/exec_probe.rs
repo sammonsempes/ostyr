@@ -6,7 +6,7 @@ use agent_linux::error::SourceError;
 use agent_linux::exec_events::ExecSink;
 use agent_linux::exec_probe::{
     end_on_spool_error, finish, join_ended, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start,
-    start_if_due, tick, Controller, ProbeEnv, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_JOIN_POLL_MILLIS, EXEC_PROBE_LOAD_DEADLINE_SECONDS,
+    start_if_due, tick, Controller, ProbeEnv, ProbeRun, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_JOIN_POLL_MILLIS, EXEC_PROBE_LOAD_DEADLINE_SECONDS,
     EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED, RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED, RESULT_UNLOAD_UNKNOWN,
 };
 use agent_linux::model::{ExecProbeSettings, SourceSettings};
@@ -807,5 +807,30 @@ async fn a_probe_that_never_attached_and_outlives_the_deadline_is_abandoned_and_
     assert!(text.contains(RESULT_ABANDONED) && !text.contains(ACTION_UNLOAD), "{text}");
     let idle = join_ended(Controller::default(), &env, sink.audit.as_ref(), &immediate_pause).await;
     assert!(idle.run.is_none());
+    Ok(())
+}
+
+
+#[test]
+fn an_error_sent_just_before_the_thread_ends_is_never_lost_by_the_join() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_failing);
+    let (sender, failures) = channel();
+    let (sent, wait_sent) = channel::<()>();
+    let (release, wait_release) = channel::<()>();
+    let handle = std::thread::spawn(move || -> ProbeResult {
+        sender.send(io::Error::other("spool")).map_err(|_| LoadError::NotBuilt)?;
+        sent.send(()).map_err(|_| LoadError::NotBuilt)?;
+        wait_release.recv().map_err(|_| LoadError::NotBuilt)?;
+        Ok(1)
+    });
+    wait_sent.recv()?;
+    let run = start(&env, 0)?;
+    let held = ProbeRun { handle, failures, ..run };
+    assert!(!held.handle.is_finished());
+    release.send(())?;
+    wait_until(|| held.handle.is_finished())?;
+    let settled = finish(Controller::default(), held, &env, sink.audit.as_ref());
+    assert!(settled.spool_error.is_some());
     Ok(())
 }
