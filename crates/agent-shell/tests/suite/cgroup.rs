@@ -711,13 +711,12 @@ fn the_stale_sweep_removes_only_dead_empty_test_cgroups() -> TestResult {
             .ok_or("parent")?
             .join(format!("ostyr-test-{}-sweep", std::process::id()));
         std::fs::create_dir(&own)?;
-        let mut gone = Command::new("true").spawn()?;
-        gone.wait()?;
-        let dead = own.join(format!("ostyr-test-{}-empty", gone.id()));
+        let beyond_pid_max = std::fs::read_to_string("/proc/sys/kernel/pid_max")?.trim().parse::<u32>()? + 1;
+        let dead = own.join(format!("ostyr-test-{beyond_pid_max}-empty"));
         std::fs::create_dir(&dead)?;
         std::fs::create_dir(dead.join("shell-x"))?;
         let mut sleeper = Command::new("sleep").arg("60").spawn()?;
-        let busy = own.join(format!("ostyr-test-{}-busy", gone.id()));
+        let busy = own.join(format!("ostyr-test-{}-busy", sleeper.id()));
         std::fs::create_dir(&busy)?;
         std::fs::write(busy.join("cgroup.procs"), sleeper.id().to_string())?;
         let other = own.join("unrelated-name");
