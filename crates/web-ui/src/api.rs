@@ -1,8 +1,9 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
-    Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView,
-    CertListView, CommentView, DhcpQuery, FindingsView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView,
-    RiskDetailView, RiskListView, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, AttackBodyScan, AttackListView,
+    AttackReportView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery, FindingsView, GrcBodyScan, GrcListView,
+    GrcReportView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView,
+    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -1390,6 +1391,105 @@ pub async fn get_oncall_alert(client: &ApiClient, source: IpAddr, token: &Secret
             } else {
                 Err(ApiFailure::Malformed("alert id differs"))
             }
+        }
+        None => Err(ApiFailure::NotFound),
+    }
+}
+
+
+/// The most reports one list may hold: the grc and attack-paths `MAX_LIST_LIMIT`, sent as `limit` and the pre-scan cap.
+pub const REPORT_LIMIT: usize = 100;
+
+
+/// The grc `MAX_ID_CHARS`.
+pub const MAX_REPORT_FRAMEWORK_CHARS: usize = 64;
+
+
+/// The grc `is_identifier(_, MAX_ID_CHARS)`: an ASCII alphanumeric first, then alphanumerics and `._-`.
+pub fn valid_report_framework(text: &str) -> bool {
+    let mut characters = text.chars();
+    text.len() <= MAX_REPORT_FRAMEWORK_CHARS
+        && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && characters.all(|next| next.is_ascii_alphanumeric() || matches!(next, '.' | '_' | '-'))
+}
+
+
+/// Digits only and inside `i64`, like the two report APIs' id parsers.
+pub fn parse_report_id(text: &str) -> Option<i64> {
+    parse_oncall_id(text)
+}
+
+
+pub fn grc_list_path(framework: Option<&str>) -> String {
+    framework.map_or_else(
+        || format!("grc/reports?limit={REPORT_LIMIT}"),
+        |name| format!("grc/reports?limit={REPORT_LIMIT}&framework={name}"),
+    )
+}
+
+
+pub fn attack_list_path() -> String {
+    format!("attack-paths/reports?limit={REPORT_LIMIT}")
+}
+
+
+/// A framework outside the grammar is a 400 without any call.
+pub async fn list_grc(client: &ApiClient, source: IpAddr, token: &SecretString, framework: Option<&str>) -> Result<GrcListView, ApiFailure> {
+    match framework.filter(|name| !valid_report_framework(name)) {
+        Some(_refused) => Err(ApiFailure::BadRequest),
+        None => {
+            let bytes = call(client, source, Method::GET, &grc_list_path(framework), Some(token), None).await?;
+            scan_state_items(&bytes, REPORT_LIMIT)?;
+            serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+        }
+    }
+}
+
+
+pub async fn list_attack(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<AttackListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &attack_list_path(), Some(token), None).await?;
+    scan_state_items(&bytes, REPORT_LIMIT)?;
+    serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+}
+
+
+/// An id outside `i64` digits is a missing report without any call.
+pub async fn get_grc(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<GrcReportView, ApiFailure> {
+    match parse_report_id(id) {
+        Some(number) => {
+            let bytes = call(client, source, Method::GET, &format!("grc/reports/{number}"), Some(token), None).await?;
+            let scan: GrcBodyScan = serde_json::from_slice(&bytes)?;
+            Ok(GrcReportView {
+                id: number,
+                framework: scan.framework,
+                version: scan.version,
+                generated: scan.generated,
+                counts: scan.counts,
+                controls: scan.controls.len(),
+                gaps: scan.gaps.len(),
+                plan: scan.plan.len(),
+            })
+        }
+        None => Err(ApiFailure::NotFound),
+    }
+}
+
+
+pub async fn get_attack(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<AttackReportView, ApiFailure> {
+    match parse_report_id(id) {
+        Some(number) => {
+            let bytes = call(client, source, Method::GET, &format!("attack-paths/reports/{number}"), Some(token), None).await?;
+            let scan: AttackBodyScan = serde_json::from_slice(&bytes)?;
+            Ok(AttackReportView {
+                id: number,
+                graph_digest: scan.graph_digest,
+                truncated: scan.truncated,
+                budget_reached: scan.budget_reached,
+                unsearched: scan.unsearched.len(),
+                paths: scan.paths.len(),
+                choke_points: scan.choke_points.len(),
+                recommendations: scan.recommendations.len(),
+            })
         }
         None => Err(ApiFailure::NotFound),
     }

@@ -1,21 +1,22 @@
 use crate::api::{
-    cert_filter, checked_observable, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity,
-    get_shell_session, get_state_asset, get_vuln_asset, list_alerts, list_assets, list_case_links, list_case_observables, list_cases, list_certs,
-    list_findings, list_oncall, list_risk, list_shell_sessions, list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac,
-    parse_dhcp_time, parse_dhcp_window, post_alert_triage, post_case_action, post_case_comment, post_case_link, post_case_observable, probe_dhcp,
-    probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id,
-    valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter,
-    MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_OBSERVABLE_CHARS, MAX_SOURCE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    cert_filter, checked_observable, get_alert, get_asset, get_attack, get_case, get_cert, get_dhcp, get_grc, get_oncall_alert, get_posture,
+    get_risk_entity, get_shell_session, get_state_asset, get_vuln_asset, list_alerts, list_assets, list_attack, list_case_links,
+    list_case_observables, list_cases, list_certs, list_findings, list_grc, list_oncall, list_risk, list_shell_sessions, list_states, list_vulns,
+    login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_alert_triage, post_case_action, post_case_comment,
+    post_case_link, post_case_observable, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id,
+    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference,
+    valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_OBSERVABLE_CHARS, MAX_SOURCE_CHARS,
+    RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{
     ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, LinksPanel, ObservablesPanel, Opened, Principal, ShellQuery, WebLimits, WebState,
 };
 use crate::pages::{
-    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_all, case_page_full, case_page_with, cases_page, cert_page, certs_page,
-    comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page,
-    posture_changed_page, posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page,
-    vuln_asset_page, vulns_page, STYLESHEET,
+    alert_page, alerts_page, asset_page, assets_page, attack_page, attack_report_page, case_page, case_page_all, case_page_full, case_page_with,
+    cases_page, cert_page, certs_page, comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, grc_page,
+    grc_report_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page, posture_form_page, posture_page,
+    posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -1007,6 +1008,95 @@ pub async fn show_oncall_alert(
 }
 
 
+pub fn parse_report_framework(query: &BTreeMap<String, String>) -> Option<&str> {
+    query.get("framework").map(String::as_str).filter(|name| !name.is_empty())
+}
+
+
+pub async fn show_grc_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let framework = parse_report_framework(query);
+    let client = state.api.load_full();
+    let list = list_grc(&client, source, &principal.token, framework)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &grc_page(language, &principal.csrf, &list, framework), &[]))
+}
+
+
+pub async fn show_grc(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_grc_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_grc_report_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let report = get_grc(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &grc_report_page(language, &principal.csrf, &report), &[]))
+}
+
+
+pub async fn show_grc_report(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    merge(show_grc_report_page(&state, peer.ip(), &headers, &id).await)
+}
+
+
+pub async fn show_attack_page(state: &WebState, source: IpAddr, headers: &HeaderMap) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let list = list_attack(&client, source, &principal.token)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &attack_page(language, &principal.csrf, &list), &[]))
+}
+
+
+pub async fn show_attack(State(state): State<SharedWeb>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
+    merge(show_attack_page(&state, peer.ip(), &headers).await)
+}
+
+
+pub async fn show_attack_report_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let report = get_attack(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(
+        StatusCode::OK,
+        &attack_report_page(language, &principal.csrf, &report),
+        &[],
+    ))
+}
+
+
+pub async fn show_attack_report(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    merge(show_attack_report_page(&state, peer.ip(), &headers, &id).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -1329,6 +1419,10 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/vulnerabilities/{asset}", get(show_vuln_asset))
         .route("/oncall", get(show_oncall))
         .route("/oncall/{id}", get(show_oncall_alert))
+        .route("/grc", get(show_grc))
+        .route("/grc/{id}", get(show_grc_report))
+        .route("/attack-paths", get(show_attack))
+        .route("/attack-paths/{id}", get(show_attack_report))
         .route("/alerts/{id}/triage", post(alert_triage_submit))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
