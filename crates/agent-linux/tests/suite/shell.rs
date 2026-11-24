@@ -255,6 +255,7 @@ fn agent_with(directory: &Path, server: &str) -> Result<AgentFile, Box<dyn std::
     Ok(AgentFile {
         server: server.to_owned(),
         server_name: "localhost".to_owned(),
+        relays: Vec::new(),
         certificate: write_mode(directory, "agent.crt", &leaf.pem(), READABLE_BY_ALL)?,
         key: write_mode(directory, "agent.key", &leaf_key.serialize_pem(), PRIVATE_FILE)?,
         platform_ca: write_mode(directory, "ca.crt", &authority.pem(), READABLE_BY_ALL)?,

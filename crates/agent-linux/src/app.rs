@@ -12,6 +12,7 @@ use crate::types::{RunFn, SpoolLock};
 use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
+use agent_channel::relay::HoldDown;
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
 use agent_channel::spool_dirs::{open_parent, open_spool_dirs, SpoolDirs};
 use agent_channel::types::{ExecuteFn, PauseFn};
@@ -36,8 +37,9 @@ pub const AGENT_CYCLE_SECONDS: u64 = 5;
 /// Runs the agent `max_runs` times, every run with the same shell executor; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
 pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn, shell: Option<&ExecuteFn<'_>>) -> u64 {
     let mut succeeded = 0;
+    let hold = HoldDown::default();
     for _ in 0..max_runs {
-        let outcome = run_agent(agent, checked, pause, shell)
+        let outcome = run_agent(agent, checked, pause, shell, &hold)
             .await
             .inspect_err(|error| tracing::warn!(%error, "agent run failed"));
         succeeded += u64::from(outcome.is_ok());

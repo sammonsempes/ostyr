@@ -328,6 +328,7 @@ pub fn agent_file(dir: &Path) -> AgentFile {
     AgentFile {
         server: "127.0.0.1:1".to_owned(),
         server_name: "server".to_owned(),
+        relays: Vec::new(),
         certificate: dir.join("cert"),
         key: dir.join("key"),
         platform_ca: dir.join("ca"),

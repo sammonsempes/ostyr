@@ -432,7 +432,7 @@ async fn a_subscription_above_the_stream_bound_is_refused() -> TestResult {
 }
 
 
-fn signed_envelope(sequence: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+pub fn signed_envelope(sequence: u64) -> Result<Vec<u8>, Box<dyn Error>> {
     let command = Command {
         key_id: KEY_ID.to_string(),
         key_class: KeyClass::Routine,

@@ -20,7 +20,7 @@ use tower::service_fn;
 const LONG_WAIT_SECONDS: u64 = 600;
 
 
-async fn silent_server() -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::error::Error>> {
+pub async fn silent_server() -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let handle = tokio::spawn(async move {
@@ -42,7 +42,7 @@ async fn silent_server() -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::er
 }
 
 
-async fn dial(address: SocketAddr) -> Result<Channel, Box<dyn std::error::Error>> {
+pub async fn dial(address: SocketAddr) -> Result<Channel, Box<dyn std::error::Error>> {
     let channel = Endpoint::from_static(PLACEHOLDER_ENDPOINT)
         .connect_with_connector(service_fn(move |_uri: http::Uri| async move {
             TcpStream::connect(address).await.map(TokioIo::new)

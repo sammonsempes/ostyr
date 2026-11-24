@@ -126,6 +126,10 @@ pub type DialFuture = Pin<Box<dyn Future<Output = Result<Channel, ChannelError>>
 pub type DialFn = dyn Fn() -> DialFuture + Send + Sync;
 
 
+/// Ends the command stream cleanly between two envelopes when it completes.
+pub type StopFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+
 pub type PauseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 

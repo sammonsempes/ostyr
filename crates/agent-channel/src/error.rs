@@ -168,6 +168,8 @@ pub enum ChannelError {
     AttemptTimedOut { seconds: u64 },
     #[error("unary call not answered after {seconds} seconds")]
     CallTimedOut { seconds: u64 },
+    #[error("the selected endpoint failed, the run ends and the next one selects again")]
+    EndpointLost,
     #[error("the server closed the event stream with {unacknowledged} batches unacknowledged")]
     StreamEnded { unacknowledged: usize },
     #[error("event delivery abandoned after {attempts} consecutive failed attempts: {last}")]
@@ -218,6 +220,29 @@ impl std::fmt::Display for SpoolDirReason {
 }
 
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EndpointFault {
+    Unparsable,
+    ZeroPort,
+    Unusable,
+    Duplicate,
+    ServerName,
+}
+
+
+impl std::fmt::Display for EndpointFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unparsable => "it is not a socket address",
+            Self::ZeroPort => "its port is 0",
+            Self::Unusable => "its address is unspecified, multicast or broadcast",
+            Self::Duplicate => "it repeats an earlier endpoint",
+            Self::ServerName => "the server name is empty or not a valid name",
+        })
+    }
+}
+
+
 #[derive(Debug, Error)]
 pub enum SinkError {
     #[error("{path}: {source}")]
@@ -251,6 +276,10 @@ pub enum AppError {
     Store(#[from] agent_command::error::StoreError),
     #[error("invalid server address: {0}")]
     Address(#[from] std::net::AddrParseError),
+    #[error("agent file endpoint {index} is refused: {reason}")]
+    Endpoint { index: usize, reason: EndpointFault },
+    #[error("agent file lists {count} relays, at most {max} are allowed")]
+    TooManyRelays { count: usize, max: usize },
     #[error("input or output failed: {0}")]
     Io(#[from] io::Error),
     #[error("a task failed: {0}")]
