@@ -4,6 +4,7 @@ pub mod error;
 pub mod model;
 pub mod publish;
 pub mod run;
+pub mod serve;
 pub mod session;
 pub mod settings;
 pub mod types;
