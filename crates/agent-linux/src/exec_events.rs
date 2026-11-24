@@ -188,13 +188,16 @@ pub fn deliver(sink: &ExecSink, state: Delivery, drained: &Drained) -> io::Resul
 }
 
 
-/// `deliver` for the probe thread: a failing write sets `stop` and reports the error to the controller, and the state is kept.
+/// `deliver` for the probe thread: a failing write sets `stop` and reports the error to the controller, and the state keeps the drain's report counts for the final status.
 pub fn deliver_or_stop(sink: &ExecSink, state: Delivery, drained: &Drained, stop: &AtomicBool, failures: &Sender<io::Error>) -> Delivery {
     deliver(sink, state.clone(), drained).unwrap_or_else(|error| {
         tracing::error!(%error, "exec spool write failed, the probe stops");
         stop.store(true, Ordering::Relaxed);
         failures.send(error).inspect_err(|_| tracing::warn!("the controller is gone")).ok();
-        state
+        Delivery {
+            losses: add_report(state.losses, &drained.report),
+            ..state
+        }
     })
 }
 
