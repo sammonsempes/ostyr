@@ -19,6 +19,9 @@ const STUB_MANIFEST: &str = "[package]\nname = \"stub\"\nversion = \"0.0.0\"\ned
 const LIVE_FILE: &str = "#![cfg(feature = \"ebpf-live\")]\nfn live() {}\n";
 
 
+const LOAD_FILE: &str = "#![cfg(feature = \"ebpf-load\")]\nfn load() {}\n";
+
+
 const KERNEL_MANIFEST: &str = "[workspace]\nmembers = [\"stub\"]\nexclude = [\"crates/ebpf-probes/ebpf\"]\n";
 
 
@@ -154,6 +157,11 @@ fn an_uncovered_host_file_in_the_boundary_crate_still_fails() -> anyhow::Result<
 fn the_live_gate_is_only_honoured_inside_the_boundary() -> anyhow::Result<()> {
     assert!(has_executable_code(LIVE_FILE, false)?);
     assert!(!has_executable_code(LIVE_FILE, true)?);
+    assert!(has_executable_code(LOAD_FILE, false)?);
+    assert!(!has_executable_code(LOAD_FILE, true)?);
+    assert!(has_executable_code("#![cfg(feature = \"ebpf-live-test\")]\nfn a() {}\n", false)?);
+    assert!(!has_executable_code("#![cfg(feature = \"ebpf-live-test\")]\nfn a() {}\n", true)?);
+    assert!(has_executable_code("#![cfg(feature = \"ebpf-other\")]\nfn a() {}\n", true)?);
     assert!(has_executable_code("#![cfg(unix)]\nfn a() {}\n", true)?);
     assert!(has_executable_code("fn a() {}\n", true)?);
     assert!(has_executable_code("#![allow(dead_code)]\nfn a() {}\n", true)?);

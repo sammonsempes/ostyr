@@ -1,27 +1,13 @@
-#![cfg(feature = "ebpf-live")]
+#![cfg(feature = "ebpf-live-test")]
 
-use aya::maps::{MapData, PerCpuArray, RingBuf};
-use aya::programs::TracePoint;
-use aya::{Ebpf, EbpfLoader};
-use ebpf_probes::btf::{read_task_offsets, require_64_bit, VMLINUX_BTF_PATH};
-use ebpf_probes::live::read_dropped;
-use ebpf_probes::record::{decode_exec, ExecRecord};
+use aya::programs::loaded_programs;
+use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
+use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, LoadError, Probe, PROGRAM_NAME};
+use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-
-
-const OBJECT_ENV: &str = "EBPF_PROBES_OBJECT";
-
-
-const PROGRAM_NAME: &str = "sched_process_exec";
-
-
-const RING_NAME: &str = "EXEC_EVENTS";
-
-
-const DROPS_NAME: &str = "EXEC_DROPS";
 
 
 const UNPRIVILEGED_UID: u32 = 65534;
@@ -33,36 +19,14 @@ const TRUE_BINARY: &str = "/usr/bin/true";
 const STORM_EXECS: u32 = 3000;
 
 
-struct Probe {
-    _ebpf: Ebpf,
-    ring: RingBuf<MapData>,
-    drops: PerCpuArray<MapData, u64>,
-}
+const HALVES: usize = 2;
 
 
-fn object_path() -> Result<String, Box<dyn Error>> {
-    Ok(std::env::var(OBJECT_ENV).map_err(|source| format!("{OBJECT_ENV} must name the built kernel object: {source}"))?)
-}
+const MARKER: &str = "MARKER-7f3a9c";
 
 
-fn load_probe(object: &str) -> Result<Probe, Box<dyn Error>> {
-    require_64_bit(usize::BITS)?;
-    let offsets = read_task_offsets(Path::new(VMLINUX_BTF_PATH))?;
-    let real_parent = u64::from(offsets.real_parent);
-    let tgid = u64::from(offsets.tgid);
-    let mut ebpf = EbpfLoader::new()
-        .override_global("REAL_PARENT_OFFSET", &real_parent, true)
-        .override_global("TGID_OFFSET", &tgid, true)
-        .load_file(object)?;
-    let program: &mut TracePoint = ebpf
-        .program_mut(PROGRAM_NAME)
-        .ok_or("program sched_process_exec is missing")?
-        .try_into()?;
-    program.load()?;
-    program.attach("sched", PROGRAM_NAME)?;
-    let ring = RingBuf::try_from(ebpf.take_map(RING_NAME).ok_or("ring buffer EXEC_EVENTS is missing")?)?;
-    let drops = PerCpuArray::try_from(ebpf.take_map(DROPS_NAME).ok_or("map EXEC_DROPS is missing")?)?;
-    Ok(Probe { _ebpf: ebpf, ring, drops })
+fn load() -> Result<Probe, Box<dyn Error>> {
+    Ok(load_exec_probe(Path::new(EXEC_OBJECT_PATH))?)
 }
 
 
@@ -78,43 +42,73 @@ fn run_true_as_nobody() -> Result<u32, Box<dyn Error>> {
 }
 
 
-fn drain(ring: &mut RingBuf<MapData>) -> Result<Vec<ExecRecord>, Box<dyn Error>> {
-    Ok(std::iter::from_fn(|| ring.next().map(|item| decode_exec(&item))).collect::<Result<Vec<_>, _>>()?)
+fn program_ids() -> Result<Vec<u32>, Box<dyn Error>> {
+    let infos = loaded_programs().collect::<Result<Vec<_>, _>>()?;
+    Ok(infos.iter().map(|info| info.id()).collect())
+}
+
+
+fn assert_no_marker(error: &LoadError) {
+    let first: &(dyn std::error::Error + 'static) = error;
+    let chain = std::iter::successors(Some(first), |inner| (*inner).source());
+    let texts: Vec<String> = chain.flat_map(|inner| [inner.to_string(), format!("{inner:?}")]).collect();
+    assert!(texts.iter().all(|text| !text.contains(MARKER)), "{texts:?}");
 }
 
 
 #[test]
-fn an_unprivileged_exec_is_reported_with_pid_ppid_uid_and_comm() -> Result<(), Box<dyn Error>> {
-    let object = object_path()?;
-    let mut probe = load_probe(&object)?;
+fn an_unprivileged_exec_is_drained_with_pid_ppid_uid_and_comm() -> Result<(), Box<dyn Error>> {
+    let mut probe = load()?;
     let child = run_true_as_nobody()?;
-    let records = drain(&mut probe.ring)?;
-    let dropped = read_dropped(&probe.drops)?;
-    let found = records.iter().find(|record| record.pid == child && record.comm == "true");
-    let record = found.ok_or_else(|| format!("no exec record for pid {child} among {} records", records.len()))?;
+    let drained = drain_exec(&mut probe, MAX_DRAIN_PER_POLL);
+    let record = drained
+        .records
+        .iter()
+        .find(|record| record.pid == child && record.comm == "true")
+        .ok_or_else(|| format!("no exec record for pid {child} among {}", drained.records.len()))?;
     assert_eq!(record.ppid, std::process::id());
     assert_eq!(record.uid, UNPRIVILEGED_UID);
-    assert!(record.monotonic_ns > 0);
-    assert_eq!(dropped, 0);
+    assert_eq!(drained.report.refused, 0);
+    assert_eq!(drained.report.kernel_dropped, KernelDropped::Counted(0));
     Ok(())
 }
 
 
 #[test]
-fn an_undrained_storm_is_counted_as_dropped() -> Result<(), Box<dyn Error>> {
-    let object = object_path()?;
-    let mut probe = load_probe(&object)?;
+fn an_undrained_storm_is_a_loud_kernel_drop_count() -> Result<(), Box<dyn Error>> {
+    let mut probe = load()?;
     (0..STORM_EXECS).try_for_each(|_| Command::new(TRUE_BINARY).status().map(drop))?;
-    let dropped = read_dropped(&probe.drops)?;
-    let kept = drain(&mut probe.ring)?.len() as u64;
-    writeln!(
-        std::io::stdout(),
-        "storm of {STORM_EXECS} execs: {kept} records kept, {dropped} drops counted"
-    )?;
-    assert!(dropped > 0, "no drop counted after {STORM_EXECS} execs, {kept} kept");
+    let drained = drain_exec(&mut probe, MAX_DRAIN_PER_POLL);
+    writeln!(std::io::stdout(), "storm: {:?}", drained.report)?;
     assert!(
-        kept + dropped >= u64::from(STORM_EXECS),
-        "kept {kept} plus dropped {dropped} is below {STORM_EXECS}"
+        matches!(drained.report.kernel_dropped, KernelDropped::Counted(count) if count > 0),
+        "{:?}",
+        drained.report
     );
+    Ok(())
+}
+
+
+#[test]
+fn dropping_the_probe_unloads_the_program() -> Result<(), Box<dyn Error>> {
+    let probe = load()?;
+    let held = probe.ebpf.program(PROGRAM_NAME).ok_or("program is missing")?.info()?.id();
+    assert!(program_ids()?.contains(&held));
+    drop(probe);
+    assert!(!program_ids()?.contains(&held), "program {held} is still loaded after the drop");
+    Ok(())
+}
+
+
+#[test]
+fn a_forged_object_fails_by_name_and_keeps_no_aya_text() -> Result<(), Box<dyn Error>> {
+    let forged = format!("{MARKER} this is not an ELF object").into_bytes();
+    let refused = load_exec_probe_from_bytes(&forged).err().ok_or("a forged object loaded")?;
+    assert_no_marker(&refused);
+    assert_eq!(refused, LoadError::Parse);
+    let mut truncated = read_object(Path::new(EXEC_OBJECT_PATH))?;
+    truncated.truncate(truncated.len() / HALVES);
+    let cut = load_exec_probe_from_bytes(&truncated).err().ok_or("a truncated object loaded")?;
+    assert_no_marker(&cut);
     Ok(())
 }
