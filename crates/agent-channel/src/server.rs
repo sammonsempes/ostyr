@@ -2,9 +2,11 @@ use crate::error::{error_class, serve_kind, ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serials_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
 use crate::model::{
-    Admission, Identity, PendingHandshake, ServerState, SlotKind, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
+    Admission, ChannelSettings, HeaderPermit, HeaderPhase, Identity, ListenerKind, PendingHandshake, RelayListener, ServerState, Serving, SlotKind,
+    IPV6_HOST_BITS, MAX_PROXY_HEADER_PENDING, MAX_PROXY_HEADER_PENDING_PER_RELAY, PROXY_HEADER_SECONDS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
     SERVER_KEEPALIVE_TIMEOUT_SECONDS, TCP_KEEPALIVE_IDLE_SECONDS, TCP_KEEPALIVE_INTERVAL_SECONDS,
 };
+use crate::proxy::{count_refusal, read_proxy_header, take_header_permit, HeaderCaps};
 use crate::revocation::{revoked_in, revoked_now};
 use crate::settings::{resize_total, settings_of};
 use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, SharedState, ShutdownSignal};
@@ -17,7 +19,7 @@ use socket2::{SockRef, TcpKeepalive};
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Notify, Semaphore};
@@ -36,41 +38,160 @@ pub async fn serve(
     revocations: RevocationWatch,
     shutdown: ShutdownSignal,
 ) {
-    let acceptor = TlsAcceptor::from(config);
+    let relay = RelayListener {
+        incoming: Box::pin(tokio_stream::empty()),
+        header_limit: Duration::from_secs(PROXY_HEADER_SECONDS),
+    };
+    serve_with_relay(incoming, relay, config, router, state, revocations, shutdown).await;
+}
+
+
+/// `serve` with a second listener whose connections must open with a PROXY v2 header naming their source; one loop, one total cap.
+pub async fn serve_with_relay(
+    incoming: IncomingConnections,
+    relay: RelayListener,
+    config: SharedServerConfig,
+    router: Router,
+    state: SharedState,
+    revocations: RevocationWatch,
+    shutdown: ShutdownSignal,
+) {
     let initial = settings_of(&state).max_total_connections;
-    let connections = Arc::new(Semaphore::new(initial));
+    let serving = Serving {
+        acceptor: TlsAcceptor::from(config),
+        router,
+        state,
+        revocations,
+        connections: Arc::new(Semaphore::new(initial)),
+        registry: Arc::new(Mutex::new(Vec::new())),
+        phase: Arc::new(Mutex::new(HeaderPhase::default())),
+        header_limit: relay.header_limit,
+    };
     let mut capacity = initial;
-    let mut handshakes = Vec::new();
-    incoming
+    let tagged = futures_util::stream::select(
+        incoming.map(|accepted| (ListenerKind::Direct, accepted)),
+        relay.incoming.map(|accepted| (ListenerKind::Relay, accepted)),
+    );
+    tagged
         .take_until(shutdown)
-        .for_each(|accepted| {
+        .for_each(|(kind, accepted)| {
             match accepted {
                 Ok(stream) => {
-                    capacity = resize_total(&connections, capacity, settings_of(&state).max_total_connections);
-                    let source = peer_source(stream.peer_addr());
-                    let evicted = source.and_then(|known| register_handshake(&mut handshakes, known, &state));
-                    if let Some(signal) = evicted {
-                        let admission = Admission {
-                            connections: Arc::clone(&connections),
-                            capacity,
-                            evicted: signal,
-                        };
-                        let connection = run_connection(
-                            stream,
-                            acceptor.clone(),
-                            router.clone(),
-                            Arc::clone(&state),
-                            revocations.clone(),
-                            admission,
-                        );
-                        tokio::spawn(connection.map(log_outcome));
-                    }
+                    capacity = resize_total(&serving.connections, capacity, settings_of(&serving.state).max_total_connections);
+                    admit(&serving, kind, stream, capacity);
                 }
                 Err(error) => tracing::warn!(%error, "accept failed"),
             }
             std::future::ready(())
         })
         .await;
+}
+
+
+/// Routes an accepted stream to the direct or the relay path.
+pub fn admit(serving: &Serving, kind: ListenerKind, stream: TcpStream, capacity: usize) {
+    match kind {
+        ListenerKind::Direct => admit_direct(serving, stream, capacity),
+        ListenerKind::Relay => admit_relay(serving, stream, capacity),
+    }
+}
+
+
+pub fn admit_direct(serving: &Serving, stream: TcpStream, capacity: usize) {
+    let source = peer_source(stream.peer_addr());
+    let evicted = source.and_then(|known| register_handshake(&serving.registry, ListenerKind::Direct, known, &serving.state));
+    if let Some(signal) = evicted {
+        let admission = admission_of(serving, capacity, signal);
+        let connection = run_connection(
+            stream,
+            serving.acceptor.clone(),
+            serving.router.clone(),
+            Arc::clone(&serving.state),
+            serving.revocations.clone(),
+            admission,
+        );
+        tokio::spawn(connection.map(log_outcome));
+    }
+}
+
+
+pub fn admission_of(serving: &Serving, capacity: usize, evicted: oneshot::Receiver<()>) -> Admission {
+    Admission {
+        connections: Arc::clone(&serving.connections),
+        capacity,
+        evicted,
+    }
+}
+
+
+/// Relay listener: the peer must be a listed relay and must get a place in the header phase before any task is spawned.
+pub fn admit_relay(serving: &Serving, stream: TcpStream, capacity: usize) {
+    let relay = relay_peer(stream.peer_addr(), &serving.state);
+    let permit = relay.and_then(|address| header_permit(serving, address));
+    if let (Some(address), Some(held)) = (relay, permit) {
+        let connection = run_relay_connection(stream, address, held, serving.clone(), capacity);
+        tokio::spawn(connection.map(log_outcome));
+    }
+}
+
+
+/// The canonical address of an accepted relay peer when it equals one `relay_sources` entry exactly (no folding), else counted and dropped.
+pub fn relay_peer(peer: io::Result<SocketAddr>, state: &ServerState) -> Option<IpAddr> {
+    let known = peer
+        .map(|address| address.ip().to_canonical())
+        .map_err(|error| tracing::warn!(%error, "relay peer address unknown"));
+    known.ok().filter(|address| is_listed_relay(state, *address))
+}
+
+
+pub fn is_listed_relay(state: &ServerState, address: IpAddr) -> bool {
+    let listed = settings_of(state).relay_sources.contains(&address);
+    if !listed {
+        bump(&state.counters.relay_peer_unknown);
+        tracing::debug!("peer of the relay listener is not a listed relay, connection closed");
+    }
+    listed
+}
+
+
+pub fn header_permit(serving: &Serving, relay: IpAddr) -> Option<HeaderPermit> {
+    let caps = HeaderCaps {
+        total: MAX_PROXY_HEADER_PENDING,
+        per_relay: MAX_PROXY_HEADER_PENDING_PER_RELAY,
+    };
+    let permit = take_header_permit(&serving.phase, relay, caps);
+    if permit.is_none() {
+        bump(&serving.state.counters.proxy_header_refused);
+        tracing::debug!("relay header phase at its cap, connection closed");
+    }
+    permit
+}
+
+
+/// Header under one deadline, then the allowlist again on a fresh snapshot, then the pending-handshake registry under the named source.
+pub async fn run_relay_connection(
+    mut stream: TcpStream,
+    relay: IpAddr,
+    permit: HeaderPermit,
+    serving: Serving,
+    capacity: usize,
+) -> Result<(), ChannelError> {
+    let header = read_proxy_header(&mut stream, serving.header_limit).await;
+    drop(permit);
+    let announced = header.map_err(|refusal| ChannelError::RelayRefused {
+        reason: count_refusal(&serving.state.counters, refusal),
+    })?;
+    if !is_listed_relay(&serving.state, relay) {
+        Err(ChannelError::RelayRefused {
+            reason: "relay removed from relay_sources",
+        })?;
+    }
+    let evicted =
+        register_handshake(&serving.registry, ListenerKind::Relay, source_of(announced), &serving.state).ok_or(ChannelError::RelayRefused {
+            reason: "pending handshake cap of the source",
+        })?;
+    let admission = admission_of(&serving, capacity, evicted);
+    run_connection(stream, serving.acceptor, serving.router, serving.state, serving.revocations, admission).await
 }
 
 
@@ -95,32 +216,63 @@ pub fn peer_source(peer: io::Result<SocketAddr>) -> Option<IpAddr> {
 }
 
 
-/// Notes a new handshake: `None` when its source is at its cap, else the oldest of the busiest source is evicted at the global cap.
-pub fn register_handshake(handshakes: &mut Vec<PendingHandshake>, source: IpAddr, state: &ServerState) -> Option<oneshot::Receiver<()>> {
+/// No code holding the lock can panic, so a poisoned lock still guards consistent data.
+pub fn lock_registry(registry: &Mutex<Vec<PendingHandshake>>) -> MutexGuard<'_, Vec<PendingHandshake>> {
+    registry.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+
+/// The total cap of the listener kind.
+pub fn pending_cap(settings: &ChannelSettings, kind: ListenerKind) -> usize {
+    match kind {
+        ListenerKind::Direct => settings.max_pending_handshakes,
+        ListenerKind::Relay => settings.max_pending_relay_handshakes,
+    }
+}
+
+
+/// Notes a new handshake: `None` when its source is at its cap, else the oldest of the busiest source of the same kind is evicted at the kind's cap.
+pub fn register_handshake(
+    registry: &Mutex<Vec<PendingHandshake>>,
+    kind: ListenerKind,
+    source: IpAddr,
+    state: &ServerState,
+) -> Option<oneshot::Receiver<()>> {
     let settings = settings_of(state);
+    let mut handshakes = lock_registry(registry);
     handshakes.retain(|waiting| !waiting.stop.is_closed());
-    if handshakes.iter().filter(|waiting| waiting.source == source).count() >= settings.max_pending_handshakes_per_source {
+    if handshakes
+        .iter()
+        .filter(|waiting| waiting.kind == kind && waiting.source == source)
+        .count()
+        >= settings.max_pending_handshakes_per_source
+    {
         bump(&state.counters.handshakes_refused);
         tracing::debug!(%source, "pending handshake cap of the source reached, connection refused");
         None
     } else {
-        if handshakes.len() >= settings.max_pending_handshakes {
-            let victim = busiest_oldest(handshakes).map(|position| handshakes.remove(position).stop);
+        if handshakes.iter().filter(|waiting| waiting.kind == kind).count() >= pending_cap(&settings, kind) {
+            let victim = busiest_oldest(&handshakes, kind).map(|position| handshakes.remove(position).stop);
             evict(victim, state);
         }
         let (sender, receiver) = oneshot::channel();
-        handshakes.push(PendingHandshake { source, stop: sender });
+        handshakes.push(PendingHandshake { kind, source, stop: sender });
         Some(receiver)
     }
 }
 
 
-/// Position of the oldest handshake among those of the source holding the most.
-pub fn busiest_oldest(handshakes: &[PendingHandshake]) -> Option<usize> {
+/// Position of the oldest handshake of `kind` among those of the source holding the most.
+pub fn busiest_oldest(handshakes: &[PendingHandshake], kind: ListenerKind) -> Option<usize> {
     let mut per_source: HashMap<IpAddr, usize> = HashMap::new();
-    handshakes.iter().for_each(|waiting| *per_source.entry(waiting.source).or_insert(0) += 1);
+    handshakes
+        .iter()
+        .filter(|waiting| waiting.kind == kind)
+        .for_each(|waiting| *per_source.entry(waiting.source).or_insert(0) += 1);
     let busiest = per_source.values().max();
-    handshakes.iter().position(|waiting| per_source.get(&waiting.source) == busiest)
+    handshakes
+        .iter()
+        .position(|waiting| waiting.kind == kind && per_source.get(&waiting.source) == busiest)
 }
 
 
@@ -298,6 +450,7 @@ pub fn already_logged(error: &ChannelError) -> bool {
             | ChannelError::Revoked { .. }
             | ChannelError::TooManyConnections { .. }
             | ChannelError::ConnectionCapped { .. }
+            | ChannelError::RelayRefused { .. }
     )
 }
 

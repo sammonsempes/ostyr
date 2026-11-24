@@ -691,6 +691,7 @@ async fn start_farm(server: &ServerFile) -> Result<Farm, Box<dyn std::error::Err
     let handle = tokio::spawn(run_server(
         server.clone(),
         listener,
+        None,
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");

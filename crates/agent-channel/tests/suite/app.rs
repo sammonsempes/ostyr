@@ -275,6 +275,7 @@ pub fn fixture(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     Ok(Fixture {
         server: ServerFile {
             listen: "127.0.0.1:0".to_owned(),
+            relay_listen: None,
             certificate: server_tls.certificate,
             key: server_tls.key,
             agent_ca: server_tls.agent_ca,
@@ -385,6 +386,7 @@ async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches
     let handle = tokio::spawn(run_server(
         server.clone(),
         listener,
+        None,
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");
@@ -423,6 +425,7 @@ async fn a_restarted_server_still_deduplicates() -> TestResult {
         let handle = tokio::spawn(run_server(
             server.clone(),
             listener,
+            None,
             Box::pin(async move {
                 if let Err(error) = stopped.await {
                     tracing::warn!(%error, "stop sender dropped");
@@ -448,6 +451,7 @@ async fn the_server_refuses_bad_files() -> TestResult {
     assert!(load_server_file(&dir.path().join("missing.yaml")).is_err());
     let unknown = ServerFile {
         listen: "not-an-address".to_owned(),
+        relay_listen: None,
         ..server.clone()
     };
     assert!(bind_server(&unknown).await.is_err());
@@ -1089,6 +1093,7 @@ async fn a_batch_the_server_refuses_as_too_large_is_quarantined_and_delivery_goe
     let handle = tokio::spawn(run_server(
         server.clone(),
         listener,
+        None,
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");
@@ -1133,7 +1138,7 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
     let (stop, stopped) = oneshot::channel::<()>();
     let handle = tokio::spawn(run_server_with_clock(
         server.clone(),
-        listener,
+        (listener, None),
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");
@@ -1195,6 +1200,7 @@ async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> Test
     let handle = tokio::spawn(run_server(
         server.clone(),
         listener,
+        None,
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");
@@ -1284,6 +1290,7 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
     let handle = tokio::spawn(run_server(
         server.clone(),
         listener,
+        None,
         Box::pin(async move {
             if let Err(error) = stopped.await {
                 tracing::warn!(%error, "stop sender dropped");

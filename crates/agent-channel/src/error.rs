@@ -148,6 +148,8 @@ pub enum ChannelError {
     FirstRequestTimeout { seconds: u64 },
     #[error("TLS handshake dropped to make room for a newer connection")]
     HandshakeEvicted,
+    #[error("relayed connection refused: {reason}")]
+    RelayRefused { reason: &'static str },
     #[error("{limit} authenticated connections already open, connection dropped")]
     ConnectionCapped { limit: usize },
     #[error("peer identity refused: {0}")]
@@ -276,6 +278,8 @@ pub enum AppError {
     Store(#[from] agent_command::error::StoreError),
     #[error("invalid server address: {0}")]
     Address(#[from] std::net::AddrParseError),
+    #[error("relay_listen must differ from listen")]
+    RelayListenEqualsListen,
     #[error("agent file endpoint {index} is refused: {reason}")]
     Endpoint { index: usize, reason: EndpointFault },
     #[error("agent file lists {count} relays, at most {max} are allowed")]

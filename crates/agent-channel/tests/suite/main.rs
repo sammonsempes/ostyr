@@ -7,6 +7,7 @@ mod keepalive;
 mod peer_text;
 mod pki;
 mod preface;
+mod proxy;
 mod relay;
 mod resilience;
 mod revocation;

@@ -1,13 +1,18 @@
 use crate::error::SettingsError;
 use crate::model::{
-    ChannelSettings, ServerState, MAX_HANDSHAKE_TIMEOUT_SECONDS, MAX_MESSAGE_BYTES_LIMIT, MAX_TOTAL_CONNECTIONS_LIMIT, SETTINGS_SECTION,
+    ChannelSettings, ServerState, MAX_HANDSHAKE_TIMEOUT_SECONDS, MAX_MESSAGE_BYTES_LIMIT, MAX_RELAY_SOURCES, MAX_TOTAL_CONNECTIONS_LIMIT,
+    SETTINGS_SECTION,
 };
 use crate::types::{BoxError, SharedSettings};
 use arc_swap::ArcSwap;
-use core_config::load::load_file;
+use core_config::error::ConfigError;
+use core_config::parse::{parse_document, read_file};
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::io;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -51,10 +56,28 @@ pub fn invalid_settings(settings: &ChannelSettings) -> Vec<&'static str> {
         ),
         ("max_pending_handshakes", settings.max_pending_handshakes == 0),
         ("max_pending_handshakes_per_source", settings.max_pending_handshakes_per_source == 0),
+        ("max_pending_relay_handshakes", settings.max_pending_relay_handshakes == 0),
+        ("relay_sources", !relay_sources_valid(&settings.relay_sources)),
     ]
     .into_iter()
     .filter_map(|(name, invalid)| invalid.then_some(name))
     .collect()
+}
+
+
+/// A relay source is a literal address in its canonical form that a peer can really connect from; at most `MAX_RELAY_SOURCES`, no duplicate.
+pub fn relay_source_usable(address: &IpAddr) -> bool {
+    let kind_usable = match address {
+        IpAddr::V4(v4) => !v4.is_broadcast() && !v4.is_link_local(),
+        IpAddr::V6(v6) => !v6.is_unicast_link_local(),
+    };
+    kind_usable && address.to_canonical() == *address && !address.is_unspecified() && !address.is_multicast()
+}
+
+
+pub fn relay_sources_valid(sources: &[IpAddr]) -> bool {
+    let distinct: HashSet<&IpAddr> = sources.iter().collect();
+    sources.len() <= MAX_RELAY_SOURCES && distinct.len() == sources.len() && sources.iter().all(relay_source_usable)
 }
 
 
@@ -70,16 +93,41 @@ pub fn validate_settings(settings: &ChannelSettings) -> Result<(), SettingsError
 
 /// One line per field, so a reload's diff and audit entry show which bound changed.
 pub fn settings_state(settings: &ChannelSettings) -> ConfigState {
-    format!("{settings:#?}")
+    let mut state: ConfigState = format!("{settings:#?}")
         .lines()
         .filter_map(|line| line.trim().trim_end_matches(',').split_once(": "))
         .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value.to_owned()))
-        .collect()
+        .collect();
+    let listed: Vec<String> = settings.relay_sources.iter().map(IpAddr::to_string).collect();
+    state.insert(format!("{SETTINGS_SECTION}.relay_sources"), listed.join(","));
+    state
+}
+
+
+/// An operator file that names which peers may forge a source is ASCII before any parse: no tag, anchor, alias, merge key, escape, block scalar or CR.
+pub fn operator_byte_allowed(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b" \n_.:-[]{},".contains(&byte)
+}
+
+
+pub fn check_operator_bytes(text: &str, file: &Path) -> Result<(), ConfigError> {
+    if text.bytes().all(operator_byte_allowed) {
+        Ok(())
+    } else {
+        Err(ConfigError::Io {
+            file: file.display().to_string(),
+            source: io::Error::new(io::ErrorKind::InvalidData, "a byte outside the operator file allowlist"),
+        })
+    }
 }
 
 
 pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<ChannelSettings>> {
-    Box::new(move || load_file::<ChannelSettings>(&path))
+    Box::new(move || {
+        let text = read_file(&path)?;
+        check_operator_bytes(&text, &path)?;
+        parse_document::<ChannelSettings>(&text, &path.display().to_string())
+    })
 }
 
 
