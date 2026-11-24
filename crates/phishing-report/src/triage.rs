@@ -10,6 +10,8 @@ use crate::text::{clean, clean_address, is_refused_address};
 use crate::types::RawReadFn;
 use crate::urls::{collect_indexed, html_text, index_from, URL_RULE};
 use data_encoding::HEXLOWER;
+use encoding_rs::{Encoding, ISO_2022_JP, REPLACEMENT, X_USER_DEFINED};
+use mail_parser::decoders::charsets::map::charset_decoder;
 use mail_parser::{Address, Header, HeaderValue, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -618,6 +620,39 @@ const NESTING_CUT: &str = "nesting_cut";
 const MESSAGES_UNOPENED: &str = "messages_unopened";
 
 
+const UTF8_LABELS: [&str; 6] = ["utf8", "utf_8", "unicode11utf8", "unicode20utf8", "x_unicode20utf8", "unicode_1_1_utf_8"];
+
+
+const CHARSET_UNDECODED: &str = "charset_undecoded";
+
+
+const ESCAPE_CHARACTER: char = '\u{1B}';
+
+
+const LOST_BYTE_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{0}'];
+
+
+const META_SNIFF_BYTES: usize = 1024;
+
+
+const META_TAG: &str = "<meta";
+
+
+const CHARSET_WORD: &str = "charset";
+
+
+const ASCII_LABELS: [&str; 2] = ["us_ascii", "ascii"];
+
+
+const CONTENT_TYPE_HEADER: &str = "content-type";
+
+
+const CONTINUATION_MARKER: &str = "charset*";
+
+
+const FIRST_CONTINUATION: &str = "charset*0";
+
+
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
     if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
         mark_uncertain(record, reason);
@@ -662,11 +697,106 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     let unopened = record.counts.messages_unopened > 0;
     mark_once(&mut record, cut, NESTING_CUT);
     mark_once(&mut record, unopened, MESSAGES_UNOPENED);
+    let undecoded = record.counts.charset_undecoded > 0;
+    mark_once(&mut record, undecoded, CHARSET_UNDECODED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
     record.levels.push(info);
     record
+}
+
+
+fn charset_label<'a>(part: &'a MessagePart<'_>) -> Option<&'a str> {
+    part.content_type().and_then(|content_type| content_type.attribute("charset"))
+}
+
+
+fn encoding_of(label: &str) -> Option<&'static Encoding> {
+    Encoding::for_label(label.replace('_', "-").as_bytes())
+}
+
+
+fn is_replacement_label(label: &str) -> bool {
+    encoding_of(label).is_some_and(|found| found == REPLACEMENT || found == X_USER_DEFINED)
+}
+
+
+fn is_iso_2022_jp(label: &str) -> bool {
+    encoding_of(label).is_some_and(|found| found == ISO_2022_JP)
+}
+
+
+fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bool {
+    let label = charset_label(part);
+    let unknown_label = label.is_some_and(|name| (charset_decoder(name.as_bytes()).is_none() && !is_utf8_label(name)) || is_replacement_label(name));
+    let escape_allowed = label.is_some_and(is_iso_2022_jp);
+    let unlabelled_meta = label.is_none() && has_foreign_meta_charset(text);
+    unknown_label || has_lost_bytes(text, escape_allowed) || has_duplicate_charset(part) || unlabelled_meta || has_orphan_continuation(message, part)
+}
+
+
+fn has_lost_bytes(text: &str, escape_allowed: bool) -> bool {
+    text.chars()
+        .any(|character| LOST_BYTE_CHARACTERS.contains(&character) || (character == ESCAPE_CHARACTER && !escape_allowed))
+}
+
+
+fn has_duplicate_charset(part: &MessagePart<'_>) -> bool {
+    part.content_type()
+        .and_then(|content_type| content_type.attributes())
+        .is_some_and(|attributes| attributes.iter().filter(|attribute| attribute.name.starts_with("charset")).count() > 1)
+}
+
+
+fn is_utf8_label(label: &str) -> bool {
+    let folded = label.to_ascii_lowercase().replace('-', "_");
+    UTF8_LABELS.contains(&folded.as_str())
+}
+
+
+fn is_plain_label(label: &str) -> bool {
+    let folded = label.to_ascii_lowercase().replace('-', "_");
+    is_utf8_label(label) || ASCII_LABELS.contains(&folded.as_str())
+}
+
+
+fn sniff_prefix(text: &str) -> String {
+    let cut = (0..=META_SNIFF_BYTES.min(text.len())).rev().find(|index| text.is_char_boundary(*index));
+    cut.and_then(|end| text.get(..end)).map_or_else(String::new, str::to_ascii_lowercase)
+}
+
+
+fn is_label_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+}
+
+
+fn meta_label(tag: &str) -> Option<&str> {
+    let declared = tag.split('>').next().unwrap_or(tag);
+    declared.split_once(CHARSET_WORD).and_then(|(_, after)| {
+        let value = after.trim_start().trim_start_matches('=').trim_start().trim_start_matches(['"', '\'']);
+        value.split(|character: char| !is_label_character(character)).next()
+    })
+}
+
+
+fn has_foreign_meta_charset(text: &str) -> bool {
+    let prefix = sniff_prefix(text);
+    prefix
+        .split(META_TAG)
+        .skip(1)
+        .any(|tag| meta_label(tag).is_some_and(|label| !is_plain_label(label)))
+}
+
+
+fn has_orphan_continuation(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
+    part.headers()
+        .iter()
+        .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
+        .filter_map(|header| raw_value(message, header))
+        .map(|raw| raw.to_ascii_lowercase().split_whitespace().collect::<String>())
+        .any(|compact| compact.contains(CONTINUATION_MARKER) && !compact.contains(FIRST_CONTINUATION))
 }
 
 
@@ -687,6 +817,7 @@ fn collect_urls(
                 urls
             }
             PartType::Text(markup) | PartType::Html(markup) => {
+                counts.charset_undecoded += usize::from(is_undecoded(message, part, markup));
                 let referenced = has_reference(markup);
                 urls_index.shapes = if referenced { Shapes::Refuse } else { Shapes::Markup };
                 let decoded = html_text(markup, counts);
