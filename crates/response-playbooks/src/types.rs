@@ -3,6 +3,9 @@ use crate::model::{ConnectorCall, ConnectorResult};
 use crate::params::Resolved;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::time::Duration;
 
 
@@ -25,3 +28,6 @@ pub type WaitFn = fn(Duration) -> std::pin::Pin<Box<dyn std::future::Future<Outp
 
 
 pub type LiveFn<'a> = &'a (dyn Fn() -> crate::service::Live + Sync);
+
+
+pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>>>>;

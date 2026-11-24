@@ -1,3 +1,10 @@
+//! The `ostyr-playbooks` service: the dry-run rounds over the alert feed until the interrupt wait resolves; logs on stderr, traces on stdout.
+
+
+use crate::bundle::{open_playbooks, PlaybookSettings};
+use crate::error::RoundError;
+use crate::service::{open_service_settings, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
+use crate::types::InterruptWait;
 use alerts::backend::LOG_IGNORED_CRATE;
 use alerts::error::StoreError;
 use alerts::pg::pg_executor;
@@ -10,22 +17,20 @@ use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
-use response_playbooks::bundle::{open_playbooks, PlaybookSettings};
-use response_playbooks::error::RoundError;
-use response_playbooks::service::{open_service_settings, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
 use std::error::Error;
 use std::fs::File;
 use std::future::Future;
-use std::io::stdout;
+use std::io::{stderr, stdout};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use tracing::info;
 
 
-const USAGE: &str = "usage: playbooks_service <settings.yaml>";
+const USAGE: &str = "usage: ostyr-playbooks <settings.yaml>";
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -55,25 +60,38 @@ fn keep_signals<Config>(_engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<
 }
 
 
-async fn run(settings_file: &Path) -> Result<(), Box<dyn Error>> {
-    let settings_engine_audit_log = Arc::new(open_file_log(&response_playbooks::service::load_settings(settings_file)?.audit_file)?);
-    let reload_audit = |shared: &Arc<_>| -> Arc<SharedAuditFn> {
-        let owned = Arc::clone(shared);
-        Arc::new(move |entry| append_declared(&owned, entry, &RELOAD_DECLARED_KEYS))
-    };
-    let settings_engine = Arc::new(open_service_settings(
-        settings_file,
-        Box::new({
-            let audit = reload_audit(&settings_engine_audit_log);
-            move |entry| audit(entry)
-        }),
-    )?);
+pub async fn run(arguments: &[String], interrupt: InterruptWait) -> Result<(), Box<dyn Error>> {
+    let settings_file = match arguments {
+        [file] => Ok(file),
+        _ => Err(USAGE),
+    }?;
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(stderr).finish())?;
+    tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
+    start(Path::new(settings_file), ROUNDS, interrupt).await
+}
+
+
+pub fn shared_reload_audit(log: &Arc<AuditLog<File>>) -> Arc<SharedAuditFn> {
+    let owned = Arc::clone(log);
+    Arc::new(move |entry| append_declared(&owned, entry, &RELOAD_DECLARED_KEYS))
+}
+
+
+pub fn boxed_reload_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
+    let owned = Arc::clone(log);
+    Box::new(move |entry| append_declared(&owned, entry, &RELOAD_DECLARED_KEYS))
+}
+
+
+pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<(), Box<dyn Error>> {
+    let settings_engine_audit_log = Arc::new(open_file_log(&crate::service::load_settings(settings_file)?.audit_file)?);
+    let settings_engine = Arc::new(open_service_settings(settings_file, boxed_reload_audit(&settings_engine_audit_log))?);
     let start = current_config(&settings_engine);
     let bundle_engine = Arc::new(open_playbooks(PlaybookSettings {
         catalogue_path: start.catalogue.clone(),
         inventory_path: start.inventory.clone(),
         playbook_paths: start.playbooks.clone(),
-        audit: reload_audit(&settings_engine_audit_log),
+        audit: shared_reload_audit(&settings_engine_audit_log),
     })?);
     let bundle_files: Vec<PathBuf> = [start.catalogue.clone(), start.inventory.clone()]
         .into_iter()
@@ -106,8 +124,12 @@ async fn run(settings_file: &Path) -> Result<(), Box<dyn Error>> {
             snapshot,
         )
     };
-    serve(ROUNDS, &live, &mut next_round, pause).await;
-    Ok(())
+    info!(tenant = start.tenant, "serving");
+    tokio::select! {
+        biased;
+        waited = interrupt => Ok(waited?),
+        () = serve(rounds, &live, &mut next_round, pause) => Ok(()),
+    }
 }
 
 
@@ -129,18 +151,4 @@ async fn one_round(
     let audit = |entry| append_declared(&log, entry, &ROUND_KEYS).map(|_record| ());
     let mut state = replays.lock().await;
     run_round(&exec, &scope, &snapshot, &audit, OffsetDateTime::now_utc, &mut stdout(), &mut state).await
-}
-
-
-fn main() -> Result<(), Box<dyn Error>> {
-    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(std::io::stderr).finish())?;
-    tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [settings_file] => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(run(Path::new(settings_file))),
-        _ => Err(USAGE.into()),
-    }
 }

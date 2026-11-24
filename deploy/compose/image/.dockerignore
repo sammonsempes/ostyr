@@ -3,3 +3,5 @@
 !ostyr-auth
 !ostyr-web-ui
 !state
+!ostyr-playbooks
+!playbooks-state

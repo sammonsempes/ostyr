@@ -1,0 +1,12 @@
+tenant: default
+pg_settings: /etc/ostyr/playbooks-pg.yaml
+catalogue: /etc/ostyr/playbooks-catalogue.yaml
+inventory: /etc/ostyr/playbooks-inventory.yaml
+playbooks: [/etc/ostyr/playbooks-notify.yaml]
+limits_file: /etc/ostyr/playbooks-limits.yaml
+scratch_dir: /var/lib/ostyr-playbooks
+audit_file: /var/lib/ostyr-playbooks/audit.log
+poll_interval_seconds: 5
+page_size: 50
+max_matches_per_alert: 4
+max_trace_events: 1000

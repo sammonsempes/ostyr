@@ -8,7 +8,13 @@ use walkdir::WalkDir;
 const BRIDGE_MARKERS: [&str; 6] = ["LogTracer", "tracing_log", "fmt::init(", ".init()", ".try_init()", ".set_default("];
 
 
-const FILTERED_BRIDGE_FILE: &str = "crates/platform/src/serve.rs";
+const PLATFORM_FILE: &str = "crates/platform/src/serve.rs";
+
+
+const PLAYBOOKS_FILE: &str = "crates/response-playbooks/src/serve.rs";
+
+
+const FILTERED_BRIDGE_FILES: [&str; 2] = [PLATFORM_FILE, PLAYBOOKS_FILE];
 
 
 const FILTERED_CALL: &str = ".ignore_crate(LOG_IGNORED_CRATE).init()";
@@ -37,16 +43,17 @@ pub fn is_filtered_bridge(relative: &Path, text: &str) -> bool {
     let code = code_lines(text);
     let calls: usize = CALL_MARKERS.iter().map(|marker| code.matches(marker).count()).sum();
     let filtered = code.matches(FILTERED_CALL).count();
-    relative == Path::new(FILTERED_BRIDGE_FILE) && filtered > 0 && calls == filtered && !code.contains(OWN_CONSTANT)
+    FILTERED_BRIDGE_FILES.iter().any(|file| relative == Path::new(file)) && filtered > 0 && calls == filtered && !code.contains(OWN_CONSTANT)
 }
 
 
 #[test]
-fn only_the_platform_service_may_bridge_and_only_with_the_filter() -> Result<(), Box<dyn Error>> {
+fn only_the_two_listed_services_may_bridge_and_only_with_the_filter() -> Result<(), Box<dyn Error>> {
     let bridge = "tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
-    let platform = Path::new("crates/platform/src/serve.rs");
+    let platform = Path::new(PLATFORM_FILE);
     assert!(is_filtered_bridge(platform, bridge));
     assert!(!is_filtered_bridge(platform, "tracing_log::LogTracer::init()"));
+    assert!(is_filtered_bridge(Path::new(PLAYBOOKS_FILE), bridge));
     assert!(!is_filtered_bridge(Path::new("crates/other/src/serve.rs"), bridge));
     Ok(())
 }
@@ -55,7 +62,7 @@ fn only_the_platform_service_may_bridge_and_only_with_the_filter() -> Result<(),
 #[test]
 fn survivor_second_unfiltered_bridge_is_refused() -> Result<(), Box<dyn Error>> {
     let text = "tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;\ntracing_log::LogTracer::init()?;";
-    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    assert!(!is_filtered_bridge(Path::new(PLATFORM_FILE), text));
     Ok(())
 }
 
@@ -63,7 +70,7 @@ fn survivor_second_unfiltered_bridge_is_refused() -> Result<(), Box<dyn Error>> 
 #[test]
 fn survivor_marker_only_in_a_comment_is_refused() -> Result<(), Box<dyn Error>> {
     let text = "/// tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()\nfn f() { LogTracer::init(); }";
-    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    assert!(!is_filtered_bridge(Path::new(PLATFORM_FILE), text));
     Ok(())
 }
 
@@ -71,7 +78,20 @@ fn survivor_marker_only_in_a_comment_is_refused() -> Result<(), Box<dyn Error>> 
 #[test]
 fn survivor_local_constant_is_refused() -> Result<(), Box<dyn Error>> {
     let text = "const LOG_IGNORED_CRATE: &str = \"none\";\nLogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
-    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    assert!(!is_filtered_bridge(Path::new(PLATFORM_FILE), text));
+    Ok(())
+}
+
+
+#[test]
+fn survivor_a_third_path_is_refused() -> Result<(), Box<dyn Error>> {
+    let text = "LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
+    assert!(!is_filtered_bridge(Path::new("crates/web-ui/src/serve.rs"), text));
+    assert!(!is_filtered_bridge(
+        Path::new("crates/response-playbooks/src/bin/ostyr-playbooks.rs"),
+        text
+    ));
+    assert!(!is_filtered_bridge(Path::new("crates/response-playbooks/src/service.rs"), text));
     Ok(())
 }
 

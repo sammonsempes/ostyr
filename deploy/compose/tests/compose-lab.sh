@@ -299,6 +299,27 @@ expect "the API answers after a restart on the same pgdata" wait_ready
 migrations_after="$(query_migrations 'select count(*) from public.schema_migrations')"
 expect "a restart on an existing pgdata applies no migration again" test "$migrations_before" = "$migrations_after"
 
+playbooks_container="$(remote "cd compose && sudo docker compose ps -q playbooks")"
+inspect_playbooks() {
+    remote "sudo docker inspect --format '$1' $playbooks_container"
+}
+expect "the playbooks service is running and has not restarted" test "$(inspect_playbooks '{{.State.Running}} {{.RestartCount}}')" = "true 0"
+expect "the playbooks service runs as user 65533" test "$(inspect_playbooks '{{.Config.User}}')" = 65533:65533
+expect "the playbooks root filesystem is read-only" test "$(inspect_playbooks '{{.HostConfig.ReadonlyRootfs}}')" = true
+expect "the playbooks service drops every capability" test "$(inspect_playbooks '{{.HostConfig.CapDrop}}')" = "[ALL]"
+expect "the playbooks service has no-new-privileges" test "$(inspect_playbooks '{{.HostConfig.SecurityOpt}}')" = "[no-new-privileges:true]"
+expect "no secret value is in the playbooks environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $playbooks_container | grep -i -e password -e BEGIN"
+expect "the playbooks service mounts exactly its password copy and the CA" test "$(remote "sudo docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' $playbooks_container | tr ' ' '\n' | grep '/secrets' | xargs -r -n1 basename | sort | xargs")" = "ca.crt playbooks_pg_password"
+expect "the playbooks service publishes no port" test -z "$(inspect_playbooks '{{range $port, $bindings := .NetworkSettings.Ports}}{{if $bindings}}{{$port}} {{end}}{{end}}')"
+expect "the password copy is mode 400 and owned by 65533" test "$(remote "cd compose && sudo stat -c '%a %u:%g' secrets/playbooks_pg_password")" = "400 65533:65533"
+expect "the password copy holds the service password" remote "cd compose && sudo cmp secrets/playbooks_pg_password secrets/pg_service_password"
+alert_sql="INSERT INTO alerts (tenant, id, rule_id, rule_title, severity, event_time, created, host_name, event_ids, summary, summary_truncated, summary_original_bytes) VALUES ('default', encode(sha256('t843'::bytea), 'hex'), 'lab-rule', 'Lab alert', 'high', '2026-11-24T00:00:00Z', 1, 'ws-0042', '[]'::jsonb, '{\\\"process\\\":{\\\"name\\\":\\\"whoami\\\"}}', false, 29)"
+printf 'info alert stored: %s\n' "$(query_migrations "$alert_sql")"
+expect "the playbooks service logs a round that read and simulated the alert" remote "cd compose && for attempt in \$(seq 1 $READY_ATTEMPTS); do sudo docker compose logs playbooks 2>&1 | grep -q 'playbooks round: 1 read, 1 simulated, 1 matches' && exit 0; sleep 2; done; exit 1"
+remote "cd compose && sudo docker compose logs playbooks 2>&1 | tail -n 20"
+expect "the round deleted the alert from the feed" test "$(query_migrations "select count(*) from playbook_outbox")" = 0
+expect "the playbooks service is still running after the round" test "$(inspect_playbooks '{{.State.Running}} {{.RestartCount}}')" = "true 0"
+
 if [[ "$failures" -ne 0 ]]; then
     printf '%s check(s) failed\n' "$failures" >&2
     exit 1

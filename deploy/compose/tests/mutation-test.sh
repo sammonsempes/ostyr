@@ -17,6 +17,7 @@ readonly SECRETS="the web service is hardened, publishes 9443 and holds three se
 readonly PORT_OWNERS="the platform publishes 8443, web 9443 and postgres nothing"
 readonly BINDS="every service mounts only its own volumes and binds"
 readonly CAPS="only postgres adds capabilities"
+readonly PLAYBOOKS="the playbooks service is hardened, runs as 65533 and holds only its password copy and the CA"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
 readonly PARSED="the parsed configuration equals the committed projection"
 readonly ALLOWLIST="compose.yaml holds only allowlisted characters outside the entrypoint"
@@ -41,6 +42,8 @@ declare -A STATIC_REFUSAL=(
     [env_passthrough_sameindent]="$GRAMMAR" [volumes_sameindent]="$GRAMMAR" [entrypoint_moved]="$ENTRYPOINT"
     [env_map_empty]="$PASSTHROUGH" [env_map_tilde]="$PASSTHROUGH" [env_map_null]="$PASSTHROUGH"
     [pg_ca_store_key]="$DEFINITIONS" [pg_publish_8443]="$PORT_OWNERS" [web_cap_add]="$CAPS" [pg_bind_secrets]="$BINDS" [web_bind_etc]="$VOLUMES"
+    [playbooks_cap_add]="$CAPS" [playbooks_secret_extra]="$PLAYBOOKS" [playbooks_bind_secrets]="$BINDS" [playbooks_state_shared]="$BINDS"
+    [playbooks_publish]="$PLAYBOOKS" [playbooks_root]="$PLAYBOOKS"
 )
 declare -A STRAY_REFUSAL=([override_file]="$STRAY" [dotenv_compose_file]="$STRAY")
 declare -A PARSED_REFUSAL=()

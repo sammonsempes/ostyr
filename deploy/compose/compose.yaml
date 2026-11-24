@@ -79,6 +79,21 @@ services:
         ipv4_address: 172.29.63.10
     ports:
       - "0.0.0.0:9443:9443"
+  playbooks:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65533:65533
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/ostyr-playbooks", "/etc/ostyr/playbooks.yaml"]
+    depends_on:
+      - platform
+    secrets: [playbooks_pg_password, pg_ca]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - playbooksstate:/var/lib/ostyr-playbooks
 networks:
   default:
     ipam:
@@ -89,6 +104,7 @@ volumes:
   pgdata: {}
   state: {}
   webstate: {}
+  playbooksstate: {}
 secrets:
   pg_password:
     file: ./secrets/pg_password
@@ -100,6 +116,8 @@ secrets:
     file: ./secrets/pg_server.crt
   pg_ca:
     file: ./secrets/ca.crt
+  playbooks_pg_password:
+    file: ./secrets/playbooks_pg_password
   api_tls_key:
     file: ./secrets/api_tls.key
   api_tls_cert:
