@@ -65,7 +65,10 @@ impl Drop for KillOnDrop {
 
 fn write_files(dir: &Path, audit_file: &str) -> TestResult {
     let base = dir.display();
-    replace_file(&dir.join("policy.yaml"), &policy_text(NO_RELOAD_POLICY))?;
+    replace_file(
+        &dir.join("policy.yaml"),
+        &policy_text(&format!("{NO_RELOAD_POLICY}  zonefile: {base}/zone.db\n")),
+    )?;
     replace_file(&dir.join("iocs.jsonl"), IOC)?;
     replace_file(
         &dir.join("service.yaml"),

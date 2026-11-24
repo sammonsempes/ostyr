@@ -22,8 +22,8 @@ use dns_rpz::cli::{run_round, Session};
 use dns_rpz::error::ServiceError;
 use dns_rpz::model::{CommandStatus, LoopEnd, Reloader, RoundLoop, RoundOutcome, ServiceSettings};
 use dns_rpz::service::{
-    changed_pinned, check_allowlist, exit_code, invalid_settings, open_settings_engine, read_service_settings, round_failed_entry, serve_rounds,
-    service_context, service_runner, settings_state, validate_settings,
+    changed_pinned, check_allowlist, exit_code, failed_stage, invalid_settings, open_settings_engine, read_service_settings, round_failed_entry,
+    serve_rounds, service_context, service_runner, settings_state, validate_settings,
 };
 use dns_rpz::source::open_source;
 use dns_rpz::types::{RunnerFn, WaitFn};
@@ -89,7 +89,10 @@ zone_file: {base}/zone.db\ninterval_seconds: {interval}\n"
 
 
 fn write_files(dir: &Path, domain: &str, interval: u64) -> TestResult {
-    replace_file(&dir.join("policy.yaml"), &policy_text(""))?;
+    replace_file(
+        &dir.join("policy.yaml"),
+        &policy_text(&format!("unbound:\n  zonefile: {}/zone.db\n", dir.display())),
+    )?;
     replace_file(&dir.join("service.yaml"), &service_text(dir, interval))?;
     replace_file(&dir.join("iocs.jsonl"), &ioc_line(domain))?;
     Ok(())
@@ -649,8 +652,47 @@ fn the_service_runs_only_its_own_control_program() -> TestResult {
 
 
 #[test]
+fn a_policy_zonefile_other_than_the_service_zone_file_skips_the_round() -> TestResult {
+    let dir = tempdir()?;
+    write_files(dir.path(), "first.example.com", INTERVAL)?;
+    replace_file(
+        &dir.path().join("policy.yaml"),
+        &policy_text("unbound:\n  zonefile: /var/lib/unbound/other.zone\n"),
+    )?;
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let wait = |_interval: Duration| true;
+    let mut report = Vec::new();
+    let end = drive(
+        dir.path(),
+        &settings_engine(dir.path())?,
+        &succeeding_runner,
+        &*recording_audit(&actions),
+        &wait,
+        MANY_ROUNDS,
+        &mut report,
+    )?;
+    assert_eq!(end, LoopEnd::Stopped);
+    assert_eq!(count_of(&actions, "dns-rpz.round_failed")?, 1);
+    assert_eq!(count_of(&actions, "dns-rpz.zone_reload")?, 0);
+    assert!(!dir.path().join("zone.db").exists());
+    assert!(!dir.path().join("counter").exists());
+    Ok(())
+}
+
+
+#[test]
+fn only_a_failure_before_the_reload_has_an_audited_stage() -> TestResult {
+    assert_eq!(failed_stage(RoundOutcome::GenerationFailed), Some("generation"));
+    assert_eq!(failed_stage(RoundOutcome::ZoneFileMismatch), Some("zone_file"));
+    assert_eq!(failed_stage(RoundOutcome::Published), None);
+    assert_eq!(failed_stage(RoundOutcome::ReloadFailed), None);
+    Ok(())
+}
+
+
+#[test]
 fn a_failed_round_entry_names_the_stage_and_the_zone() -> TestResult {
-    let entry = round_failed_entry(&service_context("zone", "round"), Path::new("/var/zone.db"));
+    let entry = round_failed_entry(&service_context("zone", "round"), Path::new("/var/zone.db"), "generation");
     assert_eq!(entry.action, "dns-rpz.round_failed");
     assert_eq!(entry.target, "/var/zone.db");
     assert_eq!(entry.outcome, Outcome::Failure);

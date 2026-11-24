@@ -3,7 +3,7 @@ use crate::error::{ReloadError, ServiceError};
 use crate::limits::{
     AUDIT_DECLARED_KEYS, CLICKHOUSE_PREFIX, DEFAULT_UNBOUND_COMMAND, MAX_INTERVAL_SECONDS, MAX_SERVICE_SETTINGS_BYTES, MIN_INTERVAL_SECONDS,
     ROUND_CAP_EXIT_CODE, ROUND_FAILED_AUDIT_ACTION, SERVICE_ACTOR, SERVICE_ALLOWED_PUNCTUATION, SERVICE_FILE_CLASS, SERVICE_MODULE, SERVICE_SECTION,
-    SERVICE_TENANT, SERVICE_UNBOUND_COMMAND,
+    SERVICE_TENANT, SERVICE_UNBOUND_COMMAND, STAGE_GENERATION, STAGE_ZONE_FILE,
 };
 use crate::model::{CommandStatus, LoopEnd, RoundLoop, RoundOutcome, ServiceSettings};
 use crate::types::WaitFn;
@@ -156,7 +156,7 @@ pub fn service_runner(program: &str, arguments: &[String], deadline: Duration) -
 }
 
 
-pub fn round_failed_entry(context: &ReloadContext, zone_file: &Path) -> NewEntry {
+pub fn round_failed_entry(context: &ReloadContext, zone_file: &Path, stage: &str) -> NewEntry {
     NewEntry {
         timestamp: OffsetDateTime::now_utc(),
         actor: Actor {
@@ -170,18 +170,34 @@ pub fn round_failed_entry(context: &ReloadContext, zone_file: &Path) -> NewEntry
         outcome: Outcome::Failure,
         request_id: context.request_id.clone(),
         justification: None,
-        parameters: [("stage".to_owned(), "generation".to_owned())].into_iter().collect(),
+        parameters: [("stage".to_owned(), stage.to_owned())].into_iter().collect(),
     }
 }
 
 
-/// A failed generation is audited by name (the reload audits itself); the previous zone stays.
+/// The audited stage of a round that did not reach the reload; the reload audits itself.
+pub fn failed_stage(outcome: RoundOutcome) -> Option<&'static str> {
+    match outcome {
+        RoundOutcome::GenerationFailed => Some(STAGE_GENERATION),
+        RoundOutcome::ZoneFileMismatch => Some(STAGE_ZONE_FILE),
+        RoundOutcome::Published | RoundOutcome::ReloadFailed => None,
+    }
+}
+
+
+/// A failed generation or a zone path mismatch is audited by name (the reload audits itself); the previous zone stays.
 pub fn audit_failed_round(round_loop: &RoundLoop, zone_file: &Path, outcome: RoundOutcome) {
-    if outcome == RoundOutcome::GenerationFailed {
-        if let Err(audit_error) = (round_loop.audit)(round_failed_entry(round_loop.context, zone_file)) {
+    if let Some(stage) = failed_stage(outcome) {
+        if let Err(audit_error) = (round_loop.audit)(round_failed_entry(round_loop.context, zone_file, stage)) {
             error!(%audit_error, "cannot audit the failed round");
         }
     }
+}
+
+
+/// Unbound reloads the zone file its own configuration names: the policy's `unbound.zonefile` must be the file this service writes.
+pub fn zone_file_matches(session: &Session) -> bool {
+    Path::new(&current_config(session.engine).unbound.zonefile) == session.output
 }
 
 
@@ -198,7 +214,13 @@ pub fn shared_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 
 /// One round, its failure audit, then the wait; `true` when the wait reported a stop.
 pub fn one_round(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, round: u64) -> Result<bool, ServiceError> {
-    let outcome = run_round(session)?;
+    let outcome = if zone_file_matches(session) {
+        run_round(session)?
+    } else {
+        let zone_file = session.output.display().to_string();
+        error!(zone_file, "policy unbound.zonefile is not the service zone_file, round skipped");
+        RoundOutcome::ZoneFileMismatch
+    };
     audit_failed_round(round_loop, session.output, outcome);
     let interval = current_config(round_loop.settings).interval_seconds;
     info!(round, interval, "round finished");

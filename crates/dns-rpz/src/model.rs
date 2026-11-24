@@ -125,6 +125,7 @@ pub struct ServiceSettings {
 pub enum RoundOutcome {
     Published,
     GenerationFailed,
+    ZoneFileMismatch,
     ReloadFailed,
 }
 

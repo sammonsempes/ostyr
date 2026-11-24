@@ -190,6 +190,12 @@ pub const SERVICE_TENANT: &str = "system";
 pub const SERVICE_MODULE: &str = "dns-rpz";
 
 
+pub const STAGE_GENERATION: &str = "generation";
+
+
+pub const STAGE_ZONE_FILE: &str = "zone_file";
+
+
 pub const ROUND_CAP_EXIT_CODE: u8 = 3;
 
 
