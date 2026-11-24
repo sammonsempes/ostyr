@@ -89,12 +89,16 @@ pub async fn start(settings_file: &Path, wait: InterruptWait) -> Result<(), Box<
     let file: AppFile = load_file(settings_file)?;
     let address = file
         .listen_address
-        .ok_or_else(|| StatusPageError::InvalidSettings("listen_address is required".to_owned()))?;
+        .ok_or_else(|| StatusPageError::InvalidSettings("server file: listen_address is required".to_owned()))?;
     if !file.audit_file.is_absolute() {
-        Err(StatusPageError::InvalidSettings("audit_file must be an absolute path".to_owned()))?;
+        Err(StatusPageError::InvalidSettings(
+            "server file: audit_file must be an absolute path".to_owned(),
+        ))?;
     }
     let reader = file.pg_file.clone().map(pg_reader);
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address)
+        .await
+        .map_err(|source| StatusPageError::Bind { address, source })?;
     let bound = listener.local_addr()?.to_string();
     tracing::info!(address = bound, "listening");
     run_app_with(file, listener, Box::pin(stop_on(wait)), reader).await?;

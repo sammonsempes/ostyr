@@ -30,6 +30,8 @@ pub enum StatusPageError {
     Audit(#[from] core_audit::error::AuditError),
     #[error(transparent)]
     Watch(#[from] core_config::error::WatchError),
+    #[error("cannot listen on {address}: {source}")]
+    Bind { address: std::net::SocketAddr, source: std::io::Error },
     #[error("input or output failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("cannot serialise the page: {0}")]

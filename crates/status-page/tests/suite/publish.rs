@@ -6,17 +6,18 @@ use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use core_pg::settings::MAX_DEADLINE_SECS;
 use status_page::app::{run_app_with, AppFile};
 use status_page::error::{StatusPageError, StoreError};
+use status_page::limiter::new_state;
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
 use status_page::publish::{
-    declared_services, error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, read_within, render_class,
-    settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
+    declared_services, error_class, fetch, first_publish, fit_page, is_clean, omission_changed, omission_reason, publisher, read_within,
+    refuse_unsafe_text, render_class, run_rounds, settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
 };
-use status_page::settings::validate_settings;
+use status_page::settings::{shared_settings, validate_settings};
 use status_page::store_model::PublishedRead;
 use status_page::types::IncidentReadFn;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tempfile::tempdir;
@@ -630,7 +631,7 @@ fn files(dir: &Path, page: &str, with_pg: bool) -> Result<AppFile, std::io::Erro
 
 
 #[tokio::test]
-async fn the_server_serves_the_store_page_before_accepting_and_stops_the_publisher() -> TestResult {
+async fn the_server_serves_the_store_page_once_the_first_read_lands_and_stops_the_publisher() -> TestResult {
     let dir = tempdir()?;
     let file = files(dir.path(), PAGE, true)?;
     let shared = shared_with(vec![incident(TENANT, "From the store"), incident(OTHER_TENANT, OTHER_TITLE)]);
@@ -645,18 +646,206 @@ async fn the_server_serves_the_store_page_before_accepting_and_stops_the_publish
         }),
         Some(reader(&shared)),
     ));
+    let text = page_with(address, "From the store").await?;
+    assert!(text.contains("From the store") && !text.contains(OTHER_TITLE) && !text.contains("Sample incident"));
+    assert!(text.contains("unknown") && !text.contains("operational"));
+    stop.send(()).map_err(|()| "server gone")?;
+    running.await??;
+    Ok(())
+}
+
+
+async fn fetch_page(address: std::net::SocketAddr) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(address).await?;
     stream
         .write_all(b"GET /status.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await?;
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).await?;
-    let text = String::from_utf8(bytes)?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+
+const PAGE_POLLS: usize = 200;
+
+
+const PAGE_POLL_PAUSE: Duration = Duration::from_millis(25);
+
+
+async fn page_with(address: std::net::SocketAddr, marker: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut text = fetch_page(address).await?;
+    let mut polls = 0;
+    while !text.contains(marker) && polls < PAGE_POLLS {
+        sleep(PAGE_POLL_PAUSE).await;
+        text = fetch_page(address).await?;
+        polls += 1;
+    }
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
-    assert!(text.contains("From the store") && !text.contains(OTHER_TITLE) && !text.contains("Sample incident"));
-    assert!(text.contains("unknown") && !text.contains("operational"));
+    Ok(text)
+}
+
+
+struct CancelFlag(Arc<AtomicBool>);
+
+
+impl Drop for CancelFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_page_answers_while_the_first_read_hangs_and_the_stop_cancels_the_read() -> TestResult {
+    let dir = tempdir()?;
+    let file = files(dir.path(), PAGE, true)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let probe = Arc::clone(&cancelled);
+    let hung: IncidentReadFn = Box::new(move |_scope, _services| {
+        let flag = CancelFlag(Arc::clone(&probe));
+        Box::pin(async move {
+            let _held = flag;
+            std::future::pending::<()>().await;
+            Ok(PublishedRead::default())
+        })
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(run_app_with(
+        file,
+        listener,
+        Box::pin(async {
+            stopped.await.inspect_err(|error| tracing::warn!(%error, "stop signal dropped")).ok();
+        }),
+        Some(hung),
+    ));
+    let text = fetch_page(address).await?;
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(
+        text.contains("Acme status") && text.contains("unknown") && !text.contains("Sample incident"),
+        "{text}"
+    );
+    assert!(!cancelled.load(Ordering::SeqCst));
     stop.send(()).map_err(|()| "server gone")?;
     running.await??;
+    tokio::task::yield_now().await;
+    assert!(cancelled.load(Ordering::SeqCst));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_first_publish_is_logged_and_the_rounds_still_run() -> TestResult {
+    let _listener = listen();
+    let foreign = new_state(OTHER_TENANT.to_owned(), shared_settings(PageSettings::default()), Box::new(|| 0));
+    let shared = shared_with(vec![incident(TENANT, "Website down")]);
+    run_rounds(&config(), &foreign, &reader(&shared), &tenant_scope(TENANT)?, 1).await;
+    assert!(foreign.snapshot.load_full().is_none());
+    assert_eq!(shared.lock().map_err(|_poisoned| "lock")?.seen.len(), TWO_READS);
+    Ok(())
+}
+
+
+const RESOLVED_AT: i64 = 2;
+
+
+const READ_TOTAL: usize = 10;
+
+
+const READ_ONGOING: usize = 5;
+
+
+const REFUSED_INCIDENTS: usize = 3;
+
+
+const REFUSED_ONGOING: usize = 2;
+
+
+const REFUSED_UPDATES: usize = 2;
+
+
+const CONTROL_TITLE: &str = "Bad \u{1b}[31mtitle";
+
+
+const BIDI_TITLE: &str = "Payments \u{202e}evol";
+
+
+const BLANK_TITLE: &str = "Filler \u{3164} title";
+
+
+fn update_with(message: &str) -> IncidentUpdateInput {
+    IncidentUpdateInput {
+        at: 1,
+        message: message.to_owned(),
+        internal_note: String::new(),
+    }
+}
+
+
+#[test]
+fn stored_text_with_a_control_bidi_or_blank_character_is_left_out_and_counted() -> TestResult {
+    let mut resolved = incident(TENANT, BLANK_TITLE);
+    resolved.resolved_at = Some(RESOLVED_AT);
+    let mut kept = incident(TENANT, "Good title");
+    kept.updates = vec![
+        update_with("line one\nline two"),
+        update_with("evil \u{202e}text"),
+        update_with("blank \u{3164}"),
+        update_with("fine"),
+    ];
+    let read = PublishedRead {
+        incidents: vec![incident(TENANT, CONTROL_TITLE), incident(TENANT, BIDI_TITLE), resolved, kept],
+        total: READ_TOTAL,
+        ongoing: READ_ONGOING,
+    };
+    let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(&read);
+    assert_eq!((incidents_refused, updates_refused), (REFUSED_INCIDENTS, REFUSED_UPDATES));
+    assert_eq!(
+        (safe.total, safe.ongoing),
+        (READ_TOTAL - REFUSED_INCIDENTS, READ_ONGOING - REFUSED_ONGOING)
+    );
+    let titles: Vec<&str> = safe.incidents.iter().map(|row| row.public_title.as_str()).collect();
+    assert_eq!(titles, ["Good title"]);
+    let messages: Vec<&str> = safe
+        .incidents
+        .iter()
+        .flat_map(|row| row.updates.iter().map(|update| update.message.as_str()))
+        .collect();
+    assert_eq!(messages, ["line one\nline two", "fine"]);
+    let floor = PublishedRead {
+        incidents: vec![incident(TENANT, CONTROL_TITLE)],
+        total: 0,
+        ongoing: 0,
+    };
+    let (floored, _incidents, _updates) = refuse_unsafe_text(&floor);
+    assert_eq!((floored.total, floored.ongoing), (0, 0));
+    assert!(is_clean("plain", false) && !is_clean("a\nb", false) && is_clean("a\nb", true));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_published_page_never_holds_refused_stored_text() -> TestResult {
+    let _listener = listen();
+    let (state, _clock) = state_with(PageSettings::default());
+    let mut with_update = incident(TENANT, "Good title");
+    with_update.updates = vec![update_with("evil \u{202e}text"), update_with("fine update")];
+    let shared = shared_with(vec![
+        incident(TENANT, CONTROL_TITLE),
+        incident(TENANT, BIDI_TITLE),
+        incident(TENANT, BLANK_TITLE),
+        with_update,
+    ]);
+    first_publish(&config(), &state, &reader(&shared), &tenant_scope(TENANT)?).await?;
+    let page = served(&state)?;
+    let all = format!("{}{}", page.json, page.html);
+    assert!(all.contains("Good title") && all.contains("fine update"));
+    assert!(
+        !all.contains('\u{1b}') && !all.contains("\\u001b") && !all.contains('\u{202e}') && !all.contains("\\u202e") && !all.contains('\u{3164}')
+    );
+    assert!(!all.contains("Payments") && !all.contains("Filler") && !all.contains("Bad "));
+    assert!(!page.json.contains("omitted_incidents"));
     Ok(())
 }
 

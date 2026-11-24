@@ -2,12 +2,13 @@ use crate::config::load_config;
 use crate::error::StatusPageError;
 use crate::limiter::{new_state, system_millis};
 use crate::model::{ComponentState, IncidentInput, PageConfig, ServiceState, DEFAULT_LIMITS};
-use crate::publish::{first_publish, publisher, UNLIMITED_TICKS};
+use crate::publish::{publish_page, run_rounds, UNLIMITED_TICKS};
 use crate::render::render;
 use crate::serve::serve;
 use crate::server::status_router;
 use crate::settings::open_settings_engine;
 use crate::snapshot::{publish, snapshot_of};
+use crate::store_model::PublishedRead;
 use crate::types::{IncidentReadFn, SharedState, ShutdownSignal};
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_config::reload::{ReloadContext, RELOAD_DECLARED_KEYS};
@@ -116,12 +117,12 @@ pub async fn run_app(file: AppFile, listener: TcpListener, shutdown: ShutdownSig
 }
 
 
-/// Publishes the first page from the store reader, then keeps publishing on the settings interval until the task is aborted.
-pub async fn start_publisher(config: Arc<PageConfig>, state: SharedState, read: IncidentReadFn) -> Result<JoinHandle<()>, StatusPageError> {
+/// Publishes the fixed page without incidents at once, then reads the store in a spawned task (the first read, then the rounds) until it is aborted.
+pub fn start_publisher(config: Arc<PageConfig>, state: SharedState, read: IncidentReadFn) -> Result<JoinHandle<()>, StatusPageError> {
     let scope = tenant_scope(&config.tenant)?;
-    first_publish(&config, &state, &read, &scope).await?;
+    publish_page(&config, &state, &PublishedRead::default())?;
     Ok(tokio::spawn(
-        async move { publisher(&config, &state, &read, &scope, UNLIMITED_TICKS).await },
+        async move { run_rounds(&config, &state, &read, &scope, UNLIMITED_TICKS).await },
     ))
 }
 
@@ -149,7 +150,7 @@ pub async fn run_app_with(
     let _signals = reload_on_signals(Arc::clone(&engine), &[signal_hook::consts::SIGHUP])?;
     let state = Arc::new(new_state(config.tenant.clone(), settings, Box::new(system_millis)));
     let publishing = match read {
-        Some(reader) => Some(start_publisher(Arc::clone(&config), Arc::clone(&state), reader).await?),
+        Some(reader) => Some(start_publisher(Arc::clone(&config), Arc::clone(&state), reader)?),
         None => {
             let (states, incidents) = sample_inputs(&config);
             let rendered = render(&config, &states, &incidents, &[], 0, &DEFAULT_LIMITS)?;
