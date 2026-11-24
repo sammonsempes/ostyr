@@ -6,9 +6,14 @@ use std::path::Path;
 use tracing::warn;
 
 
+pub const NOT_REGULAR_FILE: &str = "not a regular file";
+
+
+/// The size of a regular file, zero when it does not exist; anything else (a directory reports a filesystem-dependent size) is an error.
 pub fn file_len(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
+        Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+        Ok(_) => Err(io::Error::other(NOT_REGULAR_FILE)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error),
     }

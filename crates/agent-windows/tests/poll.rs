@@ -895,12 +895,12 @@ fn a_cursor_that_cannot_be_written_is_an_error() -> TestResult {
 
 
 #[test]
-fn a_spool_that_cannot_be_written_leaves_the_cursor_alone() -> TestResult {
+fn a_spool_that_is_a_directory_is_a_size_error_and_leaves_the_cursor_alone() -> TestResult {
     let lab = lab()?;
     fs::create_dir_all(spool_path(&lab))?;
     let mut state = ChannelState::default();
     let (result, _) = run_poll(&lab, &SECURITY, &mut state, script(FIRST, vec![ok(&security(FIRST))]));
-    assert!(matches!(result, Err(PollError::Spool(_))));
+    assert!(matches!(result, Err(PollError::SpoolSize(_))));
     assert_eq!(cursor_text(&lab, &SECURITY), None);
     Ok(())
 }
