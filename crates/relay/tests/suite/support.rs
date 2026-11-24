@@ -19,6 +19,9 @@ use tokio::io::{duplex, split, DuplexStream};
 pub const BASE_YAML: &str = "listen: 0.0.0.0:443\nupstream: 10.0.0.1:8443\n";
 
 
+pub const LOCAL_ADDRESS: &str = "198.51.100.7:443";
+
+
 pub const HUGE_SOFT: u64 = u64::MAX;
 
 
@@ -85,6 +88,7 @@ pub fn accepted(address: &str) -> Result<(Accepted, DuplexStream), Box<dyn Error
         Accepted {
             halves: relay_side,
             peer: Ok(peer(address)?),
+            local: Ok(peer(LOCAL_ADDRESS)?),
         },
         test_side,
     ))

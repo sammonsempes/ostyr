@@ -1,7 +1,8 @@
 use crate::admission::{admit, gauges, new_admission};
 use crate::copy::relay_halves;
+use crate::header::proxy_header;
 use crate::model::{Accepted, Bounds, Counters, End, Halves, Options, Permit, Refusal, RelaySettings, Server, Summary};
-use crate::types::{AcceptFn, ConnectFn, ConnectFuture, SharedStop, ShutdownSignal};
+use crate::types::{AcceptFn, ConnectFn, ConnectFuture, NodelayFn, SharedStop, ShutdownSignal};
 use core_config::reload::{current_config, ReloadEngine};
 use futures_util::{stream, FutureExt, StreamExt};
 use rustix::io::Errno;
@@ -10,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::{interval_at, sleep, timeout, Instant};
@@ -52,24 +54,37 @@ pub fn record(counters: &Counters, end: End) {
         End::Cut => bump(&counters.shutdown_cut),
         End::ConnectFailed => bump(&counters.connect_failed),
         End::ConnectTimeout => bump(&counters.connect_timeout),
+        End::HeaderFailed => bump(&counters.header_failed),
     }
 }
 
 
-/// Connects upstream under the connect timeout, then copies until the connection ends.
-pub async fn relay_connection(server: &Server, client: Halves, settings: &RelaySettings) -> End {
+/// Writes the PROXY header with one `write_all` under the connect timeout; a failure or a stall closes both sockets.
+pub async fn write_header(mut upstream: Halves, header: &[u8], limit: Duration) -> Result<Halves, End> {
+    match timeout(limit, upstream.write.write_all(header)).await {
+        Ok(Ok(())) => Ok(upstream),
+        Ok(Err(_)) | Err(_) => Err(End::HeaderFailed),
+    }
+}
+
+
+/// Connects upstream under the connect timeout, writes the PROXY header first, then copies until the connection ends.
+pub async fn relay_connection(server: &Server, client: Halves, header: &[u8], settings: &RelaySettings) -> End {
     let bounds = bounds_of(settings);
     match timeout(bounds.connect, (server.connect)(settings.upstream)).await {
         Err(_elapsed) => End::ConnectTimeout,
         Ok(Err(_error)) => End::ConnectFailed,
-        Ok(Ok(upstream)) => relay_halves(client, upstream, &bounds, server.cut.subscribe()).await,
+        Ok(Ok(upstream)) => match write_header(upstream, header, bounds.connect).await {
+            Ok(ready) => relay_halves(client, ready, &bounds, server.cut.subscribe()).await,
+            Err(end) => end,
+        },
     }
 }
 
 
 /// The permit is released after `relay_connection` returned, so both sockets are closed first.
-pub async fn serve_connection(server: Arc<Server>, client: Halves, permit: Permit, settings: Arc<RelaySettings>) {
-    let end = relay_connection(&server, client, &settings).await;
+pub async fn serve_connection(server: Arc<Server>, client: Halves, header: Vec<u8>, permit: Permit, settings: Arc<RelaySettings>) {
+    let end = relay_connection(&server, client, &header, &settings).await;
     record(&server.counters, end);
     drop(permit);
 }
@@ -77,9 +92,10 @@ pub async fn serve_connection(server: Arc<Server>, client: Halves, permit: Permi
 
 /// Takes the settings snapshot of this connection, then refuses it over a cap or spawns its task.
 pub fn admit_connection(server: &Arc<Server>, accepted: Accepted) {
-    match accepted.peer {
+    let addresses = accepted.peer.and_then(|peer| accepted.local.map(|local| (peer, local)));
+    match addresses {
         Err(_error) => bump(&server.counters.peer_unknown),
-        Ok(address) => {
+        Ok((address, local)) => {
             let settings = current_config(&server.engine);
             match admit(
                 &server.admission,
@@ -90,7 +106,13 @@ pub fn admit_connection(server: &Arc<Server>, accepted: Accepted) {
                 Err(Refusal::Total) => bump(&server.counters.refused_total),
                 Err(Refusal::Source) => bump(&server.counters.refused_source),
                 Ok(permit) => {
-                    tokio::spawn(serve_connection(Arc::clone(server), accepted.halves, permit, settings));
+                    tokio::spawn(serve_connection(
+                        Arc::clone(server),
+                        accepted.halves,
+                        proxy_header(address, local),
+                        permit,
+                        settings,
+                    ));
                 }
             }
         }
@@ -135,6 +157,7 @@ pub fn take_summary(server: &Server) -> Summary {
         refused_source: take(&server.counters.refused_source),
         connect_failed: take(&server.counters.connect_failed),
         connect_timeout: take(&server.counters.connect_timeout),
+        header_failed: take(&server.counters.header_failed),
         idle_end: take(&server.counters.idle_end),
         lifetime_end: take(&server.counters.lifetime_end),
         copy_error: take(&server.counters.copy_error),
@@ -203,23 +226,25 @@ pub async fn run_relay(
 }
 
 
-pub fn note_nodelay(error: &io::Error) {
-    tracing::debug!(%error, "cannot set TCP_NODELAY");
+pub fn enable_nodelay(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)
 }
 
 
-/// Splits a TCP stream into boxed halves and reads its peer address.
-pub fn split_stream(stream: TcpStream) -> Accepted {
+/// Splits a TCP stream into boxed halves and reads both addresses; a socket that refuses `TCP_NODELAY` is dead and is an error (counted by its caller).
+pub fn split_stream(stream: TcpStream, nodelay: NodelayFn) -> io::Result<Accepted> {
     let peer = stream.peer_addr();
-    stream.set_nodelay(true).inspect_err(note_nodelay).unwrap_or(());
+    let local = stream.local_addr();
+    nodelay(&stream)?;
     let (read, write) = stream.into_split();
-    Accepted {
+    Ok(Accepted {
         halves: Halves {
             read: Box::new(read),
             write: Box::new(write),
         },
         peer,
-    }
+        local,
+    })
 }
 
 
@@ -227,11 +252,13 @@ pub fn tcp_accept(listener: TcpListener) -> AcceptFn {
     let shared = Arc::new(listener);
     Box::new(move || {
         let listening = Arc::clone(&shared);
-        Box::pin(async move { Ok(split_stream(listening.accept().await?.0)) })
+        Box::pin(async move { split_stream(listening.accept().await?.0, enable_nodelay) })
     })
 }
 
 
 pub fn tcp_connect() -> ConnectFn {
-    Box::new(|address: SocketAddr| -> ConnectFuture { Box::pin(async move { Ok(split_stream(TcpStream::connect(address).await?).halves) }) })
+    Box::new(|address: SocketAddr| -> ConnectFuture {
+        Box::pin(async move { Ok(split_stream(TcpStream::connect(address).await?, enable_nodelay)?.halves) })
+    })
 }

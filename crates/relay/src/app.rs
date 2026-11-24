@@ -8,8 +8,10 @@ use core_audit::log::open_file_log;
 use core_config::reload::current_config;
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
+use rustix::fs::{flock, FlockOperation};
+use std::fs::File;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,9 +40,18 @@ pub fn refuse_root(euid: u32) -> Result<(), RelayError> {
 }
 
 
-/// Opens the audit log and the settings engine; the first settings must be valid.
+/// One writer per audit file: a non-blocking exclusive `flock` on its own handle, held until the runtime drops.
+pub fn lock_audit(path: &Path) -> Result<File, RelayError> {
+    let file = File::open(path)?;
+    flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|errno| RelayError::AuditLocked(io::Error::from(errno)))?;
+    Ok(file)
+}
+
+
+/// Opens the audit log, locks it, then opens the settings engine; the first settings must be valid.
 pub fn open_runtime(paths: &Paths, soft: u64) -> Result<Runtime, RelayError> {
     let log = Arc::new(open_file_log(&paths.audit)?);
+    let audit_lock = lock_audit(&paths.audit)?;
     let engine = Arc::new(open_settings_engine(
         paths.settings.clone(),
         shared_audit(&log),
@@ -50,6 +61,7 @@ pub fn open_runtime(paths: &Paths, soft: u64) -> Result<Runtime, RelayError> {
     Ok(Runtime {
         log,
         engine,
+        audit_lock,
         settings_path: paths.settings.clone(),
     })
 }

@@ -18,7 +18,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["process", "fs"] }
 signal-hook = "0.4.6"
 
 [dev-dependencies]

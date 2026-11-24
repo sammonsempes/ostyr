@@ -12,6 +12,8 @@ pub mod copy;
 #[cfg(unix)]
 pub mod error;
 #[cfg(unix)]
+pub mod header;
+#[cfg(unix)]
 pub mod model;
 #[cfg(unix)]
 pub mod server;
