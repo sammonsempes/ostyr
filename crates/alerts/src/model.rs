@@ -159,6 +159,25 @@ pub struct Alert {
 }
 
 
+/// A decoded `playbook_outbox` row: its `seq`, the seconds since it was queued, and the alert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedRow {
+    pub seq: u64,
+    pub age_seconds: u64,
+    pub alert: Alert,
+}
+
+
+/// One row of the playbook feed: id and row position `tid` (kept, so it can be deleted), `seq` when it reads, and the decoded row or its cause.
+#[derive(Debug)]
+pub struct FeedItem {
+    pub id: String,
+    pub tid: String,
+    pub seq: Option<u64>,
+    pub row: Result<FeedRow, StoreError>,
+}
+
+
 /// Keyset position (created, id) of the last alert of a page; it carries no tenant and is never trusted for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {

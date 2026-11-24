@@ -1,6 +1,8 @@
 use crate::error::StoreError;
 use crate::id::{alert_id, is_alert_id};
-use crate::model::{Alert, AlertDetail, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, Triaged, SEVERITY_COLUMN};
+use crate::model::{
+    Alert, AlertDetail, AlertPage, Cursor, FeedItem, FeedRow, Page, Severity, Summary, Triage, TriageChange, TriageStatus, Triaged, SEVERITY_COLUMN,
+};
 use crate::types::{Executor, Row};
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -12,7 +14,7 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 pub const MIGRATION_NAMESPACE: &str = "alerts";
 
 
-pub const MIGRATIONS: [Migration; 5] = [
+pub const MIGRATIONS: [Migration; 6] = [
     Migration {
         version: "001_alerts",
         sql: include_str!("../migrations/001_alerts.sql"),
@@ -32,6 +34,10 @@ pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "005_alert_triage_false_positive",
         sql: include_str!("../migrations/005_alert_triage_false_positive.sql"),
+    },
+    Migration {
+        version: "006_playbook_outbox",
+        sql: include_str!("../migrations/006_playbook_outbox.sql"),
     },
 ];
 
@@ -65,6 +71,35 @@ pub const TRIAGE_UPDATE_SQL: &str = include_str!("../migrations/triage_update.sq
 
 pub const TRIAGE_GET_SQL: &str = "SELECT status, actor, COALESCE(note, ''), updated_at::text, version::text FROM alert_triage WHERE tenant = $1 \
                                   AND alert_id = $2::text";
+
+
+/// `$1` tenant, `$2` page size: the oldest `playbook_outbox` rows by `seq`, joined to their alert (empty columns when the alert is missing), with `seq` and the seconds since queued.
+pub const PLAYBOOK_FEED_SQL: &str = "SELECT o.id, COALESCE(a.rule_id, ''), COALESCE(a.rule_title, ''), COALESCE(a.severity, ''), COALESCE(a.event_time, ''), \
+                                     COALESCE(a.created::text, '0'), COALESCE(a.host_name, ''), COALESCE(a.user_name, ''), COALESCE(a.event_ids::text, '[]'), \
+                                     COALESCE(a.summary, ''), COALESCE(a.summary_truncated::text, 'false'), COALESCE(a.summary_original_bytes::text, '0'), \
+                                     o.seq::text, GREATEST(extract(epoch FROM now() - o.queued_at), 0)::bigint::text, o.tid \
+                                     FROM (SELECT tenant, id, seq, queued_at, ctid::text AS tid FROM playbook_outbox WHERE tenant = $1 ORDER BY seq LIMIT $2::text::bigint) o \
+                                     LEFT JOIN LATERAL (SELECT * FROM alerts WHERE tenant = o.tenant AND id = o.id) a ON true ORDER BY o.seq";
+
+
+/// `$1` tenant, `$2` JSON array of ids, `$3` of their row positions (`tid`): a Tid Scan CTE, never a tenant and id lookup (reasons in the crate notes).
+pub const PLAYBOOK_ACK_SQL: &str = "WITH cand AS MATERIALIZED (SELECT ctid AS c, tenant, id FROM playbook_outbox \
+                                    WHERE ctid = ANY(ARRAY(SELECT jsonb_array_elements_text($3::text::jsonb)::tid))), \
+                                    gone AS (DELETE FROM playbook_outbox AS o USING cand WHERE o.ctid = cand.c AND cand.tenant = $1 \
+                                    AND cand.id = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb))) RETURNING 1) \
+                                    SELECT count(*)::text FROM gone";
+
+
+pub const FEED_SEQ_COLUMN: usize = 12;
+
+
+pub const FEED_AGE_COLUMN: usize = 13;
+
+
+pub const FEED_TID_COLUMN: usize = 14;
+
+
+pub const MAX_TID_PART_DIGITS: usize = 10;
 
 
 pub const MAX_NOTE_CHARS: usize = 2_048;
@@ -551,5 +586,80 @@ pub async fn get_detail(exec: Executor<'_, '_>, scope: &TenantScope, id: &str) -
             let triage = get_triage(exec, scope, &alert.id).await?;
             Ok(Some(AlertDetail { alert, triage }))
         }
+    }
+}
+
+
+/// One feed row decoded: the id must be an alert id, then the alert columns, `seq` and the age.
+pub fn feed_row(scope: &TenantScope, row: &Row) -> Result<FeedRow, StoreError> {
+    check_id(cell(row, ID_COLUMN)?)?;
+    Ok(FeedRow {
+        seq: number(row, FEED_SEQ_COLUMN)?,
+        age_seconds: number(row, FEED_AGE_COLUMN)?,
+        alert: alert_from_row(scope, row)?,
+    })
+}
+
+
+/// The tenant's oldest unhandled feed rows by `seq`, at most `size` (1 to `MAX_PAGE_SIZE`); a row that does not decode stays in the page with its cause.
+pub async fn read_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, size: usize) -> Result<Vec<FeedItem>, StoreError> {
+    if size == 0 || size > MAX_PAGE_SIZE {
+        Err(StoreError::BadPageSize { limit: MAX_PAGE_SIZE })
+    } else {
+        let rows = exec(scope.clone(), PLAYBOOK_FEED_SQL, vec![size.to_string()]).await?;
+        rows.iter()
+            .take(size)
+            .map(|row| {
+                Ok(FeedItem {
+                    id: cell(row, ID_COLUMN)?.to_owned(),
+                    tid: tid_cell(row)?,
+                    seq: number(row, FEED_SEQ_COLUMN).ok(),
+                    row: feed_row(scope, row),
+                })
+            })
+            .collect()
+    }
+}
+
+
+/// A row position as PostgreSQL prints it, `(block,offset)`: two short runs of digits.
+pub fn is_tid(text: &str) -> bool {
+    text.strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .and_then(|inner| inner.split_once(','))
+        .is_some_and(|(block, offset)| {
+            [block, offset]
+                .iter()
+                .all(|part| (1..=MAX_TID_PART_DIGITS).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+}
+
+
+pub fn tid_cell(row: &Row) -> Result<String, StoreError> {
+    let text = cell(row, FEED_TID_COLUMN)?;
+    if is_tid(text) {
+        Ok(text.to_owned())
+    } else {
+        Err(StoreError::BadRow { column: FEED_TID_COLUMN })
+    }
+}
+
+
+/// Deletes the feed rows of `items` (at most `MAX_PAGE_SIZE`, each by the id and position it was read with) under the scope's tenant and answers how many were there.
+pub async fn ack_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, items: &[FeedItem]) -> Result<usize, StoreError> {
+    if items.len() > MAX_PAGE_SIZE {
+        Err(StoreError::BadPageSize { limit: MAX_PAGE_SIZE })
+    } else if items.is_empty() {
+        Ok(0)
+    } else {
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        let tids: Vec<&str> = items.iter().map(|item| item.tid.as_str()).collect();
+        let documents = [&ids, &tids].map(|list| serde_json::to_string(list).map_err(StoreError::Document));
+        let [ids_document, tids_document] = documents;
+        let rows = exec(scope.clone(), PLAYBOOK_ACK_SQL, vec![ids_document?, tids_document?]).await?;
+        let answer = rows.first().ok_or(StoreError::BadRow { column: 0 })?;
+        cell(answer, 0)?
+            .parse::<usize>()
+            .map_err(|source| StoreError::BadNumber { column: 0, source })
     }
 }

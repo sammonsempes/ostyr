@@ -1698,7 +1698,7 @@ fn next_scripted(script: &Script) -> Option<&'static str> {
 
 fn pg_handler(failing: Arc<AtomicBool>, hangup: Arc<AtomicBool>, script: Script, migrate: MigrateRefusal) -> Handler {
     Arc::new(move |sql| {
-        if sql.contains("ON CONFLICT") {
+        if sql.contains("ON CONFLICT (tenant, id)") {
             if hangup.load(Ordering::SeqCst) {
                 Reply::Hangup
             } else if failing.load(Ordering::SeqCst) {
@@ -2079,7 +2079,7 @@ fn a_failed_store_leaves_the_batch_unacknowledged_and_the_redelivery_stores_the_
     database.failing.store(false, Ordering::SeqCst);
     detect_batch(&detector, "a", &batch)?;
     let statements = statements_of(&mut database);
-    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), TWO);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT (tenant, id)")).count(), TWO);
     let docs = stored_docs(&statements, "a")?;
     assert_eq!(docs.len(), 1);
     let stored = docs.first().and_then(|doc| doc.get(0)).ok_or("no alert")?;
@@ -2350,7 +2350,7 @@ fn six_hundred_matching_events_in_one_batch_are_all_stored() -> TestResult {
     let statements = statements_of(&mut database);
     let stored: usize = stored_docs(&statements, "a")?.iter().map(|doc| doc.as_array().map_or(0, Vec::len)).sum();
     assert_eq!(stored, MANY_ALERTS);
-    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), TWO);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT (tenant, id)")).count(), TWO);
     Ok(())
 }
 
@@ -2426,7 +2426,7 @@ fn records_the_store_refuses_are_screened_in_memory_and_cost_no_connection() -> 
     assert_eq!(commit_in_place(&detector, "a", &batch)?, 1);
     assert_eq!(connections_of(&mut database), 1);
     let statements = statements_of(&mut database);
-    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), 1);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT (tenant, id)")).count(), 1);
     let counts = detector.permanent.lock().map_err(|_| "poisoned")?;
     assert_eq!(counts.get("field `rule_title` is empty"), Some(&(REFUSED_BEFORE_SQL as u64)));
     assert_eq!(counts.len(), 1);
