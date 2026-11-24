@@ -3,9 +3,9 @@ mod common;
 
 use common::{device, limits, skipped_count, FailingReader, TestResult};
 use patch_inventory::error::{InventoryError, WingetError};
-use patch_inventory::limits::{MAX_WINGET_ID_BYTES, MAX_WINGET_TABLES, MAX_WINGET_UPDATES, MIN_SEPARATOR_DASHES, SOURCE_OPEN_FAILED_EXIT};
+use patch_inventory::limits::{MAX_WINGET_ID_BYTES, MAX_WINGET_TABLES, MAX_WINGET_UPDATES, SOURCE_OPEN_FAILED_EXIT};
 use patch_inventory::model::{CliInventory, Limits, WingetSkip, WingetSource};
-use patch_inventory::winget::{is_frame, lines_of, parse_winget_cli};
+use patch_inventory::winget::{column_widths, is_frame, lines_of, parse_winget_cli, row_cells, Widths};
 
 
 const ONE: &[u8] = include_bytes!("fixtures/winget-cli-en-one.txt");
@@ -68,20 +68,64 @@ const SPINNER_START: [u8; 7] = [0x0d, 0x20, 0x20, 0x20, 0x2d, 0x20, 0x0d];
 const SMALL_LINE: usize = 64;
 
 
+const LONG_HEADER: usize = 5000;
+
+
 const SMALL_CAP: usize = 16;
 
 
 const LONG_ID: usize = 200;
 
 
-const HEADER: &str = "Name Id Version Available";
+const HEADER: &str = "Name           Id             Version   Available";
 
 
-const GOOD_ROW: &str = "Foo Foo.Bar 1.0 2.0";
+const GOOD_ROW: &str = "Foo            Foo.Bar        1.0       2.0";
+
+
+const BAZ_ROW: &str = "Baz            Baz.Qux        3.0       4.0";
+
+
+const NAME_WIDTH: usize = 15;
+
+
+const ID_WIDTH: usize = 15;
+
+
+const VERSION_WIDTH: usize = 10;
+
+
+const SEPARATOR_WIDTH: usize = 40;
+
+
+const WIDE_ID: usize = 140;
+
+
+const TWO_NAME_WIDTH: usize = 26;
+
+
+const TWO_HEADER: &str = "Name                      Id             Version   Available";
 
 
 fn dashes() -> String {
-    "-".repeat(MIN_SEPARATOR_DASHES)
+    "-".repeat(SEPARATOR_WIDTH)
+}
+
+
+fn row(name: &str, id: &str, installed: &str, available: &str) -> String {
+    format!("{name:<NAME_WIDTH$}{id:<ID_WIDTH$}{installed:<VERSION_WIDTH$}{available}")
+}
+
+
+fn two_row(name: &str, id: &str, installed: &str, available: &str) -> String {
+    format!("{name:<TWO_NAME_WIDTH$}{id:<ID_WIDTH$}{installed:<VERSION_WIDTH$}{available}")
+}
+
+
+fn wide_table(rows: &[String], footer: &str) -> String {
+    let header = format!("{:<NAME_WIDTH$}{:<WIDE_ID$}{:<WIDE_ID$}Available", "Name", "Id", "Version");
+    let wide_dashes = "-".repeat(NAME_WIDTH + WIDE_ID + WIDE_ID);
+    format!("{header}\r\n{wide_dashes}\r\n{}\r\n{footer}\r\n", rows.join("\r\n"))
 }
 
 
@@ -220,7 +264,7 @@ fn the_source_open_exit_is_its_own_error_and_any_other_exit_is_named() -> TestRe
 fn origin_is_the_source_argument_and_never_a_row_token() -> TestResult {
     let from_msstore = parse_winget_cli(&device(), ONE, 0, WingetSource::Msstore, &limits())?;
     assert_eq!(from_msstore.updates.first().ok_or("no update")?.origin.as_deref(), Some("msstore"));
-    let with_source_column = table(&["Foo Foo.Bar 1.0 2.0 msstore"], "1 upgrades available.");
+    let with_source_column = table(&[&format!("{GOOD_ROW} msstore")], "1 upgrades available.");
     let refused = parse_text(&with_source_column)?;
     assert!(refused.updates.is_empty());
     assert_eq!(skipped_count(&refused.skipped, WingetSkip::Malformed), 1);
@@ -240,7 +284,10 @@ fn two_sources_are_two_results_and_one_failure_never_empties_the_other() -> Test
 
 #[test]
 fn an_unknown_installed_marker_joins_its_version_and_keeps_the_record_with_no_installed_version() -> TestResult {
-    let inventory = parse_text(&table(&["Foo Foo.Bar < 1.0 2.0", "Baz Baz.Qux > 3.0 4.0"], "2 upgrades available."))?;
+    let inventory = parse_text(&table(
+        &[&row("Foo", "Foo.Bar", "< 1.0", "2.0"), &row("Baz", "Baz.Qux", "> 3.0", "4.0")],
+        "2 upgrades available.",
+    ))?;
     assert_eq!(ids(&inventory), ["Baz.Qux", "Foo.Bar"]);
     assert!(inventory.updates.iter().all(|update| update.installed_version.is_none()));
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::UnknownInstalledVersion), COUNT_TWO);
@@ -249,8 +296,9 @@ fn an_unknown_installed_marker_joins_its_version_and_keeps_the_record_with_no_in
 
 
 #[test]
-fn a_marker_row_without_a_name_is_malformed() -> TestResult {
-    let inventory = parse_text(&table(&["Foo.Bar < 1.0 2.0", GOOD_ROW], "2 upgrades available."))?;
+fn a_marker_row_without_room_for_a_name_is_malformed() -> TestResult {
+    let nameless = format!("{:<ID_WIDTH$}{:<VERSION_WIDTH$}2.0", "Foo.Bar", "< 1.0");
+    let inventory = parse_text(&table(&[&nameless, GOOD_ROW], "2 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
     Ok(())
@@ -259,7 +307,7 @@ fn a_marker_row_without_a_name_is_malformed() -> TestResult {
 
 #[test]
 fn a_version_token_without_a_digit_is_malformed() -> TestResult {
-    let inventory = parse_text(&table(&["Foo Foo.Bar winget them.", GOOD_ROW], "2 upgrades available."))?;
+    let inventory = parse_text(&table(&[&row("Foo", "Foo.Bar", "winget", "them."), GOOD_ROW], "2 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
     Ok(())
@@ -276,8 +324,8 @@ fn a_footer_count_that_differs_from_the_rows_is_a_named_error() -> TestResult {
 
 #[test]
 fn skipped_rows_count_for_the_footer_check() -> TestResult {
-    let truncated = "Foo Foo.Bar\u{2026} 1.0 2.0";
-    let inventory = parse_text(&table(&[GOOD_ROW, truncated], "2 upgrades available."))?;
+    let truncated = row("Foo", "Foo.Bar\u{2026}", "1.0", "2.0");
+    let inventory = parse_text(&table(&[GOOD_ROW, &truncated], "2 upgrades available."))?;
     assert_eq!(inventory.updates.len(), 1);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Truncated), 1);
     Ok(())
@@ -314,7 +362,7 @@ fn a_table_with_rows_and_no_footer_at_the_end_of_input_is_a_named_error() -> Tes
 
 #[test]
 fn a_malformed_line_before_the_footer_is_skipped_and_never_ends_the_table() -> TestResult {
-    let inventory = parse_text(&table(&["not a row", GOOD_ROW, "Baz Baz.Qux 3.0 4.0"], "3 upgrades available."))?;
+    let inventory = parse_text(&table(&["not a row", GOOD_ROW, BAZ_ROW], "3 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Baz.Qux", "Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
     Ok(())
@@ -323,7 +371,7 @@ fn a_malformed_line_before_the_footer_is_skipped_and_never_ends_the_table() -> T
 
 #[test]
 fn a_short_line_inside_the_table_does_not_end_it() -> TestResult {
-    let inventory = parse_text(&table(&["x y", "Baz Baz.Qux 3.0 4.0"], "2 upgrades available."))?;
+    let inventory = parse_text(&table(&["x y", BAZ_ROW], "2 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Baz.Qux"]);
     Ok(())
 }
@@ -331,7 +379,7 @@ fn a_short_line_inside_the_table_does_not_end_it() -> TestResult {
 
 #[test]
 fn a_blank_line_then_a_row_is_a_named_error_never_a_short_table() -> TestResult {
-    let result = parse_text(&format!("{}\r\nBaz Baz.Qux 3.0 4.0\r\n", table(&[GOOD_ROW], "1 upgrades available.")));
+    let result = parse_text(&format!("{}\r\n{BAZ_ROW}\r\n", table(&[GOOD_ROW], "1 upgrades available.")));
     assert!(matches!(result, Err(WingetError::RowAfterTableEnd)));
     Ok(())
 }
@@ -346,9 +394,10 @@ fn a_blank_line_ends_a_table_with_no_footer_as_a_named_error() -> TestResult {
 
 
 #[test]
-fn a_fake_footer_in_a_package_version_followed_by_a_real_row_is_a_named_error() -> TestResult {
-    let result = parse_text(&table(&["Zed Zed.App beta 1", GOOD_ROW], "2 upgrades available."));
-    assert!(matches!(result, Err(WingetError::RowAfterTableEnd)));
+fn a_row_shaped_line_with_a_bad_version_is_a_counted_row_never_a_footer() -> TestResult {
+    let inventory = parse_text(&table(&[&row("Zed", "Zed.App", "beta", "1"), GOOD_ROW], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
     Ok(())
 }
 
@@ -403,9 +452,15 @@ fn a_lone_line_feed_inside_a_name_or_after_the_separator_is_a_named_error() -> T
 
 
 #[test]
-fn a_header_and_separator_with_no_terminator_after_them_is_an_empty_table() -> TestResult {
-    let inventory = parse_text(&format!("{HEADER}\r\n{}", dashes()))?;
-    assert!(inventory.updates.is_empty());
+fn a_header_and_separator_with_no_footer_is_unrecognised_and_a_zero_footer_is_an_empty_table() -> TestResult {
+    let bare = parse_text(&format!("{HEADER}\r\n{}", dashes()));
+    assert!(matches!(bare, Err(WingetError::UnrecognisedLayout)));
+    let terminated = parse_text(&format!("{HEADER}\r\n{}\r\n", dashes()));
+    assert!(matches!(terminated, Err(WingetError::UnrecognisedLayout)));
+    let zero = parse_text(&format!("{HEADER}\r\n{}\r\n0 upgrades available.\r\n", dashes()))?;
+    assert!(zero.updates.is_empty());
+    let wrong = parse_text(&format!("{HEADER}\r\n{}\r\n1 upgrades available.\r\n", dashes()));
+    assert!(matches!(wrong, Err(WingetError::FooterMismatch { footer: 1, rows: 0 })));
     Ok(())
 }
 
@@ -425,7 +480,7 @@ fn a_second_separator_after_an_empty_table_with_no_footer_is_unrecognised() -> T
 #[test]
 fn a_second_footer_like_line_between_two_tables_is_a_named_error() -> TestResult {
     let result = parse_text(&format!(
-        "{}9 x\r\n{HEADER}\r\n{}\r\nBaz Baz.Qux 3.0 4.0\r\n1 upgrades available.\r\n",
+        "{}9 x\r\n{HEADER}\r\n{}\r\n{BAZ_ROW}\r\n1 upgrades available.\r\n",
         table(&[GOOD_ROW], "1 upgrades available."),
         dashes()
     ));
@@ -540,7 +595,7 @@ fn preamble_lines_before_the_header_are_counted_and_frames_are_not() -> TestResu
 #[test]
 fn a_second_table_is_read_with_its_own_footer_and_the_explicit_targeting_line_is_not_a_record() -> TestResult {
     let second = format!(
-        "\r\nThe following packages have an upgrade available, but require explicit targeting for upgrade:\r\n{HEADER}\r\n{}\r\nBaz Baz.Qux 3.0 4.0\r\n1 upgrades available.\r\n",
+        "\r\nThe following packages have an upgrade available, but require explicit targeting for upgrade:\r\n{HEADER}\r\n{}\r\n{BAZ_ROW}\r\n1 upgrades available.\r\n",
         dashes()
     );
     let inventory = parse_text(&format!("{}{second}", table(&[GOOD_ROW], "1 upgrades available.")))?;
@@ -587,7 +642,7 @@ fn a_row_over_the_line_cap_is_skipped_counted_and_still_a_row_for_the_footer() -
         max_lines: limits().max_lines,
         max_line_bytes: SMALL_LINE,
     };
-    let giant = format!("Foo {} 1.0 2.0", "A".repeat(LONG_ID));
+    let giant = row("Foo", &"A".repeat(LONG_ID), "1.0", "2.0");
     let text = table(&[GOOD_ROW, &giant], "2 upgrades available.");
     let inventory = parse_winget_cli(&device(), text.as_bytes(), 0, WingetSource::Winget, &tight)?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
@@ -598,9 +653,22 @@ fn a_row_over_the_line_cap_is_skipped_counted_and_still_a_row_for_the_footer() -
 
 #[test]
 fn an_id_or_version_over_the_byte_cap_is_malformed() -> TestResult {
-    let long_id = format!("Foo {} 1.0 2.0", "A".repeat(MAX_WINGET_ID_BYTES + 1));
-    let long_version = format!("Foo Foo.Baz 1.{} 2.0", "0".repeat(MAX_WINGET_ID_BYTES));
-    let inventory = parse_text(&table(&[GOOD_ROW, &long_id, &long_version], "3 upgrades available."))?;
+    let wide_rows = [
+        format!("{:<NAME_WIDTH$}{:<WIDE_ID$}{:<WIDE_ID$}2.0", "Foo", "Foo.Bar", "1.0"),
+        format!(
+            "{:<NAME_WIDTH$}{:<WIDE_ID$}{:<WIDE_ID$}2.0",
+            "Foo",
+            "A".repeat(MAX_WINGET_ID_BYTES + 1),
+            "1.0"
+        ),
+        format!(
+            "{:<NAME_WIDTH$}{:<WIDE_ID$}{:<WIDE_ID$}2.0",
+            "Foo",
+            "Foo.Baz",
+            format!("1.{}", "0".repeat(MAX_WINGET_ID_BYTES))
+        ),
+    ];
+    let inventory = parse_text(&wide_table(&wide_rows, "3 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), COUNT_TWO);
     Ok(())
@@ -609,10 +677,10 @@ fn an_id_or_version_over_the_byte_cap_is_malformed() -> TestResult {
 
 #[test]
 fn an_id_or_a_version_holding_an_ellipsis_is_truncated() -> TestResult {
-    let id = "Foo Foo.Ba\u{2026} 1.0 2.0";
-    let installed = "Foo Foo.Bar 1.\u{2026} 2.0";
-    let available = "Foo Foo.Bar 1.0 2.\u{2026}";
-    let inventory = parse_text(&table(&[GOOD_ROW, id, installed, available], "4 upgrades available."))?;
+    let id = row("Foo", "Foo.Ba\u{2026}", "1.0", "2.0");
+    let installed = row("Foo", "Foo.Bar", "1.\u{2026}", "2.0");
+    let available = row("Foo", "Foo.Bar", "1.0", "2.\u{2026}");
+    let inventory = parse_text(&table(&[GOOD_ROW, &id, &installed, &available], "4 upgrades available."))?;
     assert_eq!(inventory.updates.len(), 1);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Truncated), COUNT_THREE);
     Ok(())
@@ -624,9 +692,9 @@ fn a_control_character_in_a_row_is_counted_and_never_read() -> TestResult {
     let inventory = parse_text(&table(
         &[
             GOOD_ROW,
-            "Foo\u{1b} Foo.Baz 1.0 2.0",
-            "Foo\tFoo.Baz 1.0 2.0",
-            "Foo\u{200b} Foo.Baz 1.0 2.0",
+            &row("Foo\u{1b}", "Foo.Baz", "1.0", "2.0"),
+            &row("Foo\t", "Foo.Baz", "1.0", "2.0"),
+            &row("Foo\u{200b}", "Foo.Baz", "1.0", "2.0"),
         ],
         "4 upgrades available.",
     ))?;
@@ -639,13 +707,14 @@ fn a_control_character_in_a_row_is_counted_and_never_read() -> TestResult {
 #[test]
 fn a_row_with_a_leading_dash_or_a_bad_character_is_malformed() -> TestResult {
     let rows = [
-        "Foo -Foo.Bar 1.0 2.0",
-        "Foo Foo;Bar 1.0 2.0",
-        "Foo Foo.Bar -1.0 2.0",
-        "Foo Foo.Bar 1.0 2.0$",
-        GOOD_ROW,
+        row("Foo", "-Foo.Bar", "1.0", "2.0"),
+        row("Foo", "Foo;Bar", "1.0", "2.0"),
+        row("Foo", "Foo.Bar", "-1.0", "2.0"),
+        row("Foo", "Foo.Bar", "1.0", "2.0$"),
+        GOOD_ROW.to_string(),
     ];
-    let inventory = parse_text(&table(&rows, "5 upgrades available."))?;
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let inventory = parse_text(&table(&borrowed, "5 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), COUNT_FOUR);
     Ok(())
@@ -654,7 +723,7 @@ fn a_row_with_a_leading_dash_or_a_bad_character_is_malformed() -> TestResult {
 
 #[test]
 fn a_duplicate_id_in_any_case_keeps_the_first_and_is_counted() -> TestResult {
-    let inventory = parse_text(&table(&[GOOD_ROW, "Other foo.bar 5.0 6.0"], "2 upgrades available."))?;
+    let inventory = parse_text(&table(&[GOOD_ROW, &row("Other", "foo.bar", "5.0", "6.0")], "2 upgrades available."))?;
     assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Duplicate), 1);
     Ok(())
@@ -664,7 +733,7 @@ fn a_duplicate_id_in_any_case_keeps_the_first_and_is_counted() -> TestResult {
 #[test]
 fn more_rows_than_the_cap_is_a_named_error_counted_before_any_record() -> TestResult {
     let rows: Vec<String> = (0..=MAX_WINGET_UPDATES)
-        .map(|number| format!("N{number} Pkg.P{number} 1.0 2.0"))
+        .map(|number| row(&format!("N{number}"), &format!("Pkg.P{number}"), "1.0", "2.0"))
         .collect();
     let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
     let footer = format!("{} upgrades available.", rows.len());
@@ -676,7 +745,9 @@ fn more_rows_than_the_cap_is_a_named_error_counted_before_any_record() -> TestRe
 
 #[test]
 fn exactly_the_cap_of_rows_is_accepted() -> TestResult {
-    let rows: Vec<String> = (0..MAX_WINGET_UPDATES).map(|number| format!("N{number} Pkg.P{number} 1.0 2.0")).collect();
+    let rows: Vec<String> = (0..MAX_WINGET_UPDATES)
+        .map(|number| row(&format!("N{number}"), &format!("Pkg.P{number}"), "1.0", "2.0"))
+        .collect();
     let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
     let footer = format!("{} upgrades available.", rows.len());
     assert_eq!(parse_text(&table(&borrowed, &footer))?.updates.len(), MAX_WINGET_UPDATES);
@@ -724,8 +795,191 @@ fn the_byte_and_line_caps_and_a_failing_reader_are_named_errors() -> TestResult 
 
 #[test]
 fn errors_carry_no_line_text() -> TestResult {
-    let result = parse_text(&table(&["Marker Marker.Id 1.0 2.0"], "9 upgrades available."));
+    let result = parse_text(&table(&[&row("Marker", "Marker.Id", "1.0", "2.0")], "9 upgrades available."));
     let error = result.err().ok_or("no error")?;
     assert!(!format!("{error} {error:?}").contains("Marker"));
+    Ok(())
+}
+
+
+const TWO_DASHES: usize = 64;
+
+
+const TWO_FOOTER: &str = "2 upgrades available.";
+
+
+fn two_with_extra_row(extra: &str, footer: &str) -> Result<String, std::str::Utf8Error> {
+    Ok(std::str::from_utf8(TWO)?.replace(TWO_FOOTER, &format!("{extra}\r\n{footer}")))
+}
+
+
+#[test]
+fn the_last_row_read_as_a_footer_by_the_old_rule_is_a_counted_row_and_the_real_footer_is_read() -> TestResult {
+    let zed = two_row("Zed Editor", "Zed.Zed", "beta", "2");
+    let counted = parse_text(&two_with_extra_row(&zed, "3 upgrades available.")?)?;
+    assert_eq!(ids(&counted), ["7zip.7zip", "Microsoft.Edge"]);
+    assert_eq!(skipped_count(&counted.skipped, WingetSkip::Malformed), 1);
+    let mismatch = parse_text(&two_with_extra_row(&zed, TWO_FOOTER)?);
+    assert!(matches!(
+        mismatch,
+        Err(WingetError::FooterMismatch {
+            footer: FOOTER_TWO,
+            rows: COUNT_THREE
+        })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_fake_last_row_of_a_second_table_is_a_counted_row_and_the_real_footer_is_read() -> TestResult {
+    let zed = two_row("Zed Editor", "Zed.Zed", "beta", "2");
+    let second = format!("\r\n{TWO_HEADER}\r\n{}\r\n{zed}\r\n1 upgrades available.\r\n", "-".repeat(TWO_DASHES));
+    let text = format!("{}{second}", std::str::from_utf8(TWO)?);
+    let inventory = parse_text(&text)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_display_version_holding_spaces_never_moves_a_row_onto_another_id() -> TestResult {
+    let edge = two_row("Microsoft Edge", "Microsoft.Edge", "100.0.1.0", "156.0.4314.58");
+    let text = std::str::from_utf8(TWO)?;
+    assert!(text.contains(&edge));
+    ["1.0 Microsoft.Edge 999.0", "1.0 Benign.App 999.0"].iter().try_for_each(|version| {
+        let forged = two_row("Microsoft Edge", "Microsoft.Edge", version, "156.0.4314.58");
+        let inventory = parse_text(&text.replace(&edge, &forged))?;
+        assert_eq!(ids(&inventory), ["7zip.7zip"]);
+        assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_cjk_character_in_a_display_version_with_a_one_run_available_version_is_never_a_footer() -> TestResult {
+    let fake = format!(
+        "{:<TWO_NAME_WIDTH$}{:<ID_WIDTH$}\u{4e16}{}2",
+        "Zed",
+        "Zed.Zed",
+        " ".repeat(VERSION_WIDTH - COUNT_TWO)
+    );
+    let inventory = parse_text(&two_with_extra_row(&fake, "3 upgrades available.")?)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    let ellipsis = two_row("Zed", "Zed.Zed", "1.0", "2.\u{2026}");
+    let truncated = parse_text(&two_with_extra_row(&ellipsis, "3 upgrades available.")?)?;
+    assert_eq!(skipped_count(&truncated.skipped, WingetSkip::Truncated), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_long_name_row_of_the_live_capture_is_cut_by_characters() -> TestResult {
+    let text = std::str::from_utf8(LONG)?;
+    let header = text
+        .split("\r\n")
+        .find(|line| line.contains("Name  "))
+        .and_then(|line| line.rsplit('\r').next())
+        .ok_or("no header")?;
+    let widths = column_widths(header, header.len(), &limits())?;
+    assert_eq!(
+        widths,
+        Widths {
+            id: ID_WIDTH,
+            version: VERSION_WIDTH
+        }
+    );
+    let seven = text.split("\r\n").find(|line| line.starts_with("7-Zip")).ok_or("no row")?;
+    assert!(seven.len() > seven.chars().count());
+    assert_eq!(row_cells(seven, &widths), Some(["7zip.7zip      ", "22.01     ", "26.06"]));
+    Ok(())
+}
+
+
+#[test]
+fn a_header_must_have_four_columns_of_single_width_characters_and_fit_the_separator() -> TestResult {
+    let ok = |header: &str, dashes: usize| column_widths(header, dashes, &limits());
+    assert_eq!(
+        ok(HEADER, SEPARATOR_WIDTH)?,
+        Widths {
+            id: ID_WIDTH,
+            version: VERSION_WIDTH
+        }
+    );
+    assert!(matches!(ok(HEADER, SEPARATOR_WIDTH - 1), Err(WingetError::UnrecognisedLayout)));
+    assert!(matches!(ok("Name  Id  Version", SEPARATOR_WIDTH), Err(WingetError::UnrecognisedLayout)));
+    assert!(matches!(
+        ok("Name  Id  Version  Source  Available", SEPARATOR_WIDTH),
+        Err(WingetError::UnrecognisedLayout)
+    ));
+    assert!(matches!(
+        ok(" Name  Id  Version  Available", SEPARATOR_WIDTH),
+        Err(WingetError::UnrecognisedLayout)
+    ));
+    assert!(matches!(
+        ok("Nom  ID  Version  Disponible \u{540d}", SEPARATOR_WIDTH),
+        Err(WingetError::UnrecognisedLayout)
+    ));
+    assert!(matches!(
+        ok("Nom  ID  Version  Dispo\u{00d7}ible", SEPARATOR_WIDTH),
+        Err(WingetError::UnrecognisedLayout)
+    ));
+    assert!(matches!(
+        ok("Nom  ID  Version  Dispo\u{0301}ible", SEPARATOR_WIDTH),
+        Err(WingetError::UnrecognisedLayout)
+    ));
+    assert!(matches!(ok(&"N".repeat(LONG_HEADER), LONG_HEADER), Err(WingetError::UnrecognisedLayout)));
+    assert!(ok("D\u{00e9}signation  ID  Version  Disponible", SEPARATOR_WIDTH).is_ok());
+    let cjk = parse_text(&format!(
+        "Nom  ID  Version  \u{53ef}\u{7528}\r\n{}\r\n{GOOD_ROW}\r\n1 upgrades available.\r\n",
+        dashes()
+    ));
+    assert!(matches!(cjk, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_row_whose_cells_do_not_line_up_with_the_header_is_malformed() -> TestResult {
+    let widths = Widths {
+        id: ID_WIDTH,
+        version: VERSION_WIDTH,
+    };
+    assert_eq!(row_cells(GOOD_ROW, &widths), Some(["Foo.Bar        ", "1.0       ", "2.0"]));
+    assert_eq!(row_cells("1.0", &widths), None);
+    assert_eq!(row_cells("Foo Foo.Bar 1.0 2.0", &widths), None);
+    let glued = "Foo            Foo.Bar1.0       2.0";
+    let shifted = "Foo            Foo.Bar        1.0 2.0";
+    let no_name_gap = format!("X{:<ID_WIDTH$}{:<VERSION_WIDTH$}2.0", "Foo.Bar", "1.0");
+    let rows = [
+        glued.to_string(),
+        shifted.to_string(),
+        no_name_gap,
+        row("Foo", "Foo.\u{e9}", "1.0", "2.0"),
+        row("Foo", "Foo.Bar", "= 1.0", "2.0"),
+    ];
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let footer = format!("{} upgrades available.", rows.len());
+    let inventory = parse_text(&table(&borrowed, &footer))?;
+    assert!(inventory.updates.is_empty());
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), rows.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_row_with_an_inner_space_in_the_id_or_version_cell_is_malformed_and_a_marker_needs_one_space() -> TestResult {
+    let rows = [
+        row("Foo", "Foo. Bar", "1.0", "2.0"),
+        row("Foo", "Foo.Bar", "1.0 2.0", "3.0"),
+        row("Foo", "Foo.Bar", "<  1.0", "3.0"),
+    ];
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let inventory = parse_text(&table(&borrowed, "3 upgrades available."))?;
+    assert!(inventory.updates.is_empty());
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), COUNT_THREE);
     Ok(())
 }

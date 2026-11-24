@@ -46,3 +46,6 @@ pub const MAX_WINGET_TABLES: usize = 2;
 
 
 pub const SOURCE_OPEN_FAILED_EXIT: i32 = -1_978_335_157;
+
+
+pub const ROW_CELL_COUNT: usize = 3;

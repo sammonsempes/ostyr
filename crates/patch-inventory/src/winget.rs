@@ -4,7 +4,7 @@ use crate::error::{InventoryError, WingetError};
 use crate::limits::{MAX_WINGET_TABLES, MAX_WINGET_UPDATES, MIN_SEPARATOR_DASHES, SOURCE_OPEN_FAILED_EXIT};
 use crate::model::{CliInventory, Device, Limits, Update, WingetSkip, WingetSource};
 use crate::scan::{is_forbidden, read_input};
-use crate::types::{UpdatesByPackage, WingetSkipCounts};
+use crate::types::{RowCells, UpdatesByPackage, WingetSkipCounts};
 use crate::validate::{is_winget_package_id, is_winget_version};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -20,7 +20,20 @@ pub const CRLF: &str = "\r\n";
 pub const ELLIPSIS: char = '\u{2026}';
 
 
+pub const LATIN_FIRST: char = '\u{00c0}';
+
+
+pub const LATIN_LAST: char = '\u{024f}';
+
+
 pub const PROGRESS_BLOCKS: [char; 2] = ['\u{2588}', '\u{2592}'];
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Widths {
+    pub id: usize,
+    pub version: usize,
+}
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,13 +198,11 @@ pub fn read_tables(
         .enumerate()
         .map(|(position, start)| {
             let stop = separators.get(position + 1).map_or(lines.len(), |next| next.saturating_sub(1));
-            scan_table(lines.get(start + 1..stop).unwrap_or(&[]), limits)
+            let widths = widths_at(lines, *start, limits)?;
+            scan_table(lines.get(start + 1..stop).unwrap_or(&[]), &widths, limits)
         })
         .collect::<Result<Vec<TableScan>, WingetError>>()?;
     let earlier = scans.len().saturating_sub(1);
-    if scans.iter().take(earlier).any(|scan| scan.footer.is_none()) {
-        Err(WingetError::UnrecognisedLayout)?;
-    }
     if scans.iter().take(earlier).any(|scan| scan.extra_footers > 0) {
         Err(WingetError::RowAfterTableEnd)?;
     }
@@ -210,8 +221,46 @@ pub fn read_tables(
 }
 
 
-pub fn scan_table<'a>(region: &[&'a str], limits: &Limits) -> Result<TableScan<'a>, WingetError> {
-    let classified: Vec<Classified> = region.iter().copied().map(|line| classify_line(line, limits)).collect();
+pub fn widths_at(lines: &[&str], separator: usize, limits: &Limits) -> Result<Widths, WingetError> {
+    let header = lines.get(separator.saturating_sub(1)).map_or("", |line| *line);
+    let dashes = lines.get(separator).map_or(0, |line| line.len());
+    column_widths(header, dashes, limits)
+}
+
+
+pub fn column_widths(header: &str, dashes: usize, limits: &Limits) -> Result<Widths, WingetError> {
+    if header.len() > limits.max_line_bytes || !header.chars().all(is_header_character) {
+        Err(WingetError::UnrecognisedLayout)?;
+    }
+    let characters: Vec<char> = header.chars().collect();
+    let starts: Vec<usize> = characters
+        .iter()
+        .enumerate()
+        .filter(|(index, character)| is_column_start(&characters, *index, **character))
+        .map(|(index, _)| index)
+        .collect();
+    match starts.as_slice() {
+        [_, id, version, available] if dashes >= *available => Ok(Widths {
+            id: version - id,
+            version: available - version,
+        }),
+        _ => Err(WingetError::UnrecognisedLayout),
+    }
+}
+
+
+pub fn is_header_character(character: char) -> bool {
+    character.is_ascii_graphic() || character == ' ' || ((LATIN_FIRST..=LATIN_LAST).contains(&character) && character.is_alphabetic())
+}
+
+
+pub fn is_column_start(characters: &[char], index: usize, character: char) -> bool {
+    index == 0 || (character != ' ' && index.checked_sub(1).and_then(|previous| characters.get(previous)) == Some(&' '))
+}
+
+
+pub fn scan_table<'a>(region: &[&'a str], widths: &Widths, limits: &Limits) -> Result<TableScan<'a>, WingetError> {
+    let classified: Vec<Classified> = region.iter().copied().map(|line| classify_line(line, widths, limits)).collect();
     let rows: Vec<RowLine> = classified
         .iter()
         .map_while(|line| match line {
@@ -241,7 +290,7 @@ pub fn is_row_shaped(line: &Classified) -> bool {
 pub fn check_footer(rows: &[RowLine], footer: Option<&str>) -> Result<(), WingetError> {
     match footer {
         None if rows.last() == Some(&RowLine::Unshaped) => Err(WingetError::FooterUnreadable),
-        None if rows.is_empty() => Ok(()),
+        None if rows.is_empty() => Err(WingetError::UnrecognisedLayout),
         None => Err(WingetError::FooterMissing),
         Some(text) => {
             let count = footer_count(text)?;
@@ -274,7 +323,7 @@ pub fn digit_runs(line: &str) -> usize {
 }
 
 
-pub fn classify_line<'a>(line: &'a str, limits: &Limits) -> Classified<'a> {
+pub fn classify_line<'a>(line: &'a str, widths: &Widths, limits: &Limits) -> Classified<'a> {
     if is_blank(line) {
         Classified::Blank
     } else if line.len() > limits.max_line_bytes {
@@ -282,42 +331,83 @@ pub fn classify_line<'a>(line: &'a str, limits: &Limits) -> Classified<'a> {
     } else if line.chars().any(is_forbidden) {
         Classified::Row(RowLine::Skipped(WingetSkip::ControlCharacters))
     } else {
-        classify_shape(line)
+        classify_shape(line, widths)
     }
 }
 
 
-pub fn classify_shape(line: &str) -> Classified<'_> {
-    let tokens: Vec<&str> = line.split(' ').filter(|token| !token.is_empty()).collect();
-    match (row_of(&tokens), digit_runs(line)) {
-        (Some(row), _) => Classified::Row(row),
-        (None, 1) => Classified::Footer(line),
-        (None, _) => Classified::Row(RowLine::Unshaped),
+pub fn classify_shape<'a>(line: &'a str, widths: &Widths) -> Classified<'a> {
+    let is_row = line
+        .rsplit(' ')
+        .next()
+        .is_some_and(|last| last.contains(ELLIPSIS) || is_winget_version(last));
+    match (is_row, digit_runs(line)) {
+        (true, _) => Classified::Row(cut_row(line, widths)),
+        (false, 1) => Classified::Footer(line),
+        (false, _) => Classified::Row(RowLine::Unshaped),
     }
 }
 
 
-pub fn row_of<'a>(tokens: &[&'a str]) -> Option<RowLine<'a>> {
-    match tokens {
-        [name @ .., id, marker, installed, available] if !name.is_empty() && matches!(*marker, "<" | ">") => grade(id, installed, available, true),
-        [name @ .., id, installed, available] if !name.is_empty() => grade(id, installed, available, false),
-        _ => None,
+pub fn cut_row<'a>(line: &'a str, widths: &Widths) -> RowLine<'a> {
+    row_cells(line, widths).map_or(RowLine::Skipped(WingetSkip::Malformed), |[id, version, available]| {
+        grade(id, version, available)
+    })
+}
+
+
+pub fn take_end(text: &str, count: usize) -> Option<(&str, &str)> {
+    text.char_indices()
+        .rev()
+        .nth(count.saturating_sub(1))
+        .map(|(offset, _)| text.split_at(offset))
+}
+
+
+pub fn is_padded_cell(cell: &str) -> bool {
+    cell.ends_with(' ') && !cell.starts_with(' ')
+}
+
+
+pub fn row_cells<'a>(line: &'a str, widths: &Widths) -> Option<RowCells<'a>> {
+    let (head, _) = line.rsplit_once(' ')?;
+    let (before_available, available) = line.split_at(head.len() + 1);
+    let (rest, version_cell) = take_end(before_available, widths.version)?;
+    let (name_part, id_cell) = take_end(rest, widths.id)?;
+    (name_part.ends_with(' ') && is_padded_cell(id_cell) && is_padded_cell(version_cell)).then_some([id_cell, version_cell, available])
+}
+
+
+pub fn split_marker(text: &str) -> (bool, &str) {
+    match text.split_once(' ') {
+        Some(("<" | ">", installed)) => (true, installed),
+        _ => (false, text),
     }
 }
 
 
-pub fn grade<'a>(id: &'a str, installed: &'a str, available: &'a str, unknown_installed: bool) -> Option<RowLine<'a>> {
-    if [id, installed, available].iter().any(|token| token.contains(ELLIPSIS)) {
-        Some(RowLine::Skipped(WingetSkip::Truncated))
-    } else if is_winget_package_id(id) && is_winget_version(installed) && is_winget_version(available) {
-        Some(RowLine::Item(Row {
+pub fn is_cell_character(character: char) -> bool {
+    character.is_ascii_graphic() || character == ' ' || character == ELLIPSIS
+}
+
+
+pub fn grade<'a>(id_cell: &'a str, version_cell: &'a str, available: &'a str) -> RowLine<'a> {
+    let cells = [id_cell, version_cell, available];
+    let id = id_cell.trim_matches(' ');
+    let (unknown_installed, installed) = split_marker(version_cell.trim_matches(' '));
+    if !cells.iter().all(|cell| cell.chars().all(is_cell_character)) {
+        RowLine::Skipped(WingetSkip::Malformed)
+    } else if cells.iter().any(|cell| cell.contains(ELLIPSIS)) {
+        RowLine::Skipped(WingetSkip::Truncated)
+    } else if is_winget_package_id(id) && is_winget_version(installed) {
+        RowLine::Item(Row {
             id,
             installed,
             available,
             unknown_installed,
-        }))
+        })
     } else {
-        None
+        RowLine::Skipped(WingetSkip::Malformed)
     }
 }
 
