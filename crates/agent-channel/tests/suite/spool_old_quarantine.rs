@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::spool_append::agent_file;
 use crate::spool_refused::{captured_log, texts, ATTEMPTS, BAD_LINE, NEW_BYTES};
 use crate::types::TestResult;
@@ -8,7 +9,6 @@ use agent_channel::spool::{
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
-use tempfile::tempdir;
 
 
 const MARKER: &str = "OLDMARKER";
@@ -92,7 +92,7 @@ fn rewrite_with(path: &Path, open: fn(&Path) -> io::Result<Option<File>>) -> io:
 
 #[test]
 fn an_unusable_quarantine_has_one_reason_each() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let regular = dir.path().join("regular");
     fs::write(&regular, "x\n")?;
     let metadata = fs::metadata(&regular)?;
@@ -117,7 +117,7 @@ fn an_unusable_quarantine_has_one_reason_each() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn a_foreign_owner_and_a_hard_link_are_unusable_reasons() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let regular = dir.path().join("regular");
     fs::write(&regular, "x\n")?;
     let own = agent_channel::spool::effective_uid();
@@ -131,7 +131,7 @@ fn a_foreign_owner_and_a_hard_link_are_unusable_reasons() -> TestResult {
 #[test]
 fn an_oversized_old_quarantine_is_replaced_never_read_and_logged_once() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let mut sparse = File::create(&rejected)?;
     io::Write::write_all(&mut sparse, MARKER.as_bytes())?;
@@ -153,7 +153,7 @@ fn an_oversized_old_quarantine_is_replaced_never_read_and_logged_once() -> TestR
 #[cfg(unix)]
 #[test]
 fn a_hard_link_at_the_quarantine_is_replaced_and_its_bytes_never_reach_the_new_file() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let other = dir.path().join("other-name");
     fs::write(&other, format!("{MARKER}\n"))?;
@@ -168,7 +168,7 @@ fn a_hard_link_at_the_quarantine_is_replaced_and_its_bytes_never_reach_the_new_f
 #[cfg(unix)]
 #[test]
 fn a_foreign_owned_quarantine_is_replaced_and_its_bytes_never_reach_the_new_file() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, format!("{MARKER}\n"))?;
     let owner = rustix::fs::Uid::from_raw(NOBODY);
@@ -193,7 +193,7 @@ fn a_lease_break_refusal_is_not_a_regular_file() -> TestResult {
 #[test]
 fn a_transient_open_error_disables_the_rewrite_and_keeps_the_old_file_byte_for_byte() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, format!("{MARKER}\n"))?;
     assert_eq!(rewrite_with(&rejected, open_with_too_many_files)?, None);
@@ -263,7 +263,7 @@ fn the_copy_pass_never_writes_past_the_room_whatever_the_old_file_became() -> Te
 #[cfg(unix)]
 #[test]
 fn an_oversized_and_a_hard_linked_quarantine_never_stop_the_claim() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let rejected = dir.path().join("spool.rejected");
     File::create(&rejected)?.set_len(MAX_REJECTED_BYTES + 1)?;

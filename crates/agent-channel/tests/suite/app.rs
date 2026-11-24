@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{bounded, make_platform, scoped_logging};
 use crate::harness::{client_paths, server_paths};
 use crate::pki::{agent_spec, write_file, AGENT_URI, PRIVATE_MODE, SERVER_NAME, WORLD_READABLE_MODE};
@@ -42,7 +43,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tempfile::tempdir;
 use tokio::sync::{mpsc, oneshot};
 
 
@@ -375,7 +375,7 @@ async fn run_with(agent: &AgentFile, dirs: &SpoolDirs) -> Result<agent_channel::
 #[tokio::test]
 async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches_the_worker() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, mut agent } = fixture(dir.path())?;
     let listener = bind_server(&server).await?;
     agent.server = listener.local_addr()?.to_string();
@@ -411,7 +411,7 @@ async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches
 #[tokio::test]
 async fn a_restarted_server_still_deduplicates() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, mut agent } = fixture(dir.path())?;
     let mut lines = 0;
     for _round in 0..TWICE {
@@ -441,7 +441,7 @@ async fn a_restarted_server_still_deduplicates() -> TestResult {
 #[tokio::test]
 async fn the_server_refuses_bad_files() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, .. } = fixture(dir.path())?;
     assert!(load_server_file(&dir.path().join("missing.yaml")).is_err());
     let unknown = ServerFile {
@@ -467,7 +467,7 @@ async fn the_server_refuses_bad_files() -> TestResult {
 #[tokio::test]
 async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { agent, .. } = fixture(dir.path())?;
     let bad_address = AgentFile {
         server: "nowhere".to_owned(),
@@ -527,7 +527,7 @@ async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
 #[tokio::test]
 async fn an_unreachable_server_exhausts_the_attempts() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { mut agent, .. } = fixture(dir.path())?;
     fs::write(&agent.spool_file, "")?;
     let reserved = tokio::net::TcpSocket::new_v4()?;
@@ -662,7 +662,7 @@ fn event_lines_are_parsed_strictly() -> TestResult {
 
 #[test]
 fn the_events_file_must_open() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     assert!(matches!(
         open_event_store(&dir.path().join("missing").join("events.log")),
         Err(SinkError::Open { .. })
@@ -676,7 +676,7 @@ fn the_events_file_must_open() -> TestResult {
 
 #[tokio::test]
 async fn the_command_source_reads_a_bounded_directory() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent_dir = agent_directory(dir.path(), &identity());
     assert_eq!(agent_dir.file_name().and_then(|name| name.to_str()), Some("acme@agent-1"));
     fs::create_dir_all(&agent_dir)?;
@@ -711,7 +711,7 @@ fn a_failed_audit_append_is_passed_on_as_an_alert() -> TestResult {
     let log = Arc::new(genesis_log(io::sink()));
     let working = alerting_audit(Box::new(move |new_entry| core_audit::log::append(&log, new_entry)));
     assert!(working(entry()).is_ok());
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file_log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     assert!(shared_log_audit(&file_log)(entry()).is_ok());
     let context = reload_context(Path::new("x.yaml"), "module", "tenant", "request");
@@ -762,7 +762,7 @@ fn a_presence_entry_keeps_silent_seconds() -> TestResult {
 #[tokio::test]
 async fn a_failed_heartbeat_fails_the_session_attempt() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let reserved = tokio::net::TcpSocket::new_v4()?;
     reserved.bind("127.0.0.1:0".parse()?)?;
     let address = reserved.local_addr()?;
@@ -798,7 +798,7 @@ fn sequences(agent: &AgentFile) -> Result<Vec<u64>, Box<dyn std::error::Error>> 
 #[test]
 fn a_changed_spool_gets_new_sequences_and_a_crashed_claim_keeps_its_own() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     assert!(claim_spool(&agent)?.batches.is_empty());
     fs::write(&agent.spool_file, "a\nb\n")?;
@@ -829,7 +829,7 @@ fn a_changed_spool_gets_new_sequences_and_a_crashed_claim_keeps_its_own() -> Tes
 #[test]
 fn lines_that_raced_the_claim_or_exceed_the_cap_return_to_the_spool() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     let sending = suffixed(&agent.spool_file, SENDING_SUFFIX);
     fs::write(&sending, "a\nb\nc\n")?;
@@ -858,7 +858,7 @@ fn lines_that_raced_the_claim_or_exceed_the_cap_return_to_the_spool() -> TestRes
 #[test]
 fn an_oversized_spool_line_is_refused_and_counted_not_buffered() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     let huge = "y".repeat(OVERSIZED_LINE);
     fs::write(&agent.spool_file, format!("a\n{huge}\nb\n{huge}"))?;
@@ -895,7 +895,7 @@ fn the_bounded_reader_cuts_at_the_limit() -> TestResult {
 
 #[test]
 fn the_sequence_file_must_hold_two_numbers() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = dir.path().join("sequence");
     assert_eq!(read_sequence(&path)?, SequenceState::default());
     for text in ["", "1", "1 x", "1 2 3"] {
@@ -913,7 +913,7 @@ fn an_oversized_event_line_refuses_the_events_file() -> TestResult {
     let _logging = scoped_logging();
     let huge = "z".repeat(agent_channel::sink::MAX_EVENT_LINE_BYTES + THIRD);
     assert!(matches!(load_seen(&mut Cursor::new(huge.clone())), Err(SinkError::Corrupt { line: 1 })));
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = dir.path().join("events.log");
     fs::write(&path, huge)?;
     assert!(matches!(open_event_store(&path), Err(SinkError::Corrupt { line: 1 })));
@@ -924,7 +924,7 @@ fn an_oversized_event_line_refuses_the_events_file() -> TestResult {
 #[test]
 fn lines_returned_to_the_spool_are_returned_once_across_unfinished_runs() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     fs::write(&agent.spool_file, "x\n".repeat(MAX_SPOOL_BATCHES) + "EXTRA\n")?;
     assert_eq!(claim_spool(&agent)?.batches.len(), MAX_SPOOL_BATCHES);
@@ -939,7 +939,7 @@ fn lines_returned_to_the_spool_are_returned_once_across_unfinished_runs() -> Tes
 #[test]
 fn a_claimed_file_that_grew_after_it_was_read_is_kept() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     fs::write(&agent.spool_file, "a\n")?;
     let claimed = claim_spool(&agent)?;
@@ -954,7 +954,7 @@ fn a_claimed_file_that_grew_after_it_was_read_is_kept() -> TestResult {
 #[test]
 fn a_spool_line_is_bounded_so_its_encoded_batch_fits_the_message_limit() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     let bound = line_limit(&agent);
     let exact = "e".repeat(bound);
@@ -981,7 +981,7 @@ fn a_spool_line_is_bounded_so_its_encoded_batch_fits_the_message_limit() -> Test
 #[test]
 fn a_sequence_at_the_maximum_is_refused_not_wrapped() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let agent = spool_agent(dir.path())?;
     write_sequence(&agent.sequence_file, SequenceState { used: u64::MAX, count: 0 })?;
     assert!(matches!(claim_spool(&agent), Err(AppError::SequenceOverflow(_))));
@@ -998,7 +998,7 @@ fn a_sequence_at_the_maximum_is_refused_not_wrapped() -> TestResult {
 #[test]
 fn a_late_write_to_the_claimed_file_stops_its_rewrite() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = dir.path().join("sending");
     fs::write(&path, "a\nb\n")?;
     let length = fs::metadata(&path)?.len();
@@ -1017,7 +1017,7 @@ fn a_late_write_to_the_claimed_file_stops_its_rewrite() -> TestResult {
 #[test]
 fn a_write_between_the_check_and_the_rename_is_detected_and_kept() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = dir.path().join("sending");
     fs::write(&path, "a\nb\n")?;
     let length = fs::metadata(&path)?.len();
@@ -1047,7 +1047,7 @@ fn a_write_between_the_check_and_the_rename_is_detected_and_kept() -> TestResult
 #[test]
 fn the_quarantine_keeps_refused_batches_within_its_size_cap() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = dir.path().join("spool.rejected");
     let refused = |text: &str| EventBatch {
         ecs_json: text.as_bytes().to_vec(),
@@ -1078,7 +1078,7 @@ fn the_quarantine_keeps_refused_batches_within_its_size_cap() -> TestResult {
 #[tokio::test]
 async fn a_batch_the_server_refuses_as_too_large_is_quarantined_and_delivery_goes_on() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, mut agent } = fixture(dir.path())?;
     fs::write(&server.settings_file, format!("max_message_bytes: {SMALL_SERVER_LIMIT}\n"))?;
     let listener = bind_server(&server).await?;
@@ -1114,7 +1114,7 @@ async fn a_batch_the_server_refuses_as_too_large_is_quarantined_and_delivery_goe
 #[tokio::test]
 async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quarantined() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, agent } = fixture(dir.path())?;
     fs::write(
         &server.settings_file,
@@ -1180,7 +1180,7 @@ fn refusing_dial() -> DialFuture {
 #[tokio::test]
 async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, agent } = fixture(dir.path())?;
     let listener = bind_server(&server).await?;
     let config = client_config(&ClientTlsPaths {
@@ -1242,7 +1242,7 @@ async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> Test
 #[tokio::test]
 async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { agent, .. } = fixture(dir.path())?;
     let spool = claim_spool(&agent)?;
     let worker = start_worker(&agent.executed_file)?;
@@ -1268,7 +1268,7 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
 #[tokio::test]
 async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let Fixture { server, agent } = fixture(dir.path())?;
     let listener = bind_server(&server).await?;
     let config = client_config(&ClientTlsPaths {
@@ -1317,7 +1317,7 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
 
 #[test]
 fn an_overflow_of_three_chunks_goes_back_in_three_whole_writes() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let line = "z".repeat(LINE_OF_ONE_KIBIBYTE);
     let lines_per_chunk = RETURN_CHUNK_BYTES / (LINE_OF_ONE_KIBIBYTE + 1);
     let all = vec![line.clone(); lines_per_chunk * THREE_CHUNKS];

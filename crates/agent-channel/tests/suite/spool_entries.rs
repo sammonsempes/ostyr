@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::error::AppError;
@@ -8,7 +9,6 @@ use agent_channel::spool_dirs::{
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use sys_windows::types::DirAclError;
-use tempfile::tempdir;
 
 
 const LISTED_ENTRIES: usize = 11;
@@ -41,7 +41,7 @@ fn refuse_the_sending_entry(paths: &[PathBuf]) -> Result<(), DirAclError> {
 
 #[test]
 fn every_fixed_name_the_agent_opens_is_listed() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let names: Vec<String> = spool_entry_paths(&agent_file(dir.path()))
         .iter()
         .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
@@ -88,7 +88,7 @@ fn every_fixed_name_the_agent_opens_is_listed() -> TestResult {
 
 #[test]
 fn an_entry_refusal_ends_the_start_and_names_the_entry() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let refused = open_spool_dirs_judged(&agent_file(dir.path()), accept_directory, refuse_every_entry);
     assert!(matches!(refused, Err(AppError::SpoolDirAcl(DirAclError::NotRegularFile { .. }))));
     let named = open_spool_dirs_judged(&agent_file(dir.path()), accept_directory, refuse_the_sending_entry);
@@ -102,7 +102,7 @@ fn an_entry_refusal_ends_the_start_and_names_the_entry() -> TestResult {
 
 #[test]
 fn a_directory_refusal_comes_before_the_entries() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let refused = open_spool_dirs_judged(&agent_file(dir.path()), refuse_directory, refuse_every_entry);
     assert!(matches!(refused, Err(AppError::SpoolDirAcl(DirAclError::NullDacl { .. }))));
     Ok(())
@@ -111,7 +111,7 @@ fn a_directory_refusal_comes_before_the_entries() -> TestResult {
 
 #[test]
 fn the_default_entry_judges_accept_entries_that_are_absent() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     assert_eq!(held_directories(&open_spool_dirs_with(&file, accept_directory)?), 1);
     assert!(accept_any_entries(&[]).is_ok());

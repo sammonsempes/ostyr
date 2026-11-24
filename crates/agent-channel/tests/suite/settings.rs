@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::services::agent_identity;
 use crate::state::{envelope_source, make_audited_state, make_live_state, new_stored, recording_audit, recording_sink};
 use crate::types::TestResult;
@@ -12,7 +13,6 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tempfile::tempdir;
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::sleep;
 
@@ -61,7 +61,7 @@ fn write_bound(dir: &Path, bound: usize) -> std::io::Result<()> {
 
 #[test]
 fn a_reload_changes_the_bound_for_new_connections_and_is_audited() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     write_bound(dir.path(), FIRST_BOUND)?;
     let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context())?;
@@ -89,7 +89,7 @@ fn a_reload_changes_the_bound_for_new_connections_and_is_audited() -> TestResult
 
 #[test]
 fn an_invalid_reload_keeps_the_old_settings() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     write_bound(dir.path(), SECOND_BOUND)?;
     let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context())?;
@@ -109,7 +109,7 @@ fn an_invalid_reload_keeps_the_old_settings() -> TestResult {
 
 #[test]
 fn the_first_load_must_be_valid() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let audit = || recording_audit(Arc::new(Mutex::new(Vec::new())));
     assert!(matches!(
         open_settings_engine(dir.path().join(SETTINGS_FILE), audit(), context()),

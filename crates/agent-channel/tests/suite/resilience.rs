@@ -1,4 +1,5 @@
 use crate::bounds::Capture;
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, bounded, client_paths, empty_revocation, init_logging, make_platform, scoped_logging, server_paths, start_server_state,
     start_single_state, stop_server,
@@ -22,7 +23,6 @@ use core_audit::error::AuditError;
 use core_audit::model::NewEntry;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tempfile::tempdir;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -225,7 +225,7 @@ async fn nothing_to_send_means_no_connection() -> TestResult {
 #[tokio::test]
 async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -393,7 +393,7 @@ async fn the_watch_records_a_silent_agent_and_stops_on_shutdown() -> TestResult 
 #[tokio::test]
 async fn a_peer_stalling_in_the_handshake_is_dropped_at_the_timeout() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let impatient = settings(|base| base.handshake_timeout_seconds = SMALL_HANDSHAKE_SECONDS);
@@ -416,7 +416,7 @@ async fn a_peer_stalling_in_the_handshake_is_dropped_at_the_timeout() -> TestRes
 #[tokio::test]
 async fn authenticated_connections_above_the_global_cap_are_dropped_and_the_slot_is_given_back() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -447,7 +447,7 @@ async fn authenticated_connections_above_the_global_cap_are_dropped_and_the_slot
 #[tokio::test]
 async fn an_agent_connects_while_stalled_peers_fill_every_handshake_slot() -> TestResult {
     let _logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;

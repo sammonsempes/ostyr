@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{bounded, client_paths, empty_revocation, make_platform, server_paths, start_server_routed, stop_server, Platform};
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
 use crate::services::{agent_identity, counter};
@@ -12,7 +13,6 @@ use futures_util::{stream, StreamExt};
 use http::uri::PathAndQuery;
 use std::error::Error;
 use std::sync::Arc;
-use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tonic::Code;
 use tonic_prost::ProstCodec;
@@ -99,7 +99,7 @@ async fn over_tls_full<Message>(rig: &mut Rig, messages: Vec<Message>) -> Result
 where
     Message: prost::Message + Send + 'static,
 {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform: Platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let router = shell_router(Arc::clone(&rig.state), Arc::clone(&rig.shell));
@@ -200,7 +200,7 @@ async fn a_resize_from_the_agent_over_tls_ends_the_stream_with_a_fixed_status() 
 async fn two_attaches_racing_for_one_session_over_tls_open_exactly_one() -> TestResult {
     let rig = rig();
     approve(&rig, SESSION)?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform: Platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let router = shell_router(Arc::clone(&rig.state), Arc::clone(&rig.shell));

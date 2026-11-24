@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{client_paths, make_platform, server_paths};
 use crate::pki::{agent_spec, issue, make_authority, server_spec, set_mode, write_file, write_leaf, AGENT_URI, PRIVATE_MODE, WORLD_READABLE_MODE};
 use crate::types::TestResult;
@@ -5,7 +6,6 @@ use agent_channel::error::ChannelError;
 use agent_channel::tls::{client_config, parse_private_key, read_certificates, read_private_key, root_store, server_config};
 use secrecy::ExposeSecret;
 use std::fs;
-use tempfile::tempdir;
 
 
 const TWO: usize = 2;
@@ -23,7 +23,7 @@ const JUNK_CERTIFICATE_PEM: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END 
 #[cfg(unix)]
 #[test]
 fn key_file_readable_by_others_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let path = write_file(dir.path(), "agent.key", &leaf.key_pem, WORLD_READABLE_MODE)?;
@@ -35,7 +35,7 @@ fn key_file_readable_by_others_is_refused() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_or_fifo_key_is_refused_and_the_private_file_is_read() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let real = write_file(dir.path(), "agent.key", &leaf.key_pem, PRIVATE_MODE)?;
@@ -53,7 +53,7 @@ fn a_symlinked_or_fifo_key_is_refused_and_the_private_file_is_read() -> TestResu
 #[cfg(unix)]
 #[test]
 fn group_readable_key_is_refused_by_both_configurations() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let mut server = server_paths(dir.path(), &platform)?;
     let mut client = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -68,7 +68,7 @@ fn group_readable_key_is_refused_by_both_configurations() -> TestResult {
 #[cfg(windows)]
 #[test]
 fn windows_key_file_is_read_without_a_mode_check() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let path = write_file(dir.path(), "agent.key", &leaf.key_pem, WORLD_READABLE_MODE)?;
@@ -79,7 +79,7 @@ fn windows_key_file_is_read_without_a_mode_check() -> TestResult {
 
 #[test]
 fn private_key_file_is_read_and_debug_is_redacted() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let path = write_file(dir.path(), "agent.key", &leaf.key_pem, PRIVATE_MODE)?;
@@ -96,7 +96,7 @@ fn private_key_file_is_read_and_debug_is_redacted() -> TestResult {
 
 #[test]
 fn missing_and_non_utf8_key_files_are_io_errors() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let binary = dir.path().join("binary.key");
     fs::write(&binary, INVALID_UTF8)?;
     set_mode(&binary, PRIVATE_MODE)?;
@@ -108,7 +108,7 @@ fn missing_and_non_utf8_key_files_are_io_errors() -> TestResult {
 
 #[test]
 fn garbage_private_key_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let path = write_file(dir.path(), "garbage.key", "not a key", PRIVATE_MODE)?;
     let key = read_private_key(&path)?;
     assert!(matches!(parse_private_key(&key, &path), Err(ChannelError::Pem { .. })));
@@ -118,7 +118,7 @@ fn garbage_private_key_is_refused() -> TestResult {
 
 #[test]
 fn certificate_files_are_validated() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let empty = write_file(dir.path(), "empty.pem", "", WORLD_READABLE_MODE)?;
     let broken = write_file(dir.path(), "broken.pem", BROKEN_CERTIFICATE_PEM, WORLD_READABLE_MODE)?;
     assert!(matches!(read_certificates(&dir.path().join("absent.pem")), Err(ChannelError::Pem { .. })));
@@ -130,7 +130,7 @@ fn certificate_files_are_validated() -> TestResult {
 
 #[test]
 fn root_store_refuses_an_unparsable_certificate() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let junk = write_file(dir.path(), "junk.pem", JUNK_CERTIFICATE_PEM, WORLD_READABLE_MODE)?;
     assert!(matches!(root_store(&junk), Err(ChannelError::Tls(_))));
     Ok(())
@@ -139,7 +139,7 @@ fn root_store_refuses_an_unparsable_certificate() -> TestResult {
 
 #[test]
 fn mismatched_certificate_and_key_are_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let other = make_authority()?;
     let mut server = server_paths(dir.path(), &platform)?;
@@ -155,7 +155,7 @@ fn mismatched_certificate_and_key_are_refused() -> TestResult {
 
 #[test]
 fn valid_files_build_both_configurations() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     server_config(&server_paths(dir.path(), &platform)?)?;
     client_config(&client_paths(
@@ -171,7 +171,7 @@ fn valid_files_build_both_configurations() -> TestResult {
 
 #[test]
 fn an_agent_ca_bundle_with_two_authorities_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let second = make_authority()?;
     let mut paths = server_paths(dir.path(), &platform)?;
