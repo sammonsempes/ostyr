@@ -16,6 +16,7 @@ pub mod secret;
 pub mod secret_file;
 #[cfg(unix)]
 pub mod signal;
+pub mod strict;
 #[cfg(unix)]
 pub mod trusted_dir;
 #[cfg(target_os = "linux")]
