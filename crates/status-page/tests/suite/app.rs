@@ -32,6 +32,7 @@ fn files(dir: &Path, page: &str, settings: &str) -> Result<AppFile, std::io::Err
         settings_file: dir.join("settings.yaml"),
         audit_file: dir.join("audit.log"),
         pg_file: None,
+        listen_address: None,
     })
 }
 
@@ -151,6 +152,7 @@ fn logged_text(first_value: &str, extra: Option<(&str, &str)>) -> Result<String,
         settings_file: "settings.yaml".into(),
         audit_file: path.clone(),
         pg_file: None,
+        listen_address: None,
     };
     let (first, rest) = AUDIT_DECLARED_KEYS.split_first().ok_or("no declared keys")?;
     let (second, others) = rest.split_first().ok_or("one declared key")?;
