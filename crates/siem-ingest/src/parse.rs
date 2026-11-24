@@ -1,8 +1,12 @@
-use crate::model::EcsEnvelope;
+use crate::model::{DatasetProbe, EcsEnvelope};
 use time::OffsetDateTime;
 
 
 pub const MAX_REASON_CHARS: usize = 200;
+
+
+/// The dataset of the host metrics the agent sends; metrics-ingest consumes it, every other consumer skips it.
+pub const HOST_DATASET: &str = "ostyr.host_metrics";
 
 
 pub fn truncate_reason(reason: &str) -> String {
@@ -26,4 +30,14 @@ pub fn check_message(payload: &[u8], max_message_bytes: usize) -> Result<OffsetD
                 )
             })
     }
+}
+
+
+/// True when `event.dataset` is the host metrics dataset; any unreadable payload is false. The caller has bounded the payload.
+pub fn is_host_metrics(payload: &[u8]) -> bool {
+    serde_json::from_slice::<DatasetProbe>(payload)
+        .ok()
+        .and_then(|probe| probe.event)
+        .and_then(|part| part.dataset)
+        .is_some_and(|dataset| dataset == HOST_DATASET)
 }

@@ -66,6 +66,7 @@ pub fn dead_letter(pipeline: &mut Pipeline, token: AckToken, reason: &str, repor
 /// Acts on a flush: dead letters are published then acknowledged, a refused batch is redelivered, or dead-lettered if unparsable.
 pub fn settle_flat(pipeline: &mut Pipeline, flushed: FlushReport, report: &mut CycleReport) {
     let dead_tokens: HashSet<AckToken> = flushed.dead_letters.iter().map(|dead| dead.token).collect();
+    report.skipped += flushed.skipped;
     let poison = flushed.sink_error.as_deref() == Some(poison_text().as_str());
     for dead in &flushed.dead_letters {
         dead_letter(pipeline, dead.token, &dead.reason, report);
@@ -203,7 +204,10 @@ pub fn run_loop(pipeline: &mut Pipeline, stop: &StopFn) -> LoopReport {
     while !stop() && summary.cycles < MAX_LOOP_CYCLES {
         summary.cycles += 1;
         match run_cycle(pipeline) {
-            Ok(_) => streak = 0,
+            Ok(cycle) => {
+                streak = 0;
+                summary.host_metrics_skipped += cycle.skipped as u64;
+            }
             Err(error) => {
                 let settings = current_config(&pipeline.batcher.settings);
                 warn!(error = %truncate_reason(&error.to_string()), streak, "bus fetch failed, backing off");

@@ -6,6 +6,7 @@ use opentelemetry_proto::tonic::common::v1::{any_value::Value as AnyKind, AnyVal
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
+use siem_ingest::parse::{is_host_metrics, HOST_DATASET};
 use std::collections::BTreeMap;
 
 
@@ -16,9 +17,6 @@ pub const MAX_MOUNTS: usize = 64;
 
 
 pub const MAX_RATIO: f64 = 1.0;
-
-
-pub const HOST_DATASET: &str = "ostyr.host_metrics";
 
 
 pub const HOST_LABEL: &str = "host.id";
@@ -337,13 +335,7 @@ pub fn has_host_dataset(event: &HostEvent) -> bool {
 
 /// The dataset check alone, before any identity is known: an oversized or unreadable payload and any other dataset are refused by name.
 pub fn classify_event(event: &[u8]) -> Result<(), Refusal> {
-    parse_event(event).and_then(|(parsed, _)| {
-        if has_host_dataset(&parsed) {
-            Ok(())
-        } else {
-            Err(Refusal::NotHostMetrics)
-        }
-    })
+    parse_event(event).and_then(|_| if is_host_metrics(event) { Ok(()) } else { Err(Refusal::NotHostMetrics) })
 }
 
 

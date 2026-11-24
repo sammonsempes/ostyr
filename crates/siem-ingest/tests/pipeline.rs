@@ -4,6 +4,7 @@ use core_audit::model::NewEntry;
 use siem_ingest::batcher::{new_batcher, push};
 use siem_ingest::error::{InsertClass, InsertError, PipelineError};
 use siem_ingest::model::{AckAction, CycleReport, Delivery, FlushReport, LoopReport, Message, Pipeline, Wiring};
+use siem_ingest::parse::{is_host_metrics, HOST_DATASET};
 use siem_ingest::pipeline::{new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, settle, MAX_LOOP_CYCLES, POISON_REASON};
 use siem_ingest::settings::open_settings;
 use std::collections::VecDeque;
@@ -63,6 +64,9 @@ const SENT: usize = 3;
 
 
 const TWO: usize = 2;
+
+
+const THREE: usize = 3;
 
 
 const HOLD_BYTES: usize = 150;
@@ -435,7 +439,8 @@ fn the_loop_backs_off_on_a_dead_bus_and_restarts_after_a_success() -> Result<(),
         summary,
         LoopReport {
             cycles: CYCLES,
-            fetch_failures: FAILING_CYCLES
+            fetch_failures: FAILING_CYCLES,
+            host_metrics_skipped: 0
         }
     );
     let expected: Vec<Duration> = [FIRST_DELAY_MS, SECOND_DELAY_MS, THIRD_DELAY_MS]
@@ -528,6 +533,7 @@ fn an_isolated_message_the_batcher_refuses_is_naked_not_left_pending() -> Result
         unacknowledged: vec![TOKEN_ONE, TOKEN_TWO],
         dead_letters: Vec::new(),
         delivered: 0,
+        skipped: 0,
         sink_error: Some(poison_text()),
     };
     let mut report = CycleReport::default();
@@ -535,5 +541,80 @@ fn an_isolated_message_the_batcher_refuses_is_naked_not_left_pending() -> Result
     assert_eq!(lines(&rig)?, ["nak:1", "sink:tenant-a:1", "ack:3", "sink:tenant-a:1", "ack:2"]);
     assert_eq!(report.redelivered, 1);
     assert!(rig.pipeline.pending.is_empty());
+    Ok(())
+}
+
+
+const METRICS_EVENT: &str = r#"{"@timestamp":"2026-01-01T00:00:00Z","event":{"dataset":"ostyr.host_metrics"},"system.cpu.utilization":0.5}"#;
+
+
+const OTHER_DATASET_EVENT: &str = r#"{"@timestamp":"2026-01-01T00:00:00Z","event":{"dataset":"other"}}"#;
+
+
+#[test]
+fn a_host_metric_event_is_acknowledged_with_no_row_and_no_dead_letter() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 3\n")?;
+    enqueue(
+        &rig,
+        vec![
+            delivery("events.tenant-a", METRICS_EVENT, TOKEN_ONE),
+            delivery("events.tenant-a", EVENT, TOKEN_TWO),
+            delivery("events.tenant-a", "not json", TOKEN_THREE),
+        ],
+    )?;
+    let report = run_cycle(&mut rig.pipeline)?;
+    let seen = lines(&rig)?;
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.dead_lettered, 1);
+    assert_eq!(report.acknowledged, THREE);
+    assert!(seen.iter().any(|line| line == "sink:tenant-a:1"));
+    assert!(seen.iter().any(|line| line == "ack:1"));
+    assert_eq!(seen.iter().filter(|line| line.starts_with("dead:")).count(), 1);
+    assert!(rig.pipeline.pending.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn skipped_host_metrics_are_acknowledged_when_the_sink_refuses_the_rest_and_summed_by_the_loop() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 2\nretry_attempts: 1\n")?;
+    *rig.sink_error.lock().map_err(|_| "poisoned")? = Some("down".to_owned());
+    enqueue(
+        &rig,
+        vec![
+            delivery("events.tenant-a", METRICS_EVENT, TOKEN_ONE),
+            delivery("events.tenant-a", EVENT, TOKEN_TWO),
+        ],
+    )?;
+    let summary = run_loop(&mut rig.pipeline, &stop_after(1));
+    let seen = lines(&rig)?;
+    assert_eq!(summary.host_metrics_skipped, 1);
+    assert!(seen.iter().any(|line| line == "ack:1"));
+    assert!(seen.iter().any(|line| line == "nak:2"));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversized_host_metric_event_is_still_dead_lettered() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\nmax_message_bytes: 64\nmax_batch_bytes: 64\nmax_buffered_bytes: 1024\n")?;
+    enqueue(&rig, vec![delivery("events.tenant-a", METRICS_EVENT, TOKEN_ONE)])?;
+    let report = run_cycle(&mut rig.pipeline)?;
+    assert_eq!(report.skipped, 0);
+    assert!(lines(&rig)?.iter().any(|line| line.starts_with("dead:")));
+    Ok(())
+}
+
+
+#[test]
+fn the_dataset_check_reads_only_event_dataset() -> Result<(), Box<dyn Error>> {
+    assert_eq!(HOST_DATASET, "ostyr.host_metrics");
+    assert!(is_host_metrics(METRICS_EVENT.as_bytes()));
+    assert!(!is_host_metrics(OTHER_DATASET_EVENT.as_bytes()));
+    assert!(!is_host_metrics(EVENT.as_bytes()));
+    assert!(!is_host_metrics(b"not json"));
+    assert!(!is_host_metrics(br#"{"event":"ostyr.host_metrics"}"#));
+    assert!(!is_host_metrics(br#"{"event":{"dataset":5}}"#));
+    assert!(!is_host_metrics(br#"{"dataset":"ostyr.host_metrics"}"#));
     Ok(())
 }
