@@ -195,7 +195,13 @@ pub const NANOS_PER_MICRO: i128 = 1_000;
 pub const MAX_PG_SETTINGS_BYTES: usize = 4_096;
 
 
-pub const MAX_STATE_BYTES: u64 = 20;
+pub const MAX_STATE_BYTES: u64 = 85;
+
+
+pub const MAX_STATE_SKEW_SECONDS: i64 = 600;
+
+
+pub const STATE_MODE: u32 = 0o600;
 
 
 pub const STATE_RADIX: u32 = 10;

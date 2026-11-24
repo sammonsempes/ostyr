@@ -74,12 +74,10 @@ fn start(feeds_file: &str, audit_file: &str, state_file: &str, max_passes: u64) 
         context,
     )?);
     let _watcher = watch_files(Arc::clone(&engine), &[PathBuf::from(feeds_file)], DEBOUNCE)?;
-    let pg_file = current_config(&engine)
-        .retro
-        .as_ref()
-        .ok_or("the feeds file has no retro section")?
-        .pg_settings
-        .clone();
+    let first = current_config(&engine);
+    let retro = first.retro.as_ref().ok_or("the feeds file has no retro section")?;
+    let pg_file = retro.pg_settings.clone();
+    let tenant = retro.reader.tenant.clone();
     let pg_text = String::from_utf8(read_limited(&pg_file, MAX_PG_SETTINGS_BYTES as u64)?.to_vec())?;
     let pg_settings = parse_settings(&pg_text, &pg_file.display().to_string())?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -108,8 +106,8 @@ fn start(feeds_file: &str, audit_file: &str, state_file: &str, max_passes: u64) 
         }
         stored
     };
-    let save = |end| write_end(Path::new(state_file), end);
-    let (previous_end, how) = start_of(read_end(Path::new(state_file)));
+    let save = |end| write_end(Path::new(state_file), &tenant, end);
+    let (previous_end, how) = start_of(read_end(Path::new(state_file), &tenant, OffsetDateTime::now_utc()));
     if let Err(error) = writeln!(stdout(), "start {how}") {
         tracing::error!(%error, "stdout closed");
     }

@@ -147,17 +147,30 @@ grep -i 'refus' audit-reload.jsonl | cut -c1-400 || echo 'FAIL no refusal audite
 
 echo "--- restart: the saved window end names a gap, a missing or bad state file is named"
 now_epoch="$(date +%s)"
-printf '%s' "$((now_epoch - 7200))" >gap.state
+printf 'tenant-a %s' "$((now_epoch - 7200))" >gap.state
 /tmp/retro_schedule full.yaml audit-gap.jsonl gap.state 1 | tee gap.out
 grep -q '^start resumed$' gap.out && grep -q 'gap=true' gap.out && echo "PASS restart after downtime longer than the window names gap" || { echo "FAIL gap not named"; failures=$((failures + 1)); }
-check "state file holds the new end" "1" "$(awk -v floor="$now_epoch" '$1 >= floor { print 1 }' gap.state)"
+check "state file holds the new end" "1" "$(awk -v floor="$now_epoch" '$2 >= floor { print 1 }' gap.state)"
 /tmp/retro_schedule full.yaml audit-gap2.jsonl gap.state 1 | tee gap2.out
 grep -q 'gap=false' gap2.out && echo "PASS an immediate restart names no gap" || { echo "FAIL gap named on a covered restart"; failures=$((failures + 1)); }
 /tmp/retro_schedule full.yaml audit-none.jsonl none.state 1 | tee none.out
 grep -q '^start no_previous_run$' none.out && echo "PASS missing state named once" || { echo "FAIL no_previous_run not named"; failures=$((failures + 1)); }
-printf '%s' "$(printf '9%.0s' $(seq 1 21))" >bad.state
+printf 'tenant-a %s' "$(printf '9%.0s' $(seq 1 21))" >bad.state
 /tmp/retro_schedule full.yaml audit-bad.jsonl bad.state 1 | tee bad.out
 grep -q '^start state_unreadable$' bad.out && echo "PASS oversized state named" || { echo "FAIL state_unreadable not named"; failures=$((failures + 1)); }
+printf 'tenant-a 253402300799' >ahead.state
+/tmp/retro_schedule full.yaml audit-ahead.jsonl ahead.state 1 | tee ahead.out
+grep -q '^start state_ahead$' ahead.out && echo "PASS forged future end named" || { echo "FAIL state_ahead not named"; failures=$((failures + 1)); }
+printf 'tenant-b %s' "$((now_epoch - 60))" >other.state
+/tmp/retro_schedule full.yaml audit-other.jsonl other.state 1 | tee other.out
+grep -q '^start state_other_tenant$' other.out && echo "PASS other tenant state named" || { echo "FAIL state_other_tenant not named"; failures=$((failures + 1)); }
+printf 'victim-bytes' >victim.txt
+ln -s victim.txt plant.state.tmp
+printf 'tenant-a %s' "$((now_epoch - 60))" >plant.state
+/tmp/retro_schedule full.yaml audit-plant.jsonl plant.state 1 | tee plant.out
+ls -l plant.state plant.state.tmp victim.txt
+check "planted link left the victim unchanged" "victim-bytes" "$(cat victim.txt)"
+check "state file is a regular file" "regular file" "$(stat -c %F plant.state)"
 
 echo "--- the reader is the loader: refused at start and at reload, old settings kept"
 sed "s/user: retro_reader/user: $CLICKHOUSE_USER/" full.yaml >equal.yaml
