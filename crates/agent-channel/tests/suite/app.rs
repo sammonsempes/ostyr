@@ -14,6 +14,7 @@ use agent_channel::commands::{agent_directory, command_source, paths_of, read_en
 use agent_channel::error::{AppError, ChannelError, SinkError};
 use agent_channel::model::{ClientTlsPaths, Delivered, ExecuteRefusal, Identity, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_channel::proto::EventBatch;
+use agent_channel::relay::HoldDown;
 use agent_channel::server_app::{bind_server, file_events, load_server_file, run_server, run_server_with_clock, ServerFile};
 use agent_channel::sink::{file_sink, load_seen, open_event_store, parse_line, store_batch, EventStore};
 use agent_channel::spool::{
@@ -222,9 +223,9 @@ impl Write for FlakyWriter {
 }
 
 
-struct Fixture {
-    server: ServerFile,
-    agent: AgentFile,
+pub struct Fixture {
+    pub server: ServerFile,
+    pub agent: AgentFile,
 }
 
 
@@ -250,7 +251,7 @@ fn signed(sequence: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 
 
-fn fixture(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
+pub fn fixture(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     let platform = make_platform()?;
     let server_tls = server_paths(dir, &platform)?;
     let agent_tls = client_paths(dir, "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
@@ -286,6 +287,7 @@ fn fixture(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
         agent: AgentFile {
             server: "127.0.0.1:1".to_owned(),
             server_name: SERVER_NAME.to_owned(),
+            relays: Vec::new(),
             certificate: agent_tls.certificate,
             key: agent_tls.key,
             platform_ca: agent_tls.platform_ca,
@@ -368,7 +370,7 @@ async fn run_once(agent: &AgentFile) -> Result<agent_channel::agent_app::AgentOu
 
 
 async fn run_with(agent: &AgentFile, dirs: &SpoolDirs) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
-    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)), None)).await??)
+    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)), None, &HoldDown::default())).await??)
 }
 
 
@@ -473,7 +475,7 @@ async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
         server: "nowhere".to_owned(),
         ..agent.clone()
     };
-    assert!(matches!(run_once(&bad_address).await, Err(error) if error.to_string().contains("invalid server address")));
+    assert!(matches!(run_once(&bad_address).await, Err(error) if error.to_string().contains("endpoint 0 is refused")));
     let gone = dir.path().join("gone").join("file");
     let seq_dir = dir.path().join("seq-dir");
     fs::create_dir(&seq_dir)?;
@@ -1223,6 +1225,7 @@ async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> Test
         spool.batches.clone(),
         &verifier,
         execute.as_ref(),
+        None,
     ))
     .await?;
     assert!(matches!(delivery, Err(ChannelError::RetriesExhausted { .. })));
@@ -1307,6 +1310,7 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
         spool.batches.clone(),
         &verifier,
         execute.as_ref(),
+        None,
     ))
     .await?;
     assert!(delivery.is_err());

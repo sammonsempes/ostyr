@@ -29,6 +29,14 @@ pub const MAX_IDENTITY_COMPONENT_LENGTH: usize = 64;
 pub const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 
+/// Relay addresses an agent file may list.
+pub const MAX_RELAYS: usize = 4;
+
+
+/// After the internal endpoint fails it is skipped this long, and a run on a relay is cut at this bound to try it again.
+pub const PREFERRED_RETRY_SECONDS: u64 = 300;
+
+
 pub const ALPN_H2: &[u8] = b"h2";
 
 

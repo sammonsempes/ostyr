@@ -1,12 +1,13 @@
 use crate::app::{debounce, keep_signals, reload_context, shared_log_audit};
-use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, run_commands};
+use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, run_commands_until};
 use crate::error::{AppError, ChannelError};
 use crate::model::{ClientTlsPaths, CommandRun, Delivered, ExecuteRefusal};
 use crate::proto::EventBatch;
+use crate::relay::{endpoint_addresses, hold_internal, pinned_dialer, select_endpoint, stop_at, tripped, EndpointKind, HoldDown, Selected};
 use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, Spool, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
 use crate::spool_dirs::SpoolDirs;
 use crate::tls::client_config;
-use crate::types::{DialFn, ExecuteFn, PauseFn, SharedClientConfig};
+use crate::types::{DialFn, ExecuteFn, PauseFn, SharedClientConfig, StopFuture};
 use agent_command::cli::seconds_since_epoch;
 use agent_command::keys::open_keys_engine;
 use agent_command::model::{Action, Command, Verifier};
@@ -23,8 +24,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 
 
@@ -47,6 +49,8 @@ pub const WORKER_QUEUE: usize = 64;
 pub struct AgentFile {
     pub server: String,
     pub server_name: String,
+    #[serde(default)]
+    pub relays: Vec<String>,
     pub certificate: PathBuf,
     pub key: PathBuf,
     pub platform_ca: PathBuf,
@@ -66,6 +70,8 @@ pub struct AgentFile {
 pub struct AgentOutcome {
     pub acknowledged: Vec<u64>,
     pub event_failures: u32,
+    pub internal_runs: u32,
+    pub relay_runs: u32,
     pub run: CommandRun,
     pub executed: u64,
 }
@@ -87,7 +93,9 @@ pub struct Worker {
 
 
 pub fn load_agent_file(path: &Path) -> Result<AgentFile, AppError> {
-    Ok(load_file::<AgentFile>(path)?)
+    let file = load_file::<AgentFile>(path)?;
+    endpoint_addresses(&file)?;
+    Ok(file)
 }
 
 
@@ -207,9 +215,20 @@ where
 
 
 pub async fn session_attempt(dial: &DialFn, verifier: &Verifier, execute: &ExecuteFn<'_>) -> Result<CommandRun, crate::error::ChannelError> {
+    session_attempt_until(dial, verifier, execute, Box::pin(std::future::pending())).await
+}
+
+
+/// One command session that ends cleanly when `stop` completes.
+pub async fn session_attempt_until(
+    dial: &DialFn,
+    verifier: &Verifier,
+    execute: &ExecuteFn<'_>,
+    stop: StopFuture,
+) -> Result<CommandRun, crate::error::ChannelError> {
     let channel = dial().await?;
     heartbeat(channel.clone(), AGENT_VERSION).await?;
-    run_commands(channel, verifier, &now_seconds, execute).await
+    run_commands_until(channel, verifier, &now_seconds, execute, stop).await
 }
 
 
@@ -221,11 +240,26 @@ pub async fn run_streams(
     batches: Vec<EventBatch>,
     verifier: &Verifier,
     execute: &ExecuteFn<'_>,
+    cut: Option<Instant>,
 ) -> (Result<Delivered, ChannelError>, Result<CommandRun, AppError>) {
     tokio::join!(
         deliver_events(events_dial, pause, batches),
-        run_attempts(|| session_attempt(commands_dial, verifier, execute), pause)
+        run_attempts(|| session_attempt_until(commands_dial, verifier, execute, Box::pin(stop_at(cut))), pause)
     )
+}
+
+
+/// What a run whose pinned endpoint failed settles with: both streams are cut at once, the claimed spool is kept for the next run.
+pub fn lost_streams() -> (Result<Delivered, ChannelError>, Result<CommandRun, AppError>) {
+    (Err(ChannelError::EndpointLost), Err(AppError::Channel(ChannelError::EndpointLost)))
+}
+
+
+/// An internal run that failed holds the internal endpoint down; a relay run that failed, or any run that ended well, does not.
+pub fn note_run(hold: &HoldDown, selected: &Selected, run: &Result<CommandRun, AppError>) {
+    if selected.kind == EndpointKind::Internal && run.is_err() {
+        hold_internal(hold);
+    }
 }
 
 
@@ -278,14 +312,23 @@ pub async fn settle_and_join(
 
 
 /// Heartbeats and runs the command stream while the spooled events are delivered; a failed event delivery never stops commands.
-pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn, shell: Option<&ExecuteFn<'_>>) -> Result<AgentOutcome, AppError> {
-    let address: SocketAddr = file.server.parse()?;
+pub async fn run_agent(
+    file: &AgentFile,
+    _checked: &SpoolDirs,
+    pause: &PauseFn,
+    shell: Option<&ExecuteFn<'_>>,
+    hold: &HoldDown,
+) -> Result<AgentOutcome, AppError> {
+    let addresses = endpoint_addresses(file)?;
     let config = client_config(&ClientTlsPaths {
         certificate: file.certificate.clone(),
         key: file.key.clone(),
         platform_ca: file.platform_ca.clone(),
     })?;
-    let dial = dialer(address, config, file.server_name.clone());
+    let selected = run_attempts(|| select_endpoint(&addresses, &config, &file.server_name, hold), pause).await?;
+    let (trip_sender, trip_receiver) = watch::channel(false);
+    let trip = Arc::new(trip_sender);
+    let dial = pinned_dialer(selected.address, config, file.server_name.clone(), Arc::clone(&trip));
     let spool = tokio::task::spawn_blocking({
         let owned = file.clone();
         move || claim_spool(&owned)
@@ -303,12 +346,27 @@ pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn, 
     let worker = start_worker(&file.executed_file)?;
     let sender = worker.sender;
     let execute = |command: Command| dispatch_command(&sender, shell, command);
-    let (delivery, run) = run_streams(dial.as_ref(), dial.as_ref(), pause, spool.batches.clone(), &verifier, &execute).await;
+    let streams = run_streams(
+        dial.as_ref(),
+        dial.as_ref(),
+        pause,
+        spool.batches.clone(),
+        &verifier,
+        &execute,
+        selected.cut,
+    );
+    let (delivery, run) = tokio::select! {
+        outcome = streams => outcome,
+        () = tripped(trip_receiver) => lost_streams(),
+    };
     drop(sender);
+    note_run(hold, &selected, &run);
     let (events, executed) = settle_and_join(file, &spool, delivery, worker.handle).await?;
     Ok(AgentOutcome {
         acknowledged: events.acknowledged,
         event_failures: events.failures,
+        internal_runs: u32::from(selected.kind == EndpointKind::Internal),
+        relay_runs: u32::from(selected.kind == EndpointKind::Relay),
         run: run?,
         executed,
     })

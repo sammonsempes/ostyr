@@ -7,7 +7,7 @@ use crate::model::{
     REPORT_PATH, SUBSCRIBE_PATH, UNARY_TIMEOUT_SECONDS,
 };
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
-use crate::types::{AckStream, ClockFn, DialFn, ExecuteFn, PauseFn, SharedClientConfig};
+use crate::types::{AckStream, ClockFn, DialFn, ExecuteFn, PauseFn, SharedClientConfig, StopFuture};
 use agent_command::model::Verifier;
 use agent_command::verify::verify_command;
 use futures_util::{stream, Stream, StreamExt, TryStreamExt};
@@ -233,17 +233,39 @@ pub fn refusal_verdict(digest: Vec<u8>, refusal: ExecuteRefusal) -> CommandVerdi
 
 /// Executes each accepted command at once, reports every verdict, keeps counts and at most `MAX_KEPT_REFUSALS` refusals.
 pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn, execute: &ExecuteFn<'_>) -> Result<CommandRun, ChannelError> {
-    let mut grpc = ready_grpc(channel.clone()).await?;
-    let envelopes = grpc
-        .server_streaming(
-            tonic::Request::new(SubscribeRequest::default()),
-            PathAndQuery::from_static(SUBSCRIBE_PATH),
-            ProstCodec::<SubscribeRequest, CommandEnvelope>::default(),
-        )
-        .await
-        .map_err(status_error)?
-        .into_inner();
+    run_commands_until(channel, verifier, clock, execute, Box::pin(std::future::pending())).await
+}
+
+
+/// Opens the command stream; the readiness and the response headers are one unary-bounded wait.
+pub async fn subscribe(channel: Channel) -> Result<Streaming<CommandEnvelope>, ChannelError> {
+    within_deadline(async {
+        let mut grpc = ready_grpc(channel).await?;
+        let response = grpc
+            .server_streaming(
+                tonic::Request::new(SubscribeRequest::default()),
+                PathAndQuery::from_static(SUBSCRIBE_PATH),
+                ProstCodec::<SubscribeRequest, CommandEnvelope>::default(),
+            )
+            .await
+            .map_err(status_error)?;
+        Ok(response.into_inner())
+    })
+    .await
+}
+
+
+/// Like `run_commands`, and ends cleanly between two envelopes once `stop` completes: an envelope in flight is judged and reported first.
+pub async fn run_commands_until(
+    channel: Channel,
+    verifier: &Verifier,
+    clock: &ClockFn,
+    execute: &ExecuteFn<'_>,
+    stop: StopFuture,
+) -> Result<CommandRun, ChannelError> {
+    let envelopes = subscribe(channel.clone()).await?;
     envelopes
+        .take_until(stop)
         .map_err(status_error)
         .try_fold(CommandRun::default(), move |run, received| {
             judge_and_report(channel.clone(), verifier, clock, execute, received.envelope, run)
