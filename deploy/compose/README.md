@@ -14,7 +14,7 @@ Run `docker compose up -d` from `deploy/compose` with no `COMPOSE_FILE`, `COMPOS
 
 - `init.sh <public-host-name>` runs once, as root: it creates `secrets/` (mode 0700) with a throwaway CA (its key is deleted after signing), the PostgreSQL and API certificates, a random PostgreSQL superuser password, a random password for the unprivileged service role `ostyr_service`, and the account store key. It never overwrites a file, so a rerun changes nothing. The host name goes into the API certificate; it may use `A-Z a-z 0-9 . -` only. To use your own API certificate, replace `secrets/api_tls.crt` and `secrets/api_tls.key` (the key owned by uid 65532, mode 0600); the service reloads it on change. A replaced `api_tls.crt` must still carry `DNS:platform` in its SAN and chain to `secrets/ca.crt`, or the web interface cannot reach the API.
 - `build.sh` builds `ostyr-platform` and `ostyr-auth`, then the image `ostyr-platform:local` (distroless, user 65532) when Docker is present. Without Docker it leaves the build context in `target/deploy-compose/image`.
-- Only the API's TLS port `8443` and the web interface's TLS port `9443` are published, on `0.0.0.0` explicitly (so host-local and IPv6 clients are not all folded into one gateway address and one login rate-limit bucket by `docker-proxy`); the compose network gives dynamic addresses from `172.29.63.128/25` only, so `.10` stays free for `web`. The web service runs the same image (`ostyr-web-ui`), serves TLS with the API certificate and key (`api_tls.*`, so browsers must trust `secrets/ca.crt`), reaches the API at `https://platform:8443` and is the only forwarder the platform trusts (`trusted_forwarders: 172.29.63.10`, the address compose pins for it). `init.sh` adds `DNS:platform` to the API certificate; on an older `secrets/` without it, `init.sh` warns and changes nothing: remove the TLS files to regenerate them. Sign in at `https://<host>:9443/login`. PostgreSQL has no published port and accepts `hostssl` connections from the service role `ostyr_service` to the database `ostyr` only (`config/pg_hba.conf`); the platform never holds the superuser password, which works on the in-container socket only. `config/pg-init-service-role.sh` creates the role (no superuser, no create-role, no create-database) as owner of the database on the first start.
+- Only the API's TLS port `8443`, the web interface's TLS port `9443` and the relay's agent port `7443` are published, on `0.0.0.0` explicitly (so host-local and IPv6 clients are not all folded into one gateway address and one login rate-limit bucket by `docker-proxy`); the compose network gives dynamic addresses from `172.29.63.128/25` only, so `.10` stays free for `web`. The web service runs the same image (`ostyr-web-ui`), serves TLS with the API certificate and key (`api_tls.*`, so browsers must trust `secrets/ca.crt`), reaches the API at `https://platform:8443` and is the only forwarder the platform trusts (`trusted_forwarders: 172.29.63.10`, the address compose pins for it). `init.sh` adds `DNS:platform` to the API certificate; on an older `secrets/` without it, `init.sh` warns and changes nothing: remove the TLS files to regenerate them. Sign in at `https://<host>:9443/login`. PostgreSQL has no published port and accepts `hostssl` connections from the service role `ostyr_service` to the database `ostyr` only (`config/pg_hba.conf`); the platform never holds the superuser password, which works on the in-container socket only. `config/pg-init-service-role.sh` creates the role (no superuser, no create-role, no create-database) as owner of the database on the first start.
 - `deploy/compose` and its `secrets/` must be writable by root only, and so must the whole ancestor chain of the clone from `/` down (a clone under `/home/<user>` is refused, use for example `/srv/ostyr`): `init.sh` and the compose file run as root on this host, and the scripts and config mounted into the containers decide what runs there.
 
 The CA certificate to trust on the clients is `secrets/ca.crt`: `curl --cacert secrets/ca.crt https://ostyr.example.org:8443/health`.
@@ -33,6 +33,21 @@ unset passphrase
 `read -s` and the `printf` builtin keep the passphrase out of the shell history and the process list.
 
 The output carries the TOTP secret to enrol in an authenticator. Other commands (`create`, `enrol`, `roles`) are listed by the tool's usage text.
+
+## Agent path
+
+Three more services carry the event path of an endpoint agent: `relay` (the only one with a published port, `7443`), `gateway` (`ostyr-event-gateway`, reachable from the relay only) and `nats` (NATS 2.15.2 with JetStream on the named volume `natsdata`, TLS, no published port, no monitoring port). An agent connects to `<host>:7443` with mutual TLS 1.3; the relay copies the bytes to the gateway (`172.29.63.11`), which checks the client certificate against `secrets/agent_ca.crt` and `config/revoked.yaml` and publishes each batch to `events.<tenant>`. `init.sh` also makes one proof agent certificate for tenant `default` and agent `lab-agent` (`secrets/agent.crt` and `secrets/agent.key`, signed by a throwaway agent CA whose key is deleted): replace `secrets/agent_ca.crt` with your own agent CA, restart `gateway`, and delete `agent.*` for real agents. An agent verifies the gateway with `secrets/ca.crt` and the name `gateway` (or the host name given to `init.sh`).
+
+NATS cannot declare a stream in a file: create it once, as the `admin` user of `secrets/nats_admin_password`, before the first agent connects (until then the gateway refuses every batch and the agent keeps its spool):
+
+```sh
+docker run --rm --network ostyr_default -v "$PWD/secrets/ca.crt:/ca.crt:ro" natsio/nats-box:0.19.7@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c \
+    nats --server tls://nats:4222 --tlsfirst --tlsca /ca.crt --user admin --password "$(sudo cat secrets/nats_admin_password)" \
+    stream add events --subjects 'events.>' --storage file --retention limits --discard old --max-msgs=-1 --max-bytes=-1 --max-age=-1 \
+    --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge
+```
+
+Read events back with the same container and `stream view events --raw` (add `-t` to `docker run`). The consumer services (siem-ingest, detection) are not in this stack yet.
 
 ## Configuration
 
@@ -61,7 +76,7 @@ The service role `ostyr_service` owns database `ostyr`, so a compromised module 
 docker compose exec postgres psql -U postgres -d postgres -c 'ALTER DATABASE ostyr RESET ALL'
 ```
 
-`init.sh` refuses a partly missing TLS set: remove `ca.crt`, `pg_server.*` and `api_tls.*` together to regenerate it (restart both services after).
+`init.sh` refuses a partly missing TLS set: remove `ca.crt`, `pg_server.*`, `api_tls.*`, `gateway_tls.*`, `nats_server.*`, `agent_ca.crt` and `agent.*` together to regenerate it (restart every service after; a `secrets/` made before the agent path existed is such a partial set).
 
 ## Tests
 

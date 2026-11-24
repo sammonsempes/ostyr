@@ -9,7 +9,7 @@ COMPOSE_DIR="$(dirname "$TESTS_DIR")"
 readonly TESTS_DIR COMPOSE_DIR
 readonly COMPOSE_FILE="${STATIC_TEST_COMPOSE_FILE:-$COMPOSE_DIR/compose.yaml}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
 readonly BLOCK_KEYS="ports volumes services networks"
 failures=0
@@ -50,6 +50,98 @@ web_service() {
 
 playbooks_service() {
     awk '/^  playbooks:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+nats_service() {
+    awk '/^  nats:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+gateway_service() {
+    awk '/^  gateway:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+relay_service() {
+    awk '/^  relay:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+nats_has() {
+    nats_service | grep -q -- "$1"
+}
+
+gateway_has() {
+    gateway_service | grep -q -- "$1"
+}
+
+relay_has() {
+    relay_service | grep -q -- "$1"
+}
+
+nats_is_hardened() {
+    nats_has '^    read_only: true$' && nats_has '^    cap_drop: \[ALL\]$' && nats_has 'no-new-privileges:true' \
+        && nats_has '^    secrets: \[nats_conf, nats_server_key, nats_server_cert\]$' \
+        && nats_has '^    command: \["--config", "/run/secrets/nats_conf"\]$' \
+        && nats_has '^    image: nats:2.15.2-scratch@sha256:[0-9a-f]\{64\}$' \
+        && ! nats_has '^    ports:' && ! nats_has 'cap_add' && ! nats_has 'store_key' && ! nats_has 'gateway_tls_key' && ! nats_has 'nats_gateway_password' \
+        && ! nats_has 'network_mode'
+}
+
+gateway_is_hardened() {
+    gateway_has '^    read_only: true$' && gateway_has '^    cap_drop: \[ALL\]$' && gateway_has 'no-new-privileges:true' \
+        && gateway_has '^    user: 65534:65534$' \
+        && gateway_has '^    secrets: \[pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password\]$' \
+        && gateway_has '^    command: \["/usr/local/bin/ostyr-event-gateway", "/etc/ostyr/gateway-server.yaml", "/etc/ostyr/gateway.yaml"\]$' \
+        && gateway_has '^        ipv4_address: 172.29.63.11$' && gateway_has '^      RUST_LOG: info$' \
+        && ! gateway_has '^    ports:' && ! gateway_has 'cap_add' && ! gateway_has 'store_key' && ! gateway_has 'pg_service_password' \
+        && ! gateway_has 'nats_conf' && ! gateway_has 'api_tls'
+}
+
+relay_is_hardened() {
+    relay_has '^    read_only: true$' && relay_has '^    cap_drop: \[ALL\]$' && relay_has 'no-new-privileges:true' \
+        && relay_has '^    user: 65531:65531$' \
+        && relay_has '^    command: \["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"\]$' \
+        && relay_has '^        ipv4_address: 172.29.63.12$' \
+        && ! relay_has '^    secrets:' && ! relay_has 'cap_add'
+}
+
+gateway_volume_items() {
+    gateway_service | awk '/^    volumes:$/ {inside = 1; next} inside && /^      - / {print; next} {inside = 0}'
+}
+
+relay_volume_items() {
+    relay_service | awk '/^    volumes:$/ {inside = 1; next} inside && /^      - / {print; next} {inside = 0}'
+}
+
+nats_volume_items() {
+    nats_service | awk '/^    volumes:$/ {inside = 1; next} inside && /^      - / {print; next} {inside = 0}'
+}
+
+agent_path_mounts_only_its_volumes() {
+    [[ "$(nats_volume_items)" == '      - natsdata:/data' \
+        && "$(gateway_volume_items)" == '      - ./config:/etc/ostyr:ro'$'\n''      - gatewaystate:/var/lib/ostyr-gateway' \
+        && "$(relay_volume_items)" == '      - ./config:/etc/ostyr:ro'$'\n''      - relaystate:/var/lib/ostyr-relay' ]]
+}
+
+only_the_relay_publishes_the_agent_port() {
+    [[ "$(service_items relay ports)" == '      - "0.0.0.0:7443:7443"' ]] && ! service_has_key nats ports && ! service_has_key gateway ports
+}
+
+agent_path_addresses_agree() {
+    local gateway_address relay_address
+    gateway_address="$(sed -n 's/^        ipv4_address: //p' < <(gateway_service))"
+    relay_address="$(sed -n 's/^        ipv4_address: //p' < <(relay_service))"
+    grep -qx "relay_listen: \"$gateway_address:7443\"" "$COMPOSE_DIR/config/gateway-server.yaml" \
+        && grep -qx "upstream: \"$gateway_address:7443\"" "$COMPOSE_DIR/config/relay.yaml" \
+        && grep -qx 'listen: "0.0.0.0:7443"' "$COMPOSE_DIR/config/relay.yaml" \
+        && grep -qx "relay_sources: \[$relay_address\]" "$COMPOSE_DIR/config/channel-settings.yaml" \
+        && grep -qx 'listen: "127.0.0.1:7444"' "$COMPOSE_DIR/config/gateway-server.yaml"
+}
+
+gateway_files_use_only_its_secrets_and_state() {
+    ! grep -n -e '/run/secrets/' "$COMPOSE_DIR/config/gateway-server.yaml" "$COMPOSE_DIR/config/gateway-settings.yaml" \
+        | grep -v -e '/run/secrets/gateway_tls_cert$' -e '/run/secrets/gateway_tls_key$' -e '/run/secrets/agent_ca$' -e '/run/secrets/pg_ca$' \
+            -e '/run/secrets/nats_gateway_password$' \
+        && ! grep -h -e '^[a-z_]*file: /var/lib\|^commands_dir: ' "$COMPOSE_DIR/config/gateway-server.yaml" "$COMPOSE_DIR/config/gateway.yaml" \
+        | grep -v ': /var/lib/ostyr-gateway/'
 }
 
 playbooks_has() {
@@ -190,8 +282,8 @@ published_port_items() {
         inside && /^ *- / {sub(/^ */, ""); print}' "$COMPOSE_FILE"
 }
 
-only_the_two_ports_are_published() {
-    [[ "$(published_port_items)" == '- "0.0.0.0:8443:8443"'$'\n''- "0.0.0.0:9443:9443"' ]] && ! grep -q '^ *ports:.' "$COMPOSE_FILE"
+only_the_three_ports_are_published() {
+    [[ "$(published_port_items)" == '- "0.0.0.0:8443:8443"'$'\n''- "0.0.0.0:9443:9443"'$'\n''- "0.0.0.0:7443:7443"' ]] && ! grep -q '^ *ports:.' "$COMPOSE_FILE"
 }
 
 service_items() {
@@ -211,20 +303,23 @@ each_service_publishes_only_its_port() {
 every_service_mounts_only_its_volumes() {
     [[ "$(service_items postgres volumes)" == '      - pgdata:/var/lib/postgresql/data'$'\n''      - ./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro'$'\n''      - ./config/pg-init-service-role.sh:/docker-entrypoint-initdb.d/10-service-role.sh:ro' \
         && "$(service_items platform volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - state:/var/lib/ostyr' ]] && web_mounts_only_settings_and_state \
-        && playbooks_mounts_only_settings_and_its_state
+        && playbooks_mounts_only_settings_and_its_state && agent_path_mounts_only_its_volumes
 }
 
 only_postgres_adds_capabilities() {
-    [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add && ! service_has_key playbooks cap_add
+    [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add && ! service_has_key playbooks cap_add \
+        && ! service_has_key nats cap_add && ! service_has_key gateway cap_add && ! service_has_key relay cap_add
 }
 
 definitions_are_pinned() {
     local expected
-    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' 'secrets:' \
+    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' '  natsdata: {}' '  gatewaystate: {}' '  relaystate: {}' 'secrets:' \
         '  pg_password:' '    file: ./secrets/pg_password' '  pg_service_password:' '    file: ./secrets/pg_service_password' \
         '  pg_server_key:' '    file: ./secrets/pg_server.key' '  pg_server_cert:' '    file: ./secrets/pg_server.crt' \
         '  pg_ca:' '    file: ./secrets/ca.crt' '  playbooks_pg_password:' '    file: ./secrets/playbooks_pg_password' '  api_tls_key:' '    file: ./secrets/api_tls.key' '  api_tls_cert:' '    file: ./secrets/api_tls.crt' \
-        '  store_key:' '    file: ./secrets/store.key')"
+        '  store_key:' '    file: ./secrets/store.key' '  gateway_tls_key:' '    file: ./secrets/gateway_tls.key' '  gateway_tls_cert:' '    file: ./secrets/gateway_tls.crt' \
+        '  nats_server_key:' '    file: ./secrets/nats_server.key' '  nats_server_cert:' '    file: ./secrets/nats_server.crt' '  nats_conf:' '    file: ./secrets/nats.conf' \
+        '  agent_ca:' '    file: ./secrets/agent_ca.crt' '  nats_gateway_password:' '    file: ./secrets/nats_gateway_password')"
     [[ "$(sed -n '/^volumes:$/,$p' "$COMPOSE_FILE")" == "$expected" && "$(count_lines '^ *name:')" -eq 1 && "$(count_lines '^name: ostyr$')" -eq 1 ]]
 }
 
@@ -254,7 +349,7 @@ compose_config_accepts() {
     local scratch name
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -267,7 +362,7 @@ parsed_config_passes() {
     local scratch name status=0
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -298,15 +393,16 @@ else
     printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
-    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/mutation-test.sh"
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/mutation-test.sh"
 else
     printf 'info shellcheck is not installed: skipped\n'
 fi
 
 expect "no PostgreSQL port is published" absent grep -e '5432' "$COMPOSE_FILE"
-expect "only the API and web ports are published, in any syntax" only_the_two_ports_are_published
+expect "only the API, web and relay ports are published, in any syntax" only_the_three_ports_are_published
 expect "the web service mounts exactly its settings directory and its state volume" web_mounts_only_settings_and_state
 expect "the platform publishes 8443, web 9443 and postgres nothing" each_service_publishes_only_its_port
+expect "only the relay publishes 7443; nats and the gateway publish nothing" only_the_relay_publishes_the_agent_port
 expect "every service mounts only its own volumes and binds" every_service_mounts_only_its_volumes
 expect "only postgres adds capabilities" only_postgres_adds_capabilities
 expect "the volume and secret definitions are exactly the expected ones" definitions_are_pinned
@@ -324,6 +420,13 @@ expect "init.sh compares an existing password copy with its source and refuses a
     grep -qF 'cmp -s "$SECRETS_DIR/$name" "$SECRETS_DIR/$source"' "$COMPOSE_DIR/init.sh"
 expect "the playbooks service reads the compose tenant" test "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/playbooks.yaml")" = "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/module.yaml")"
 expect "the playbooks database settings name its own password file" grep -qx 'password_file: /run/secrets/playbooks_pg_password' "$COMPOSE_DIR/config/playbooks-pg.yaml"
+expect "the nats service is hardened, pinned by digest, publishes no port and holds only its three secrets" nats_is_hardened
+expect "the gateway service is hardened, runs as 65534 and holds only its five secrets" gateway_is_hardened
+expect "the relay service is hardened, runs as 65531 and holds no secret" relay_is_hardened
+expect "the gateway, relay and channel settings name the same addresses and ports" agent_path_addresses_agree
+expect "the gateway files name only its own secrets and state" gateway_files_use_only_its_secrets_and_state
+expect "the NATS user gateway publishes events.* only and subscribes to its own inbox" \
+    grep -qF 'permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }' "$COMPOSE_DIR/init.sh"
 expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'
 expect "web-ui.yaml serves TLS and verifies the API against the CA" web_yaml_serves_tls_and_verifies_api
 expect "every image is pinned by digest or built locally" images_are_pinned

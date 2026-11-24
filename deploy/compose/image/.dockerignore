@@ -5,3 +5,7 @@
 !state
 !ostyr-playbooks
 !playbooks-state
+!ostyr-event-gateway
+!ostyr-relay
+!gateway-state
+!relay-state

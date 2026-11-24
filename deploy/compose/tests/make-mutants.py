@@ -24,6 +24,13 @@ PROFILED_SERVICE = (
 
 PLAYBOOKS_SECRETS = "    secrets: [playbooks_pg_password, pg_ca]\n"
 PLAYBOOKS_VOLUMES = "      - playbooksstate:/var/lib/ostyr-playbooks\n"
+NATS_SECRETS = "    secrets: [nats_conf, nats_server_key, nats_server_cert]\n"
+NATS_VOLUME = "      - natsdata:/data\n"
+NATS_IMAGE = "    image: nats:2.15.2-scratch@sha256:965fc69c168a39f2bfd63a68361288beb0cc64ca60c8c308bf6c0eb74f463b1d\n"
+GATEWAY_SECRETS = "    secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password]\n"
+GATEWAY_VOLUME = "      - gatewaystate:/var/lib/ostyr-gateway\n"
+RELAY_VOLUME = "      - relaystate:/var/lib/ostyr-relay\n"
+RELAY_PORT = '    ports:\n      - "0.0.0.0:7443:7443"\n'
 
 
 def with_platform_ports(replacement):
@@ -101,6 +108,34 @@ MUTANTS = {
     "playbooks_state_shared": lambda text: replace_once(text, PLAYBOOKS_VOLUMES, "      - state:/var/lib/ostyr-playbooks\n"),
     "playbooks_publish": lambda text: replace_once(text, PLAYBOOKS_SECRETS, PLAYBOOKS_SECRETS + '    ports:\n      - "0.0.0.0:7000:7000"\n'),
     "playbooks_root": lambda text: replace_once(text, "    user: 65533:65533\n", "    user: 0:0\n"),
+    "nats_cap_add": lambda text: replace_once(text, NATS_SECRETS, NATS_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "nats_publish": lambda text: replace_once(text, NATS_SECRETS, NATS_SECRETS + '    ports:\n      - "0.0.0.0:4222:4222"\n'),
+    "nats_secret_extra": lambda text: replace_once(text, NATS_SECRETS, "    secrets: [nats_conf, nats_server_key, nats_server_cert, store_key]\n"),
+    "nats_gateway_secret": lambda text: replace_once(text, NATS_SECRETS, "    secrets: [nats_conf, nats_server_key, nats_server_cert, nats_gateway_password]\n"),
+    "nats_bind_secrets": lambda text: replace_once(text, NATS_VOLUME, NATS_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "nats_state_shared": lambda text: replace_once(text, NATS_VOLUME, "      - pgdata:/data\n"),
+    "nats_unpinned": lambda text: replace_once(text, NATS_IMAGE, "    image: nats:2.15.2-scratch\n"),
+    "nats_writable": lambda text: replace_once(text, NATS_IMAGE + "    restart: unless-stopped\n    read_only: true\n", NATS_IMAGE + "    restart: unless-stopped\n"),
+    "gateway_cap_add": lambda text: replace_once(text, GATEWAY_SECRETS, GATEWAY_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "gateway_publish": lambda text: replace_once(text, GATEWAY_SECRETS, GATEWAY_SECRETS + '    ports:\n      - "0.0.0.0:7443:7443"\n'),
+    "gateway_secret_extra": lambda text: replace_once(
+        text, GATEWAY_SECRETS, "    secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password, store_key]\n"
+    ),
+    "gateway_nats_conf": lambda text: replace_once(
+        text, GATEWAY_SECRETS, "    secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password, nats_conf]\n"
+    ),
+    "gateway_bind_secrets": lambda text: replace_once(text, GATEWAY_VOLUME, GATEWAY_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "gateway_state_shared": lambda text: replace_once(text, GATEWAY_VOLUME, "      - state:/var/lib/ostyr-gateway\n"),
+    "gateway_log_debug": lambda text: replace_once(text, "      RUST_LOG: info\n", "      RUST_LOG: debug\n"),
+    "gateway_root": lambda text: replace_once(text, "    user: 65534:65534\n", "    user: 0:0\n"),
+    "gateway_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.63.11\n", "ipv4_address: 172.29.63.13\n"),
+    "relay_cap_add": lambda text: replace_once(text, RELAY_PORT, RELAY_PORT + "    cap_add: [NET_BIND_SERVICE]\n"),
+    "relay_secret_extra": lambda text: replace_once(text, RELAY_PORT, RELAY_PORT + "    secrets: [store_key]\n"),
+    "relay_publish_extra": lambda text: replace_once(text, RELAY_PORT, RELAY_PORT + '      - "0.0.0.0:7444:7444"\n'),
+    "relay_bind_secrets": lambda text: replace_once(text, RELAY_VOLUME, RELAY_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "relay_state_shared": lambda text: replace_once(text, RELAY_VOLUME, "      - gatewaystate:/var/lib/ostyr-relay\n"),
+    "relay_root": lambda text: replace_once(text, "    user: 65531:65531\n", "    user: 0:0\n"),
+    "relay_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.63.12\n", "ipv4_address: 172.29.63.14\n"),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),
 }
 

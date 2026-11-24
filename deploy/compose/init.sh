@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: sudo deploy/compose/init.sh <public-host-name>
-# Creates deploy/compose/secrets/ once: a throwaway CA (its key is deleted after signing), the PostgreSQL and API certificates, the PostgreSQL
-# superuser and service passwords and the account store key. A file that exists is never touched, so a rerun changes nothing. Runs as root: the files the platform
+# Creates deploy/compose/secrets/ once: a throwaway CA (its key is deleted after signing), the PostgreSQL, API, gateway and NATS certificates, a throwaway
+# agent CA with one proof agent certificate, the PostgreSQL superuser and service passwords, the NATS passwords and configuration and the account store key. A file that exists is never touched, so a rerun changes nothing. Runs as root: the files the platform
 # container reads are handed to uid 65532, the owner the service demands of a secret.
 set -euo pipefail
 export LC_ALL=C
@@ -12,19 +12,23 @@ readonly COMPOSE_DIR
 readonly SECRETS_DIR="$COMPOSE_DIR/secrets"
 readonly SERVICE_UID=65532
 readonly PLAYBOOKS_UID=65533
+readonly GATEWAY_UID=65534
 readonly CERT_DAYS=825
 readonly KEY_BYTES=32
 readonly ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 readonly LABEL_PATTERN="[$ALNUM]([$ALNUM-]{0,61}[$ALNUM])?"
 readonly NAME_PATTERN="^${LABEL_PATTERN}(\\.${LABEL_PATTERN})*\$"
 readonly NAME_MAX=253
-readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt)
+readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt agent_ca.crt agent.key agent.crt)
+readonly AGENT_TENANT=default
+readonly AGENT_ID=lab-agent
 readonly ADDRESS_PATTERN='^[0123456789]+(\.[0123456789]+){3}$'
 readonly OCTET_PATTERN='^(25[012345]|2[01234][0123456789]|1[0123456789][0123456789]|[123456789]?[0123456789])$'
 readonly HEX_LABEL_PATTERN='^0[xX][0123456789abcdefABCDEF]+$'
 readonly DIGITS_PATTERN='^[0123456789]+$'
 readonly BASE64_LENGTH=44
 readonly PLATFORM_CN=ostyr-platform
+readonly NATS_PORT=4222
 readonly CURVE=prime256v1
 readonly LOCK_FILE="$SECRETS_DIR/.lock"
 readonly LOCK_WAIT_DEFAULT=30
@@ -133,6 +137,7 @@ is_present() {
 expected_owner() {
     case "$1" in
     api_tls.key | pg_service_password | store.key) printf '%s:%s' "$SERVICE_UID" "$SERVICE_UID" ;;
+    gateway_tls.key | nats_gateway_password) printf '%s:%s' "$GATEWAY_UID" "$GATEWAY_UID" ;;
     playbooks_pg_password) printf '%s:%s' "$PLAYBOOKS_UID" "$PLAYBOOKS_UID" ;;
     *) printf '0:0' ;;
     esac
@@ -186,6 +191,52 @@ make_random_file() {
     fi
 }
 
+make_nats_conf() {
+    local name=nats.conf temporary gateway_password admin_password
+    gateway_password="$(cat "$SECRETS_DIR/nats_gateway_password")"
+    admin_password="$(cat "$SECRETS_DIR/nats_admin_password")"
+    if is_present "$SECRETS_DIR/$name"; then
+        check_present "$name"
+        if ! grep -qF -e "\"$gateway_password\"" "$SECRETS_DIR/$name" || ! grep -qF -e "\"$admin_password\"" "$SECRETS_DIR/$name"; then
+            printf 'error: %s does not hold nats_gateway_password and nats_admin_password, delete it and run init again\n' "$name" >&2
+            exit 1
+        fi
+    else
+        temporary="$(mktemp "$scratch/$name.XXXXXX")"
+        cat >"$temporary" <<CONF
+server_name: ostyr-nats
+host: 0.0.0.0
+port: $NATS_PORT
+jetstream {
+    store_dir: /data
+}
+tls {
+    cert_file: /run/secrets/nats_server_cert
+    key_file: /run/secrets/nats_server_key
+    handshake_first: true
+}
+accounts {
+    EVENTS {
+        jetstream: enabled
+        users: [{ user: admin, password: "$admin_password" }]
+        exports: [{ service: "events.*", accounts: [GATEWAY] }]
+    }
+    GATEWAY {
+        users: [{
+            user: gateway
+            password: "$gateway_password"
+            permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }
+        }]
+        imports: [{ service: { account: EVENTS, subject: "events.*" } }]
+    }
+}
+CONF
+        chown -h 0:0 "$temporary"
+        chmod 0600 "$temporary"
+        ln "$temporary" "$SECRETS_DIR/$name"
+    fi
+}
+
 make_copy_file() {
     local name="$1" source="$2" temporary
     if is_present "$SECRETS_DIR/$name"; then
@@ -204,10 +255,10 @@ make_copy_file() {
 }
 
 make_leaf() {
-    local name="$1" common_name="$2" alt_names="$3" scratch="$4"
-    printf 'subjectAltName=%s\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n' "$alt_names" >"$scratch/$name.ext"
+    local name="$1" common_name="$2" alt_names="$3" scratch="$4" issuer="${5:-ca}" usage="${6:-serverAuth}"
+    printf 'subjectAltName=%s\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=%s\n' "$alt_names" "$usage" >"$scratch/$name.ext"
     openssl req -newkey ec -pkeyopt "ec_paramgen_curve:$CURVE" -nodes -subj "/CN=$common_name" -keyout "$scratch/$name.key" -out "$scratch/$name.csr"
-    openssl x509 -req -in "$scratch/$name.csr" -CA "$scratch/ca.crt" -CAkey "$scratch/ca.key" -CAserial "$scratch/ca.srl" -CAcreateserial \
+    openssl x509 -req -in "$scratch/$name.csr" -CA "$scratch/$issuer.crt" -CAkey "$scratch/$issuer.key" -CAserial "$scratch/$issuer.srl" -CAcreateserial \
         -days "$CERT_DAYS" -extfile "$scratch/$name.ext" -out "$scratch/$name.crt"
 }
 
@@ -268,27 +319,42 @@ publish_set() {
 }
 
 make_certificates() {
-    local api_names
+    local api_names gateway_names
     if [[ "$host_name" =~ $ADDRESS_PATTERN ]]; then
         api_names="IP:$host_name,DNS:platform,DNS:localhost,IP:127.0.0.1"
+        gateway_names="IP:$host_name,DNS:gateway"
     else
         api_names="DNS:$host_name,DNS:platform,DNS:localhost,IP:127.0.0.1"
+        gateway_names="DNS:$host_name,DNS:gateway"
     fi
     openssl req -x509 -newkey ec -pkeyopt "ec_paramgen_curve:$CURVE" -nodes -days "$CERT_DAYS" -subj "/CN=Ostyr compose CA" \
         -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/ca.key" -out "$scratch/ca.crt"
     make_leaf pg_server postgres DNS:postgres "$scratch"
     make_leaf api_tls "$PLATFORM_CN" "$api_names" "$scratch"
+    make_leaf gateway_tls ostyr-gateway "$gateway_names" "$scratch"
+    make_leaf nats_server nats DNS:nats "$scratch"
+    openssl req -x509 -newkey ec -pkeyopt "ec_paramgen_curve:$CURVE" -nodes -days "$CERT_DAYS" -subj "/CN=Ostyr compose agent CA" \
+        -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/agent_ca.key" -out "$scratch/agent_ca.crt"
+    make_leaf agent "$AGENT_ID" "URI:urn:ostyr:agent:$AGENT_TENANT:$AGENT_ID" "$scratch" agent_ca clientAuth
     verify_scratch
     stage_file ca.crt 0644 root:root
     stage_file pg_server.key 0600 root:root
     stage_file pg_server.crt 0644 root:root
     stage_file api_tls.key 0600 "$SERVICE_UID:$SERVICE_UID"
     stage_file api_tls.crt 0644 root:root
+    stage_file gateway_tls.key 0600 "$GATEWAY_UID:$GATEWAY_UID"
+    stage_file gateway_tls.crt 0644 root:root
+    stage_file nats_server.key 0600 root:root
+    stage_file nats_server.crt 0644 root:root
+    stage_file agent_ca.crt 0644 root:root
+    stage_file agent.key 0600 root:root
+    stage_file agent.crt 0644 root:root
     publish_set
 }
 
 verify_scratch() {
-    openssl verify -CAfile "$scratch/ca.crt" "$scratch/pg_server.crt" "$scratch/api_tls.crt" >/dev/null
+    openssl verify -CAfile "$scratch/ca.crt" "$scratch/pg_server.crt" "$scratch/api_tls.crt" "$scratch/gateway_tls.crt" "$scratch/nats_server.crt" >/dev/null
+    openssl verify -CAfile "$scratch/agent_ca.crt" "$scratch/agent.crt" >/dev/null
 }
 
 missing_tls_files() {
@@ -314,7 +380,7 @@ if [[ -n "$missing" ]]; then
         make_certificates
     else
         printf 'error: the TLS set is incomplete, missing: %s\n' "$missing" >&2
-        printf 'remove every TLS file (ca.crt pg_server.* api_tls.*) from %s to regenerate the set\n' "$SECRETS_DIR" >&2
+        printf 'remove every TLS file (%s) from %s to regenerate the set\n' "${TLS_FILES[*]}" "$SECRETS_DIR" >&2
         exit 1
     fi
 else
@@ -324,10 +390,13 @@ else
 fi
 if ! openssl x509 -in "$SECRETS_DIR/api_tls.crt" -noout -ext subjectAltName | grep -Eq 'DNS:platform(,|$)'; then
     printf 'warning: api_tls.crt has no DNS:platform name, so the web service cannot verify the API\n' >&2
-    printf 'to fix it, remove every TLS file (ca.crt pg_server.* api_tls.*) from %s and rerun init.sh; nothing was changed\n' "$SECRETS_DIR" >&2
+    printf 'to fix it, remove every TLS file (%s) from %s and rerun init.sh; nothing was changed\n' "${TLS_FILES[*]}" "$SECRETS_DIR" >&2
 fi
 make_random_file pg_password base64
 make_random_file pg_service_password base64
 make_random_file store.key raw
 make_copy_file playbooks_pg_password pg_service_password
+make_random_file nats_gateway_password base64
+make_random_file nats_admin_password base64
+make_nats_conf
 printf 'secrets ready in %s\n' "$SECRETS_DIR"

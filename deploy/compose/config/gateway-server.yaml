@@ -1,0 +1,10 @@
+listen: "127.0.0.1:7444"
+relay_listen: "172.29.63.11:7443"
+certificate: /run/secrets/gateway_tls_cert
+key: /run/secrets/gateway_tls_key
+agent_ca: /run/secrets/agent_ca
+revocation_file: /etc/ostyr/revoked.yaml
+settings_file: /etc/ostyr/channel-settings.yaml
+audit_file: /var/lib/ostyr-gateway/channel-audit.log
+events_file: /var/lib/ostyr-gateway/unused-events.log
+commands_dir: /var/lib/ostyr-gateway/commands

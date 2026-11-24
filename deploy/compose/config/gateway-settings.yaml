@@ -1,0 +1,5 @@
+nats_url: "tls://nats:4222"
+nats_tls_first: true
+nats_ca_file: /run/secrets/pg_ca
+nats_user: gateway
+nats_password_file: /run/secrets/nats_gateway_password
