@@ -647,16 +647,10 @@ const ESCAPE_CHARACTER: char = '\u{1B}';
 const LOST_BYTE_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{0}'];
 
 
-const META_SNIFF_BYTES: usize = 1024;
-
-
 const META_TAG: &str = "<meta";
 
 
 const CHARSET_WORD: &str = "charset";
-
-
-const ASCII_LABELS: [&str; 2] = ["us_ascii", "ascii"];
 
 
 const CONTENT_TYPE_HEADER: &str = "content-type";
@@ -665,7 +659,30 @@ const CONTENT_TYPE_HEADER: &str = "content-type";
 const CONTINUATION_MARKER: &str = "charset*";
 
 
-const FIRST_CONTINUATION: &str = "charset*0";
+const FIRST_CONTINUATIONS: [&str; 2] = ["charset*0", "charset*0*"];
+
+
+const PARAMETER_SEPARATOR: char = ';';
+
+
+const QUOTE_CHARACTER: char = '"';
+
+
+const BACKSLASH: char = '\\';
+
+
+const META_ALLOWED_FORMS: &[&str] = &[
+    "<meta charset=\"utf-8\">",
+    "<meta charset=\"utf-8\" />",
+    "<meta charset='utf-8'>",
+    "<meta charset='utf-8' />",
+    "<meta charset=utf-8>",
+    "<meta charset=utf-8 />",
+    "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">",
+    "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" />",
+    "<meta http-equiv='content-type' content='text/html; charset=utf-8'>",
+    "<meta http-equiv='content-type' content='text/html; charset=utf-8' />",
+];
 
 
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
@@ -753,7 +770,11 @@ fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bo
     });
     let escape_allowed = label.is_some_and(is_iso_2022_jp);
     let unlabelled_meta = label.is_none() && has_foreign_meta_charset(text);
-    unknown_label || has_lost_bytes(text, escape_allowed) || has_duplicate_charset(part) || unlabelled_meta || has_orphan_continuation(message, part)
+    unknown_label
+        || has_lost_bytes(text, escape_allowed)
+        || has_duplicate_charset(part)
+        || unlabelled_meta
+        || has_ambiguous_content_type(message, part)
 }
 
 
@@ -776,48 +797,83 @@ fn is_utf8_label(label: &str) -> bool {
 }
 
 
-fn is_plain_label(label: &str) -> bool {
-    let folded = label.to_ascii_lowercase().replace('-', "_");
-    is_utf8_label(label) || ASCII_LABELS.contains(&folded.as_str())
+fn has_foreign_meta_charset(text: &str) -> bool {
+    let collapsed = text.to_ascii_lowercase().split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    let remainder = META_ALLOWED_FORMS.iter().fold(collapsed, |current, form| current.replace(form, " "));
+    let charset_after = remainder.split_once(META_TAG).is_some_and(|(_, tail)| tail.contains(CHARSET_WORD));
+    let unclosed = remainder.rsplit_once(META_TAG).is_some_and(|(_, last)| !last.contains('>'));
+    charset_after || unclosed
 }
 
 
-fn sniff_prefix(text: &str) -> String {
-    let cut = (0..=META_SNIFF_BYTES.min(text.len())).rev().find(|index| text.is_char_boundary(*index));
-    cut.and_then(|end| text.get(..end)).map_or_else(String::new, str::to_ascii_lowercase)
+fn split_parameters(raw: &str) -> Vec<String> {
+    let (mut parameters, last, _) = raw
+        .chars()
+        .fold((Vec::new(), String::new(), false), |(mut done, mut current, quoted), character| {
+            let toggled = quoted != (character == QUOTE_CHARACTER);
+            if character == PARAMETER_SEPARATOR && !quoted {
+                done.push(std::mem::take(&mut current));
+            } else {
+                current.push(character);
+            }
+            (done, current, toggled)
+        });
+    parameters.push(last);
+    parameters
 }
 
 
-fn is_label_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+fn parameter_pairs(raw: &str) -> Vec<(String, String)> {
+    split_parameters(raw)
+        .iter()
+        .filter_map(|parameter| parameter.split_once('='))
+        .map(|(name, value)| {
+            (
+                name.split_whitespace().collect::<String>().to_ascii_lowercase(),
+                value.trim().trim_matches('"').to_ascii_lowercase(),
+            )
+        })
+        .collect()
 }
 
 
-fn meta_label(tag: &str) -> Option<&str> {
-    let declared = tag.split('>').next().unwrap_or(tag);
-    declared.split_once(CHARSET_WORD).and_then(|(_, after)| {
-        let value = after.trim_start().trim_start_matches('=').trim_start().trim_start_matches(['"', '\'']);
-        value.split(|character: char| !is_label_character(character)).next()
+fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) -> impl Iterator<Item = Option<&'a [u8]>> {
+    part.headers()
+        .iter()
+        .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
+        .map(|header| raw_bytes(message, header))
+}
+
+
+fn is_bad_continuation(name: &str) -> bool {
+    let number = name.strip_prefix(CONTINUATION_MARKER).map(|rest| rest.strip_suffix('*').unwrap_or(rest));
+    number.is_some_and(|digits| {
+        digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) || (digits.len() > 1 && digits.starts_with('0'))
     })
 }
 
 
-fn has_foreign_meta_charset(text: &str) -> bool {
-    let prefix = sniff_prefix(text);
-    prefix
-        .split(META_TAG)
-        .skip(1)
-        .any(|tag| meta_label(tag).is_some_and(|label| !is_plain_label(label)))
+fn is_ambiguous_content_type(raw: &str) -> bool {
+    let occurrences = raw.to_ascii_lowercase().matches(CHARSET_WORD).count();
+    let names: Vec<String> = parameter_pairs(raw)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with(CHARSET_WORD))
+        .collect();
+    let continuations: Vec<&String> = names.iter().filter(|name| name.starts_with(CONTINUATION_MARKER)).collect();
+    let has_first = continuations.iter().any(|name| FIRST_CONTINUATIONS.contains(&name.as_str()));
+    let repeated = occurrences > 1 && (names.len() != occurrences || continuations.len() != names.len());
+    raw.contains(BACKSLASH) || repeated || continuations.iter().any(|name| is_bad_continuation(name)) || (!continuations.is_empty() && !has_first)
 }
 
 
-fn has_orphan_continuation(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
-    part.headers()
-        .iter()
-        .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
-        .filter_map(|header| raw_value(message, header))
-        .map(|raw| raw.to_ascii_lowercase().split_whitespace().collect::<String>())
-        .any(|compact| compact.contains(CONTINUATION_MARKER) && !compact.contains(FIRST_CONTINUATION))
+fn has_ambiguous_content_type(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
+    let raws: Vec<Option<&[u8]>> = content_type_raws(message, part).collect();
+    raws.len() > 1
+        || raws.iter().any(|raw| {
+            raw.and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .is_none_or(is_ambiguous_content_type)
+        })
 }
 
 
