@@ -91,6 +91,8 @@ pub enum AuthError {
     KeyFile(#[source] core_config::secret_file::SecretFileError),
     #[error("account store file rejected")]
     StoreFile(#[source] core_config::secret_file::SecretFileError),
+    #[error("account store is {size} bytes, above the {max} byte limit")]
+    StoreTooLarge { size: u64, max: u64 },
     #[error("audit failed: {0}")]
     Audit(#[from] AuditError),
     #[error("system clock is before 1970")]

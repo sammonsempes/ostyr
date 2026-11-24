@@ -4,7 +4,7 @@ use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, Listene
 use crate::oidc::{fingerprint_salt, load_oidc};
 use crate::previous::{record_entry, record_previous, retire_previous, write_previous_key, PREVIOUS_KEY_SAVED};
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
-use crate::state::{check_store_key, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
+use crate::state::{check_store_key, clear_store_cache, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::{append_declared, open_file_log};
@@ -317,6 +317,7 @@ pub fn switch_store(state: &ApiState, context: &ReloadContext, settings: &ApiSet
     if *previous != *next {
         lock_auth(state).sessions.clear();
         state.callback_accounts.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        clear_store_cache(state);
         let moved = format!(
             "accounts_store moved from {} to {}, every session revoked",
             previous.display(),

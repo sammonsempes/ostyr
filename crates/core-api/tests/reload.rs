@@ -15,7 +15,7 @@ use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
 use core_api::model::{ApiConfig, ApiState, Bound, ListenerSetup, OidcFiles, PreparedAudit, Rewatch, StateInputs, Watching};
-use core_api::model::{ApiError, ApiIdentity, ApiSettings};
+use core_api::model::{ApiError, ApiIdentity, ApiSettings, StoreCache};
 use core_api::oidc::{fingerprint_salt, oidc_fingerprint, settle, store_pending, take_login};
 #[cfg(unix)]
 use core_api::previous::{check_previous_slot, read_previous_key};
@@ -1475,6 +1475,11 @@ fn a_moved_accounts_store_revokes_the_sessions_and_audits_it_once() -> TestResul
         .lock()
         .map_err(|_| "poisoned")?
         .insert("oidc:someone".to_owned());
+    *running.state.store_cache.lock().map_err(|_| "poisoned")? = Some(StoreCache {
+        digest: "stale".to_owned(),
+        accounts: AccountMap::new(),
+        credentials: CredentialMap::new(),
+    });
     add_session(&running, "someone")?;
     assert_eq!(lock_auth(&running.state).sessions.len(), 1);
     let plain = module_text(directory, "example", LOOPBACK, "")?;
@@ -1484,6 +1489,7 @@ fn a_moved_accounts_store_revokes_the_sessions_and_audits_it_once() -> TestResul
     let settings = build_settings(load_module(&running.module_file)?)?;
     switch_store(&running.state, &context, &settings);
     assert!(running.state.callback_accounts.lock().map_err(|_| "poisoned")?.is_empty());
+    assert!(running.state.store_cache.lock().map_err(|_| "poisoned")?.is_none());
     assert!(lock_auth(&running.state).sessions.is_empty());
     switch_store(&running.state, &context, &settings);
     let log = fs::read_to_string(directory.join("audit.log"))?;

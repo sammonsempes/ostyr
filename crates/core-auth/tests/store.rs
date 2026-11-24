@@ -8,8 +8,9 @@ use core_auth::error::AuthError;
 use core_auth::model::{Account, TotpEnrolment};
 use core_auth::random::os_random;
 use core_auth::store::{
-    load_accounts, load_accounts_file, lock_path, parent_directory, read_store_locked, save_accounts, save_store_file, save_store_file_with,
-    sync_directory, update_store_file, STORE_VERSION,
+    load_accounts, load_accounts_file, lock_path, parent_directory, read_limited, read_store_bytes, read_store_bytes_locked, read_store_bytes_with,
+    read_store_locked, save_accounts, save_store_file, save_store_file_limited, save_store_file_with, sync_directory, update_store_file, EMPTY_STORE,
+    MAX_STORE_BYTES, STORE_VERSION,
 };
 use core_auth::types::{AccountMap, CredentialMap};
 #[cfg(unix)]
@@ -443,5 +444,92 @@ fn a_relative_path_lives_in_the_current_directory() -> TestResult {
     assert_eq!(parent_directory(Path::new("store.json")), Path::new("."));
     assert_eq!(parent_directory(Path::new("a/store.json")), Path::new("a"));
     assert_eq!(parent_directory(Path::new("/")), Path::new("."));
+    Ok(())
+}
+
+
+struct CountingReader {
+    remaining: usize,
+    reads: usize,
+}
+
+
+impl std::io::Read for CountingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        let count = buffer.len().min(self.remaining);
+        buffer.iter_mut().take(count).for_each(|byte| *byte = b' ');
+        self.remaining -= count;
+        Ok(count)
+    }
+}
+
+
+struct BrokenReader;
+
+
+impl std::io::Read for BrokenReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("injected read failure"))
+    }
+}
+
+
+const BIG_STORE: u64 = 100_000;
+
+
+const SMALL_MAX: u64 = 10;
+
+
+const MAX_READ_CALLS: usize = 8;
+
+
+fn reader_of(length: u64) -> Result<CountingReader, std::num::TryFromIntError> {
+    Ok(CountingReader {
+        remaining: usize::try_from(length)?,
+        reads: 0,
+    })
+}
+
+
+#[test]
+fn a_store_is_read_in_a_few_calls_not_byte_by_byte() -> TestResult {
+    let mut reader = reader_of(BIG_STORE)?;
+    let bytes = read_limited(&mut reader, BIG_STORE, BIG_STORE)?;
+    assert_eq!(u64::try_from(bytes.len())?, BIG_STORE);
+    assert!(reader.reads <= MAX_READ_CALLS);
+    assert!(matches!(read_limited(BrokenReader, 0, SMALL_MAX), Err(AuthError::Io(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_store_above_the_cap_is_refused_with_its_size_and_the_cap() -> TestResult {
+    let at_cap = read_limited(reader_of(SMALL_MAX)?, SMALL_MAX, SMALL_MAX)?;
+    assert_eq!(u64::try_from(at_cap.len())?, SMALL_MAX);
+    let over = read_limited(reader_of(BIG_STORE)?, 0, SMALL_MAX);
+    assert!(matches!(over, Err(AuthError::StoreTooLarge { size, max }) if size == SMALL_MAX + 1 && max == SMALL_MAX));
+    let declared = read_limited(reader_of(SMALL_MAX + 1)?, BIG_STORE, SMALL_MAX);
+    assert!(matches!(declared, Err(AuthError::StoreTooLarge { size, .. }) if size == BIG_STORE));
+    let directory = tempdir()?;
+    let path = directory.path().join("accounts.json");
+    save_store_file(&path, &sample(), &CredentialMap::new(), os_random)?;
+    assert!(matches!(read_store_bytes_with(&path, SMALL_MAX), Err(AuthError::StoreTooLarge { .. })));
+    assert!(read_store_bytes(&path)?.starts_with(b"{"));
+    assert_eq!(read_store_bytes(&directory.path().join("absent.json"))?, EMPTY_STORE);
+    assert!(read_store_bytes_locked(&path)?.starts_with(b"{"));
+    Ok(())
+}
+
+
+#[test]
+fn a_store_above_the_cap_is_never_written() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("accounts.json");
+    let refused = save_store_file_limited(&path, &sample(), &CredentialMap::new(), os_random, sync_directory, SMALL_MAX);
+    assert!(matches!(refused, Err(AuthError::StoreTooLarge { max: SMALL_MAX, .. })));
+    assert_eq!(fs::read_dir(directory.path())?.count(), 0);
+    save_store_file_limited(&path, &sample(), &CredentialMap::new(), os_random, sync_directory, MAX_STORE_BYTES)?;
+    assert_eq!(load_accounts_file(&path)?.len(), 1);
     Ok(())
 }

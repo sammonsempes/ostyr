@@ -1,5 +1,5 @@
 use crate::error::StartupError;
-use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, DetachedPool, StateInputs};
+use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, DetachedPool, StateInputs, StoreCache};
 use crate::oidc::load_oidc;
 use crate::previous::{read_previous_key, record_previous, remove_stale_previous, retire_previous, ROTATION_RESUMED};
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
@@ -20,7 +20,7 @@ use core_auth::rbac::builtin_catalog;
 use core_auth::secretbox::open_secret;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
-use core_auth::store::{load_store_file, read_store_locked, update_store_file};
+use core_auth::store::{load_store, load_store_file, read_store_bytes_locked, update_store_file};
 use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, CredentialMap, StoreKey, VerifyFn};
 use core_config::reload::ReloadContext;
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,6 +135,7 @@ pub fn build_state(
         limits: Arc::new(ArcSwap::from_pointee(config.limits)),
         oidc: ArcSwapOption::new(inputs.oidc.clone()),
         callback_accounts: Mutex::new(BTreeSet::new()),
+        store_cache: Mutex::new(None),
         forwarders: ArcSwap::from_pointee(Vec::new()),
         ignored_forwarding: AtomicU64::new(0),
         detached: detached_pool(MAX_DETACHED_WRITES),
@@ -281,9 +282,33 @@ pub fn memory_only_accounts(app: &ApiState, previous: &AccountMap, stored: &Acco
 }
 
 
-/// Replaces the in-memory accounts and credentials with the file's, read under the store lock, keeping the memory-only `oidc:` accounts.
+/// The store's maps for `bytes`: the cached ones when the bytes hash as the cached digest, else parsed from those same bytes and cached.
+pub fn parse_store_cached(app: &ApiState, bytes: &[u8]) -> Result<(AccountMap, CredentialMap), AuthError> {
+    let digest = content_digest(bytes);
+    let mut cache = app.store_cache.lock().unwrap_or_else(PoisonError::into_inner);
+    match cache.as_ref().filter(|cached| cached.digest == digest) {
+        Some(cached) => Ok((cached.accounts.clone(), cached.credentials.clone())),
+        None => load_store(bytes).inspect(|(accounts, credentials)| {
+            *cache = Some(StoreCache {
+                digest,
+                accounts: accounts.clone(),
+                credentials: credentials.clone(),
+            });
+        }),
+    }
+}
+
+
+/// Forgets the parsed store, so the next read parses (the accounts store moved).
+pub fn clear_store_cache(app: &ApiState) {
+    *app.store_cache.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+
+/// Replaces the in-memory accounts and credentials with the file's, read once under the store lock, keeping the memory-only `oidc:` accounts.
 pub fn refresh_accounts(app: &ApiState, auth: &mut State) -> Result<(), AuthError> {
-    read_store_locked(&app.store_path.load())
+    read_store_bytes_locked(&app.store_path.load())
+        .and_then(|bytes| parse_store_cached(app, &bytes))
         .inspect_err(|error| tracing::warn!(%error, "account store re-read failed, the request is refused"))
         .map(|(mut accounts, credentials)| {
             accounts.extend(memory_only_accounts(app, &auth.accounts, &accounts));
