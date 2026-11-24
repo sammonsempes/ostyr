@@ -621,6 +621,7 @@ fn switching_dial(directory: &std::path::Path, steps: Vec<(&'static str, &'stati
         if let Some((account, leftover)) = steps.get(index) {
             if std::fs::write(owned.join("account"), account)
                 .and_then(|()| std::fs::write(owned.join("leftover-7"), leftover))
+                .and_then(|()| std::fs::write(owned.join("leftover-8"), leftover))
                 .is_err()
             {
                 tracing::warn!("test state not written");
@@ -731,6 +732,49 @@ async fn a_live_process_of_the_old_uid_refuses_the_session_and_nothing_is_swept(
 }
 
 
+const THIRD_SESSION_LOG: [&str; 11] = [
+    "build",
+    "cleanup-7",
+    "spawn-7",
+    "cleanup-7",
+    "build",
+    "running-7",
+    "cleanup-8",
+    "spawn-8",
+    "cleanup-8",
+    "build",
+    "running-8",
+];
+
+
+#[tokio::test(start_paused = true)]
+async fn the_previous_hooks_are_the_last_sessions_and_the_third_session_checks_the_second_uid() -> TestResult {
+    let rising = account_directory("7")?;
+    let (handled, log, slot) = worker_log(
+        text_of(&rising)?,
+        vec![("8", "0"), ("9", "1")],
+        &[SESSION, SECOND_SESSION, "session-3"],
+        true,
+    )
+    .await?;
+    assert_eq!(handled, THREE);
+    assert!(!slot);
+    assert_eq!(log, lines_of(&THIRD_SESSION_LOG));
+    let returning = account_directory("7")?;
+    let (handled_back, log_back, slot_back) = worker_log(
+        text_of(&returning)?,
+        vec![("8", "0"), ("7", "1")],
+        &[SESSION, SECOND_SESSION, "session-3"],
+        true,
+    )
+    .await?;
+    assert_eq!(handled_back, THREE);
+    assert!(!slot_back);
+    assert_eq!(log_back, lines_of(&THIRD_SESSION_LOG));
+    Ok(())
+}
+
+
 #[tokio::test(start_paused = true)]
 async fn a_failed_resolution_ends_that_session_only_and_keeps_the_old_hooks_for_the_next() -> TestResult {
     let directory = account_directory("7")?;
@@ -801,7 +845,7 @@ async fn the_refusal_names_the_previous_uid_and_a_failed_scan_refuses_too() -> T
     assert!(clear_previous(None, &next).await.is_ok());
     std::fs::write(directory.join(format!("leftover-{PREVIOUS_UID}")), "0")?;
     assert!(clear_previous(Some(&earlier), &next).await.is_ok());
-    assert!(!directory.join(format!("cleanup-{PREVIOUS_UID}")).exists());
+    assert_eq!(log_of(&directory)?, lines_of(&["running-7", "running-7"]));
     let cut = SessionHooks {
         running: Box::new(|| {
             Box::pin(std::future::ready(Err(io::Error::other(
