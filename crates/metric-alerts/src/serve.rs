@@ -1,7 +1,7 @@
 //! The `ostyr-metric-alerts` service: rounds over every listed tenant until the interrupt wait resolves; logs on stderr.
 
 use crate::fetch::{agent_for, fetch_points, load_fetch_settings, read_key, FetchError};
-use crate::service::{load_settings, open_rules, open_service_settings, run_pass, serve, Live, PassReport, ServeEnd, MAX_ROUNDS};
+use crate::service::{load_settings, open_rules, open_service_settings_from, run_pass, serve, Live, PassReport, ServeEnd, MAX_ROUNDS};
 use crate::types::{InterruptWait, NowFn, PassFuture, TenantStates, Timestamp, WaitFn};
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS, MIGRATION_NAMESPACE};
@@ -204,8 +204,9 @@ pub async fn serving(
     wait: &WaitFn<'_>,
     interrupt: InterruptWait,
 ) -> Result<Stop, Box<dyn Error>> {
-    let log = Arc::new(open_file_log(&load_settings(settings_file)?.audit_file)?);
-    let settings_engine = Arc::new(open_service_settings(settings_file, boxed_reload_audit(&log))?);
+    let start_settings = load_settings(settings_file)?;
+    let log = Arc::new(open_file_log(&start_settings.audit_file)?);
+    let settings_engine = Arc::new(open_service_settings_from(settings_file, start_settings, boxed_reload_audit(&log))?);
     let first = current_config(&settings_engine);
     let rules_engine = Arc::new(open_rules(&first.rules_file, boxed_reload_audit(&log))?);
     let _settings_watch = watch_files(Arc::clone(&settings_engine), &[settings_file.to_path_buf()], DEBOUNCE)?;

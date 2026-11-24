@@ -12,8 +12,8 @@ use metric_alerts::query::MetricQuery;
 use metric_alerts::round::RoundStates;
 use metric_alerts::serve::{boxed_reload_audit, exit_code, seconds_since_epoch, ServeError};
 use metric_alerts::service::{
-    load_settings, next_now, open_rules, open_service_settings, run_pass, serve, tenant_round, tenants_of, Live, PassReport, ServeEnd,
-    ServiceSettings, MAX_TENANTS,
+    load_settings, next_now, open_rules, open_service_settings, open_service_settings_from, run_pass, serve, tenant_round, tenants_of, Live,
+    PassReport, ServeEnd, ServiceSettings, MAX_TENANTS,
 };
 use metric_alerts::types::{FetchResult, PassFuture, TenantStates, Timestamp};
 use serde_json::Value;
@@ -275,7 +275,29 @@ fn a_live_settings_change_is_applied_and_audited() -> TestResult {
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
     assert_eq!(current_config(&engine).round_seconds, OTHER_ROUND_SECONDS);
     assert_eq!(current_config(&engine).tenants.len(), TWO);
-    assert!(fs::read_to_string(&audit_path)?.contains("round_seconds"));
+    let audit = fs::read_to_string(&audit_path)?;
+    assert!(audit.contains("round_seconds"));
+    assert!(audit.lines().all(|line| line.contains("\"tenant\":\"all\"")), "{audit}");
+    assert!(!audit.contains("\"tenant\":\"platform\""), "{audit}");
+    Ok(())
+}
+
+
+#[test]
+fn the_engine_baseline_is_the_snapshot_the_caller_read_not_a_second_read() -> TestResult {
+    let dir = tempdir()?;
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    let file = put(
+        dir.path(),
+        "s.yaml",
+        &settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"),
+    )?;
+    let snapshot = load_settings(&file)?;
+    fs::write(&file, settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/swapped.yaml"))?;
+    let error = open_service_settings_from(&file, snapshot, boxed_reload_audit(&log))
+        .err()
+        .ok_or("expected a refusal")?;
+    assert!(error.to_string().contains("start-only"), "{error}");
     Ok(())
 }
 

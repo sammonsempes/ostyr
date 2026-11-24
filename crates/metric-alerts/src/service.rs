@@ -41,7 +41,7 @@ pub const MAX_ROUNDS: u64 = 10_000_000;
 pub const MODULE: &str = "metric-alerts";
 
 
-pub const AUDIT_TENANT: &str = "platform";
+pub const AUDIT_TENANT: &str = "all";
 
 
 pub const SETTINGS_REQUEST: &str = "settings";
@@ -205,6 +205,16 @@ pub fn reload_context(file: &Path, request: &str) -> ReloadContext {
 /// The first read is the baseline; a later reload may change only the live values, any other change is refused and audited.
 pub fn open_service_settings(file: &Path, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
     let baseline = load_settings(file)?;
+    open_service_settings_from(file, baseline, audit)
+}
+
+
+/// The engine of one settings snapshot: the caller read the file once and that value is the baseline.
+pub fn open_service_settings_from(
+    file: &Path,
+    baseline: ServiceSettings,
+    audit: Box<SharedAuditFn>,
+) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
     open_engine(
         settings_loader(file.to_path_buf(), baseline),
         settings_state,
