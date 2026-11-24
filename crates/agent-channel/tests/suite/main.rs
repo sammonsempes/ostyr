@@ -33,6 +33,7 @@ mod spool_refused;
 #[cfg(unix)]
 mod spool_sibling;
 mod state;
+mod status_wire;
 mod tls;
 mod types;
 mod unary;

@@ -300,10 +300,10 @@ pub enum AppError {
     SpoolDir { path: PathBuf, reason: SpoolDirReason },
     #[error("spool directory ACL refused: {0}")]
     SpoolDirAcl(#[from] sys_windows::types::DirAclError),
-    #[error("agent session abandoned after {attempts} consecutive failed attempts")]
+    #[error("agent session abandoned after {attempts} consecutive failed attempts, last error: {last:?}")]
     AttemptsExhausted {
         attempts: u32,
-        #[source]
-        last: Option<Box<ChannelError>>,
+        rate_refused: bool,
+        last: Option<String>,
     },
 }
