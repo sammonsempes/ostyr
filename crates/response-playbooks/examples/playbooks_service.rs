@@ -1,3 +1,4 @@
+use alerts::backend::LOG_IGNORED_CRATE;
 use alerts::error::StoreError;
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
@@ -132,7 +133,8 @@ async fn one_round(
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(std::io::stderr).finish())?;
+    tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [settings_file] => tokio::runtime::Builder::new_current_thread()

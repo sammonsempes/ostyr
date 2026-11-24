@@ -8,6 +8,7 @@ use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
+use std::str::FromStr;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
@@ -622,16 +623,17 @@ pub async fn read_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, siz
 }
 
 
-/// A row position as PostgreSQL prints it, `(block,offset)`: two short runs of digits.
+/// A row position as PostgreSQL prints it, `(block,offset)`: a `u32` block and a `u16` offset in plain digits.
 pub fn is_tid(text: &str) -> bool {
     text.strip_prefix('(')
         .and_then(|rest| rest.strip_suffix(')'))
         .and_then(|inner| inner.split_once(','))
-        .is_some_and(|(block, offset)| {
-            [block, offset]
-                .iter()
-                .all(|part| (1..=MAX_TID_PART_DIGITS).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit()))
-        })
+        .is_some_and(|(block, offset)| digits_within::<u32>(block) && digits_within::<u16>(offset))
+}
+
+
+pub fn digits_within<Number: FromStr>(part: &str) -> bool {
+    (1..=MAX_TID_PART_DIGITS).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit()) && part.parse::<Number>().is_ok()
 }
 
 

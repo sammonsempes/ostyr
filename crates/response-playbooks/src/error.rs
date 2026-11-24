@@ -138,6 +138,8 @@ pub enum RoundError {
     Trace(#[source] io::Error),
     #[error("cannot append the round record: {0}")]
     Audit(#[from] core_audit::error::AuditError),
+    #[error("the feed answered {deleted} rows deleted for a page of {expected}")]
+    AckCount { deleted: usize, expected: usize },
 }
 
 

@@ -19,11 +19,12 @@ use response_playbooks::error::RoundError;
 use response_playbooks::feed::{alert_json, summary_value};
 use response_playbooks::model::{ConditionOutcome, Mode, Trace, TraceEvent};
 use response_playbooks::service::{
-    backoff, bounded_name, list, load_settings, next_failures, next_replays, open_service_settings, outcome_of, round_entry, run_id, run_round,
-    serve, shown_id, sort_page, start_only_changed, validate_settings, Live, Outcome, Replays, ServiceSettings, Sorted, INVALID_ID,
-    MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
+    backoff, bounded_name, is_loud, is_replay, list, load_settings, log_partial_ack, next_failures, next_replays, open_service_settings, outcome_of,
+    round_entry, run_id, run_round, serve, shown_id, sort_page, start_only_changed, validate_settings, Live, Outcome, Replays, ServiceSettings,
+    Sorted, INVALID_ID, MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::future::ready;
 use std::io::{self, Write};
@@ -42,6 +43,15 @@ const THREE: usize = 3;
 
 
 const FIVE: usize = 5;
+
+
+const FOUR: u32 = 4;
+
+
+const EIGHT: u32 = 8;
+
+
+const SIXTEEN: u32 = 16;
 
 
 const BIG_NAME: usize = 10_000;
@@ -96,6 +106,8 @@ pub struct Fake {
     pub fail_feed: Mutex<bool>,
     pub fail_ack: Mutex<bool>,
     pub fail_audit: Mutex<bool>,
+    pub short_ack: Mutex<bool>,
+    pub over_ack: Mutex<bool>,
 }
 
 
@@ -178,8 +190,11 @@ pub fn handle(fake: &Fake, sql: &'static str, params: &[String]) -> Result<Vec<R
             let ids: Vec<String> = serde_json::from_str(first).map_err(|_bad| server_error())?;
             let mut rows = lock(&fake.rows);
             let before = rows.len();
-            rows.retain(|row| row.first().is_none_or(|id| !ids.contains(id)));
-            Ok(vec![vec![(before - rows.len()).to_string()]])
+            if !*lock(&fake.short_ack) {
+                rows.retain(|row| row.first().is_none_or(|id| !ids.contains(id)));
+            }
+            let extra = usize::from(*lock(&fake.over_ack));
+            Ok(vec![vec![(before - rows.len() + extra).to_string()]])
         }
     } else {
         Err(server_error())
@@ -274,6 +289,8 @@ pub fn env_with(settings: impl FnOnce(&mut ServiceSettings)) -> Result<Env, Box<
         fail_feed: Mutex::new(false),
         fail_ack: Mutex::new(false),
         fail_audit: Mutex::new(false),
+        short_ack: Mutex::new(false),
+        over_ack: Mutex::new(false),
     };
     Ok(Env {
         dir,
@@ -770,7 +787,8 @@ async fn a_round_whose_rows_have_no_readable_seq_has_no_range() -> TestResult {
 #[tokio::test]
 async fn consecutive_failed_deletes_stop_appending_after_the_replay_cap_and_resume_once_deleted() -> TestResult {
     let env = env()?;
-    put(&env, vec![row_of(&whoami("e1"), FIRST_SEQ, 0)]);
+    let e1 = whoami("e1");
+    put(&env, vec![row_of(&e1, FIRST_SEQ, 0)]);
     *lock(&env.fake.fail_ack) = true;
     let mut replays = Replays::default();
     let rounds = MAX_REPLAYED_ROUNDS as usize + TWO;
@@ -781,7 +799,7 @@ async fn consecutive_failed_deletes_stop_appending_after_the_replay_cap_and_resu
     assert_eq!(
         replays,
         Replays {
-            range: Some((FIRST_SEQ, FIRST_SEQ)),
+            ids: ids_of(&[&e1.id]),
             records: MAX_REPLAYED_ROUNDS
         }
     );
@@ -796,15 +814,77 @@ async fn consecutive_failed_deletes_stop_appending_after_the_replay_cap_and_resu
 }
 
 
+pub fn ids_of(ids: &[&str]) -> BTreeSet<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+
 #[test]
-fn a_new_range_restarts_the_replay_count() -> TestResult {
-    let low = Some((1, FIRST_SEQ));
-    let high = Some((SEQ_THREE, SEQ_FOUR));
-    let first = next_replays(&Replays::default(), low);
-    let again = next_replays(&first, low);
-    let other = next_replays(&again, high);
-    assert_eq!((first.records, again.records, other.records), (1, TWO as u32, 1));
-    assert_eq!(other.range, high);
+fn a_page_with_an_id_outside_the_recorded_set_restarts_the_replay_count() -> TestResult {
+    let low = ids_of(&["a", "b"]);
+    let first = next_replays(&Replays::default(), &low);
+    let again = next_replays(&first, &low);
+    let shrunk = next_replays(&again, &ids_of(&["a"]));
+    let grown = next_replays(&shrunk, &low);
+    assert_eq!(
+        (first.records, again.records, shrunk.records, grown.records),
+        (1, TWO as u32, THREE as u32, 1)
+    );
+    assert_eq!(grown.ids, low);
+    let capped = Replays {
+        ids: low.clone(),
+        records: MAX_REPLAYED_ROUNDS,
+    };
+    assert!(is_replay(&capped, &low) && is_replay(&capped, &ids_of(&["a"])));
+    assert!(!is_replay(&capped, &ids_of(&["a", "late"])));
+    assert!(!is_replay(
+        &Replays {
+            ids: low.clone(),
+            records: 1
+        },
+        &low
+    ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_late_row_inside_the_range_is_named_in_a_record_before_its_row_is_deleted() -> TestResult {
+    let env = env()?;
+    let (x1, x2, x3) = (whoami("x1"), whoami("x2"), whoami("x3"));
+    put(&env, vec![row_of(&x1, SEQ_THREE, 0), row_of(&x3, FIRST_SEQ, 0)]);
+    *lock(&env.fake.fail_ack) = true;
+    let mut replays = Replays::default();
+    for _attempt in 0..=MAX_REPLAYED_ROUNDS {
+        assert!(matches!(round_with(&env, &mut replays).await, Err(RoundError::Store(_))));
+    }
+    assert_eq!(recorded(&env).len(), MAX_REPLAYED_ROUNDS as usize);
+    lock(&env.fake.rows).insert(1, row_of(&x2, SEQ_FOUR, 0));
+    *lock(&env.fake.fail_ack) = false;
+    round_with(&env, &mut replays).await?;
+    assert_eq!(left(&env), 0);
+    let entries = recorded(&env);
+    assert_eq!(entries.len(), MAX_REPLAYED_ROUNDS as usize + 1);
+    let last = entries.last().ok_or("no record")?;
+    assert_eq!(last.request_id, "round-3-5");
+    [&x1, &x2, &x3].iter().try_for_each(|alert| -> TestResult {
+        assert!(param(last, "acknowledged")?.contains(&alert.id));
+        Ok(())
+    })?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_delete_count_above_the_page_is_a_named_error_and_keeps_the_replay_state() -> TestResult {
+    let env = env()?;
+    put(&env, vec![row_of(&whoami("e1"), FIRST_SEQ, 0)]);
+    *lock(&env.fake.over_ack) = true;
+    let mut replays = Replays::default();
+    let failed = round_with(&env, &mut replays).await;
+    assert!(matches!(failed, Err(RoundError::AckCount { deleted: TWO, expected: 1 })));
+    assert_eq!(replays.records, 1);
+    assert!(failed.err().ok_or("no error")?.to_string().contains("2 rows deleted for a page of 1"));
     Ok(())
 }
 
@@ -886,5 +966,39 @@ fn nothing_in_the_service_can_reach_a_connector() -> TestResult {
         .for_each(|name| assert!(!text.contains(name), "{file} names {name}"));
         Ok(())
     })?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_partial_delete_is_not_a_success_and_keeps_the_replay_count() -> TestResult {
+    let env = env()?;
+    let e1 = whoami("e1");
+    put(&env, vec![row_of(&e1, FIRST_SEQ, 0)]);
+    *lock(&env.fake.short_ack) = true;
+    let mut replays = Replays::default();
+    round_with(&env, &mut replays).await?;
+    assert_eq!(
+        replays,
+        Replays {
+            ids: ids_of(&[&e1.id]),
+            records: 1
+        }
+    );
+    assert_eq!(left(&env), 1);
+    round_with(&env, &mut replays).await?;
+    assert_eq!(replays.records, TWO as u32);
+    *lock(&env.fake.short_ack) = false;
+    round_with(&env, &mut replays).await?;
+    assert_eq!((left(&env), replays), (0, Replays::default()));
+    log_partial_ack(None, 0, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_failure_streak_is_loud_at_each_power_of_two_from_the_second_failure() -> TestResult {
+    let loud: Vec<u32> = (0..=SIXTEEN).filter(|failures| is_loud(*failures)).collect();
+    assert_eq!(loud, [TWO as u32, FOUR, EIGHT, SIXTEEN]);
     Ok(())
 }
