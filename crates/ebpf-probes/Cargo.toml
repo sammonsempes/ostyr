@@ -6,10 +6,21 @@ license.workspace = true
 publish = false
 
 [features]
-ebpf-live = ["dep:aya"]
+ebpf-load = ["dep:tracing"]
+ebpf-live-test = ["ebpf-load", "dep:tracing-subscriber"]
 
 [dependencies]
-aya = { version = "=0.16.0", default-features = false, optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "=0.16.0", default-features = false }
+aya-obj = "=0.6.0"
+rustix = { version = "1.1", features = ["fs"] }
+
+[[example]]
+name = "exec_probe"
+required-features = ["ebpf-live-test"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

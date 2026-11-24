@@ -46,7 +46,11 @@ jobs:
           "$BIN/llvm-objcopy" --dump-section "license=$SCRATCH/license.bin" "$OBJECT" "$SCRATCH/copy.o"
           printf 'Dual MIT/GPL\0' > "$SCRATCH/expected.bin"
           cmp "$SCRATCH/license.bin" "$SCRATCH/expected.bin"
-      - name: Lint the host crate with the live feature
-        run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-live -- -D warnings
-      - name: Run the live exec test as root, failing when it cannot run
-        run: sudo env "PATH=$PATH" "HOME=$HOME" "EBPF_PROBES_OBJECT=$PWD/crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel" cargo test --locked -p ebpf-probes --features ebpf-live --test live_exec
+      - name: Lint the host crate with the loader feature
+        run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-load -- -D warnings
+      - name: Lint the host crate with the live test feature
+        run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-live-test -- -D warnings
+      - name: Install the object root-owned at the path the loader reads
+        run: sudo install -D -m 644 -o root -g root crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel /usr/lib/ostyr/ebpf/exec.o
+      - name: Run the live tests as root, failing when they cannot run
+        run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test --locked -p ebpf-probes --features ebpf-live-test --test live_exec
