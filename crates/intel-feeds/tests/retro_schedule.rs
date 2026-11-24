@@ -156,10 +156,10 @@ fn a_good_round_moves_the_cursor_and_a_failed_one_does_not() -> TestResult {
     assert_eq!(first.previous_end, Some(T0));
     assert_eq!(first.last_started, Some(T0));
     assert!(matches!(outcome, RoundOutcome::Done { report, .. } if report.inserted == 0));
-    let (_second, _) = round(&section(), first, after(INTERVAL as i64), &ok, &|_, _| Ok(0));
+    let (_second, _) = round(&section(), first.clone(), after(INTERVAL as i64), &ok, &|_, _| Ok(0));
     assert_eq!(calls.borrow().get(1).map(|call| call.2), Some(Some(T0)));
     let failing = |_: &_, _, _, _| Err(RetroError::Timeout);
-    let (kept, failed) = round(&section(), first, after(INTERVAL as i64), &failing, &|_, _| Ok(0));
+    let (kept, failed) = round(&section(), first.clone(), after(INTERVAL as i64), &failing, &|_, _| Ok(0));
     assert_eq!(kept.previous_end, Some(T0));
     assert_eq!(kept.last_started, Some(after(INTERVAL as i64)));
     assert!(matches!(failed, RoundOutcome::Failed(RoundFailure::Run(RetroError::Timeout))));
@@ -197,6 +197,19 @@ fn hooks_run<'a>(
     run: &'a intel_feeds::types::RunRetroFn<'a>,
     insert: &'a intel_feeds::types::AlertInsertFn<'a>,
 ) -> Hooks<'a> {
+    hooks_saving(config, clock, wait, stop, run, insert, &|_, _| Ok(()))
+}
+
+
+fn hooks_saving<'a>(
+    config: &'a (dyn Fn() -> Option<Arc<FeedsFile>> + 'a),
+    clock: &'a (dyn Fn() -> OffsetDateTime + 'a),
+    wait: &'a (dyn Fn(Duration) + 'a),
+    stop: &'a (dyn Fn() -> bool + 'a),
+    run: &'a intel_feeds::types::RunRetroFn<'a>,
+    insert: &'a intel_feeds::types::AlertInsertFn<'a>,
+    save: &'a intel_feeds::types::SaveEndFn<'a>,
+) -> Hooks<'a> {
     Hooks {
         snapshot: config,
         clock,
@@ -204,6 +217,7 @@ fn hooks_run<'a>(
         stop,
         run,
         insert,
+        save,
     }
 }
 
@@ -232,17 +246,17 @@ fn passes_wait_when_idle_or_not_due_and_run_when_due() -> TestResult {
     let (state, outcome) = pass(&hooks, ScheduleState::default());
     assert!(outcome.is_none());
     *current.borrow_mut() = Some(without);
-    pass(&hooks, state);
+    pass(&hooks, state.clone());
     assert_eq!(waited.borrow().as_slice(), [Duration::from_secs(WAIT_SLICE_SECONDS); PAIR]);
     *current.borrow_mut() = Some(Arc::clone(&with_section));
     let (started, done) = pass(&hooks, state);
     assert!(matches!(done, Some(RoundOutcome::Done { .. })));
     now.set(after(TEN));
-    let (same, idle) = pass(&hooks, started);
+    let (same, idle) = pass(&hooks, started.clone());
     assert!(idle.is_none() && same == started);
     assert_eq!(waited.borrow().last(), Some(&Duration::from_secs(WAIT_SLICE_SECONDS)));
     now.set(after(INTERVAL as i64 - 1));
-    pass(&hooks, started);
+    pass(&hooks, started.clone());
     assert_eq!(waited.borrow().last(), Some(&Duration::from_secs(1)));
     now.set(after(INTERVAL as i64));
     let (later, again) = pass(&hooks, started);
@@ -281,7 +295,7 @@ fn the_schedule_stops_on_the_stop_test_or_after_its_pass_cap_and_picks_up_a_relo
     };
     let insert = |_: &_, _: &_| Ok(0);
     let hooks = hooks_run(&snapshot, &clock, &wait, &never, &run, &insert);
-    let end_state = run_schedule(&hooks, PASS_CAP, &mut |outcome| {
+    let end_state = run_schedule(&hooks, ScheduleState::default(), PASS_CAP, &mut |outcome| {
         seen.borrow_mut().push(matches!(outcome, RoundOutcome::Done { .. }))
     });
     assert!(runs.get() > PAIR_RUNS);
@@ -293,8 +307,134 @@ fn the_schedule_stops_on_the_stop_test_or_after_its_pass_cap_and_picks_up_a_relo
     };
     let stopping = hooks_run(&snapshot, &clock, &wait, &counting_stop, &run, &insert);
     let before = runs.get();
-    run_schedule(&stopping, PASS_CAP, &mut |_| ());
+    run_schedule(&stopping, ScheduleState::default(), PASS_CAP, &mut |_| ());
     assert_eq!(runs.get(), before + 1);
     assert_eq!(passes.get(), PAIR_RUNS);
+    Ok(())
+}
+
+
+#[test]
+fn a_good_round_saves_its_end_a_failed_round_saves_nothing_and_a_failed_save_does_not_stop_the_schedule() -> TestResult {
+    let current: RefCell<Option<Arc<FeedsFile>>> = RefCell::new(Some(Arc::new(FeedsFile {
+        retro: Some(section()),
+        ..FeedsFile::default()
+    })));
+    let saved = RefCell::new(Vec::new());
+    let broken = Cell::new(false);
+    let failing = Cell::new(false);
+    let snapshot = || current.borrow().clone();
+    let clock = || T0;
+    let wait = |_: Duration| ();
+    let never = || false;
+    let run = |_: &_, start, end, _| {
+        if failing.get() {
+            Err(RetroError::Timeout)
+        } else {
+            Ok(run_of(start, end, None))
+        }
+    };
+    let insert = |_: &_, _: &_| Ok(0);
+    let save = |tenant: &str, end| {
+        saved.borrow_mut().push((tenant.to_owned(), end));
+        if broken.get() {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        } else {
+            Ok(())
+        }
+    };
+    let hooks = hooks_saving(&snapshot, &clock, &wait, &never, &run, &insert, &save);
+    let (state, done) = pass(&hooks, ScheduleState::default());
+    assert!(matches!(done, Some(RoundOutcome::Done { .. })));
+    assert_eq!(saved.borrow().as_slice(), [("tenant-a".to_owned(), T0)]);
+    failing.set(true);
+    pass(&hooks, ScheduleState::default());
+    assert_eq!(saved.borrow().len(), 1);
+    failing.set(false);
+    broken.set(true);
+    let (after_broken, again) = pass(&hooks, ScheduleState::default());
+    assert!(matches!(again, Some(RoundOutcome::Done { .. })));
+    assert_eq!(after_broken.previous_end, state.previous_end);
+    assert_eq!(saved.borrow().len(), PAIR);
+    Ok(())
+}
+
+
+#[test]
+fn the_first_round_after_a_restart_gets_the_saved_end_as_its_previous_end() -> TestResult {
+    let current: RefCell<Option<Arc<FeedsFile>>> = RefCell::new(Some(Arc::new(FeedsFile {
+        retro: Some(section()),
+        ..FeedsFile::default()
+    })));
+    let seen = RefCell::new(Vec::new());
+    let passes = Cell::<u32>::default();
+    let snapshot = || current.borrow().clone();
+    let clock = || T0;
+    let wait = |_: Duration| ();
+    let stop = || {
+        passes.set(passes.get() + 1);
+        passes.get() > 1
+    };
+    let run = |_: &_, start, end, previous| {
+        seen.borrow_mut().push(previous);
+        Ok(run_of(start, end, None))
+    };
+    let insert = |_: &_, _: &_| Ok(0);
+    let hooks = hooks_run(&snapshot, &clock, &wait, &stop, &run, &insert);
+    let initial = ScheduleState {
+        previous_end: Some(after(-HOUR)),
+        ..ScheduleState::default()
+    };
+    run_schedule(&hooks, initial, PASS_CAP, &mut |_| ());
+    assert_eq!(seen.borrow().as_slice(), [Some(after(-HOUR))]);
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_that_changes_the_tenant_drops_the_previous_end_and_saves_under_the_new_tenant() -> TestResult {
+    let other = {
+        let mut changed = section();
+        changed.reader.tenant = "tenant-b".to_owned();
+        Arc::new(FeedsFile {
+            retro: Some(changed),
+            ..FeedsFile::default()
+        })
+    };
+    let current: RefCell<Option<Arc<FeedsFile>>> = RefCell::new(Some(Arc::new(FeedsFile {
+        retro: Some(section()),
+        ..FeedsFile::default()
+    })));
+    let seen = RefCell::new(Vec::new());
+    let saved = RefCell::new(Vec::new());
+    let now = Cell::new(T0);
+    let snapshot = || current.borrow().clone();
+    let clock = || now.get();
+    let wait = |_: Duration| ();
+    let never = || false;
+    let run = |_: &_, start, end, previous| {
+        seen.borrow_mut().push(previous);
+        Ok(run_of(start, end, None))
+    };
+    let insert = |_: &_, _: &_| Ok(0);
+    let save = |tenant: &str, end| {
+        saved.borrow_mut().push((tenant.to_owned(), end));
+        Ok(())
+    };
+    let hooks = hooks_saving(&snapshot, &clock, &wait, &never, &run, &insert, &save);
+    let initial = ScheduleState {
+        tenant: Some("tenant-a".to_owned()),
+        previous_end: Some(after(-HOUR)),
+        ..ScheduleState::default()
+    };
+    let (first, _) = pass(&hooks, initial);
+    *current.borrow_mut() = Some(other);
+    now.set(after(INTERVAL as i64));
+    let (second, _) = pass(&hooks, first);
+    now.set(after(INTERVAL as i64 + INTERVAL as i64));
+    pass(&hooks, second);
+    assert_eq!(seen.borrow().as_slice(), [Some(after(-HOUR)), None, Some(after(INTERVAL as i64))]);
+    let tenants: Vec<String> = saved.borrow().iter().map(|(tenant, _)| tenant.clone()).collect();
+    assert_eq!(tenants, ["tenant-a", "tenant-b", "tenant-b"]);
     Ok(())
 }

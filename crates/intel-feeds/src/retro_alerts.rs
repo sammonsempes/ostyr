@@ -2,7 +2,7 @@
 
 use crate::limits::{NANOS_PER_MICRO, RETRO_HOST_CHARS};
 use crate::retro::{Direction, MatchGroup, RetroRun, RetroSettings, RetroSummary};
-use crate::sample::{bounded_text, is_unsafe_char};
+use crate::sample::{bounded_text, is_unsafe_char, BLANK_LETTERS};
 use crate::types::AlertInsertFn;
 use alerts::error::StoreError;
 use alerts::id::{absorb, alert_id};
@@ -97,12 +97,12 @@ pub fn event_id_of(group: &MatchGroup) -> String {
 }
 
 
-/// Unsafe characters escaped as `sample::bounded_text` does, then at most `RETRO_HOST_CHARS` characters of the result on a whole-escape boundary; the flag says a cut happened.
+/// Unsafe and blank-rendering characters escaped (the first as `sample::bounded_text` does), then at most `RETRO_HOST_CHARS` characters of the result on a whole-escape boundary; the flag says a cut happened.
 pub fn escaped_host(host: &str) -> (String, bool) {
     let pieces: Vec<String> = host
         .chars()
         .map(|character| {
-            if is_unsafe_char(character) {
+            if is_unsafe_char(character) || BLANK_LETTERS.contains(&character) {
                 character.escape_unicode().to_string()
             } else {
                 character.to_string()

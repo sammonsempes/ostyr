@@ -6,7 +6,9 @@ mod types;
 
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use engine::{engine_for, feeds_text, replace_file};
-use intel_feeds::config::{validate_feeds, validate_retro_section, FeedsError, FeedsFile, OpenError, RetroSection, RetroSectionError};
+use intel_feeds::config::{
+    validate_feeds, validate_reader_apart, validate_retro_section, FeedsError, FeedsFile, OpenError, RetroSection, RetroSectionError,
+};
 use intel_feeds::limits::{
     MAX_RETRO_INTERVAL_SECONDS, MAX_RETRO_MARGIN_SECONDS, MAX_RETRO_MATCHES, MAX_RETRO_WINDOW_SECONDS, MIN_RETRO_INTERVAL_SECONDS,
 };
@@ -177,5 +179,48 @@ fn a_file_started_without_retro_refuses_a_later_retro_section() -> TestResult {
     let engine = engine_for(&path)?;
     replace_file(&path, &retro_text(INTERVAL, WINDOW, "pg.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("start only")));
+    Ok(())
+}
+
+
+fn loader_text(user: &str) -> String {
+    format!(
+        "clickhouse:\n  url: http://127.0.0.1:8123\n  user: {user}\n  password_file: /nonexistent/loader\n  database: ostyr\n  table: iocs\n  \
+         dictionary: ioc_trie\n  tenant: tenant-a\n"
+    )
+}
+
+
+#[test]
+fn a_reader_that_is_the_loader_is_refused_at_start_and_at_reload_and_the_old_settings_stay() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("feeds.yaml");
+    let apart = format!("{}{}", retro_text(INTERVAL, WINDOW, "pg.yaml"), loader_text("loader"));
+    replace_file(&path, &apart)?;
+    let engine = engine_for(&path)?;
+    let same = apart.replace("user: loader", "user: reader");
+    replace_file(&path, &same)?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
+    assert_eq!(
+        current_config(&engine).clickhouse.as_ref().map(|loader| loader.user.clone()),
+        Some("loader".to_owned())
+    );
+    assert!(matches!(
+        engine_for(&path),
+        Err(OpenError::Invalid(FeedsError::Retro(RetroSectionError::ReaderIsLoader)))
+    ));
+    let config = current_config(&engine);
+    assert!(validate_reader_apart(&config).is_ok());
+    assert!(validate_reader_apart(&FeedsFile::default()).is_ok());
+    let loader_only = FeedsFile {
+        retro: None,
+        ..(*config).clone()
+    };
+    assert!(validate_reader_apart(&loader_only).is_ok());
+    let retro_only = FeedsFile {
+        clickhouse: None,
+        ..(*config).clone()
+    };
+    assert!(validate_reader_apart(&retro_only).is_ok());
     Ok(())
 }

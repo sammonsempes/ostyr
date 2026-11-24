@@ -1,3 +1,4 @@
+use alerts::backend::LOG_IGNORED_CRATE;
 use alerts::pg::pg_executor;
 use alerts::store::{insert_alerts, MIGRATIONS, MIGRATION_NAMESPACE};
 use core_audit::log::{append, open_file_log};
@@ -5,19 +6,23 @@ use core_config::reload::{current_config, ReloadContext};
 use core_config::watch::watch_files;
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
+use core_pg::password::read_limited;
 use core_pg::settings::parse_settings;
 use intel_feeds::config::open_feeds;
+use intel_feeds::limits::MAX_PG_SETTINGS_BYTES;
 use intel_feeds::retro::run_retro;
-use intel_feeds::retro_schedule::{run_schedule, Hooks, RoundOutcome};
+use intel_feeds::retro_schedule::{run_schedule, Hooks, RoundOutcome, ScheduleState};
+use intel_feeds::retro_state::{read_end, start_of, write_end};
+use std::cell::RefCell;
 use std::error::Error;
-use std::io::{stdout, Write};
+use std::io::{stderr, stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 
-const USAGE: &str = "usage: retro_schedule <feeds-file> <audit-file> <max-passes>";
+const USAGE: &str = "usage: retro_schedule <feeds-file> <audit-file> <state-file> <max-passes>";
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -55,7 +60,9 @@ fn show(outcome: &RoundOutcome) {
 }
 
 
-fn start(feeds_file: &str, audit_file: &str, max_passes: u64) -> Result<(), Box<dyn Error>> {
+fn start(feeds_file: &str, audit_file: &str, state_file: &str, max_passes: u64) -> Result<(), Box<dyn Error>> {
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(stderr).finish())?;
+    tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
     let log = open_file_log(Path::new(audit_file))?;
     let context = ReloadContext {
         actor_id: "retro_schedule".to_owned(),
@@ -70,17 +77,15 @@ fn start(feeds_file: &str, audit_file: &str, max_passes: u64) -> Result<(), Box<
         context,
     )?);
     let _watcher = watch_files(Arc::clone(&engine), &[PathBuf::from(feeds_file)], DEBOUNCE)?;
-    let pg_file = current_config(&engine)
-        .retro
-        .as_ref()
-        .ok_or("the feeds file has no retro section")?
-        .pg_settings
-        .clone();
-    let pg_settings = parse_settings(&std::fs::read_to_string(&pg_file)?, &pg_file.display().to_string())?;
+    let first = current_config(&engine);
+    let retro = first.retro.as_ref().ok_or("the feeds file has no retro section")?;
+    let pg_file = retro.pg_settings.clone();
+    let tenant = retro.reader.tenant.clone();
+    let pg_text = String::from_utf8(read_limited(&pg_file, MAX_PG_SETTINGS_BYTES as u64)?.to_vec())?;
+    let pg_settings = parse_settings(&pg_text, &pg_file.display().to_string())?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let client = runtime.block_on(connect(&pg_settings))?;
-    runtime.block_on(migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE))?;
-    let exec = pg_executor(&client, DEADLINE);
+    let client = RefCell::new(runtime.block_on(connect(&pg_settings))?);
+    runtime.block_on(migrate(&client.borrow(), MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE))?;
     let snapshot = || Some(current_config(&engine));
     let clock = OffsetDateTime::now_utc;
     let wait = std::thread::sleep;
@@ -89,7 +94,26 @@ fn start(feeds_file: &str, audit_file: &str, max_passes: u64) -> Result<(), Box<
         let started = Instant::now();
         run_retro(settings, start, end, previous, &|| started.elapsed())
     };
-    let insert = |scope: &_, batch: &_| runtime.block_on(insert_alerts(&exec, scope, batch));
+    let insert = |scope: &_, batch: &_| {
+        let stored = {
+            let current = client.borrow();
+            let exec = pg_executor(&current, DEADLINE);
+            let result = runtime.block_on(insert_alerts(&exec, scope, batch));
+            result
+        };
+        if stored.is_err() {
+            match runtime.block_on(connect(&pg_settings)) {
+                Ok(fresh) => *client.borrow_mut() = fresh,
+                Err(error) => tracing::warn!(%error, "reconnect failed, the next round tries again"),
+            }
+        }
+        stored
+    };
+    let save = |saved_tenant: &str, end| write_end(Path::new(state_file), saved_tenant, end);
+    let (previous_end, how) = start_of(read_end(Path::new(state_file), &tenant, OffsetDateTime::now_utc()));
+    if let Err(error) = writeln!(stdout(), "start {how}") {
+        tracing::error!(%error, "stdout closed");
+    }
     let hooks = Hooks {
         snapshot: &snapshot,
         clock: &clock,
@@ -97,8 +121,14 @@ fn start(feeds_file: &str, audit_file: &str, max_passes: u64) -> Result<(), Box<
         stop: &stop,
         run: &run,
         insert: &insert,
+        save: &save,
     };
-    run_schedule(&hooks, max_passes, &mut show);
+    let initial = ScheduleState {
+        tenant: Some(tenant.clone()),
+        previous_end,
+        ..ScheduleState::default()
+    };
+    run_schedule(&hooks, initial, max_passes, &mut show);
     Ok(())
 }
 
@@ -106,7 +136,7 @@ fn start(feeds_file: &str, audit_file: &str, max_passes: u64) -> Result<(), Box<
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
-        [feeds_file, audit_file, passes] => start(feeds_file, audit_file, passes.parse()?),
+        [feeds_file, audit_file, state_file, passes] => start(feeds_file, audit_file, state_file, passes.parse()?),
         _ => Err(USAGE.into()),
     }
 }
