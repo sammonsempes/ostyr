@@ -1,4 +1,3 @@
-use crate::model::Shapes;
 use crate::urls::{split_region, Region};
 
 
@@ -9,9 +8,6 @@ const OPENINGS: [&str; 2] = ["=\"", "='"];
 
 
 const CID_MARKERS: [(&str, char); 2] = [("src=\"cid:", '"'), ("src='cid:", '\'')];
-
-
-const ADDRESS_SEPARATOR: &str = " | ";
 
 
 /// Which reasons an allowlisted shape removes; the host is listed whatever this says.
@@ -39,16 +35,6 @@ fn is_name(found: char) -> bool {
 
 fn is_cid(found: char) -> bool {
     found.is_ascii_alphanumeric() || matches!(found, '.' | '_' | '-')
-}
-
-
-fn is_local(found: char) -> bool {
-    found.is_ascii_alphanumeric() || matches!(found, '.' | '_' | '+' | '-')
-}
-
-
-fn is_domain(found: char) -> bool {
-    found.is_ascii_alphanumeric() || matches!(found, '.' | '-')
 }
 
 
@@ -137,35 +123,15 @@ pub fn cid_reference(region: &str) -> bool {
 }
 
 
-/// ` | ` and one email address, the only `@`, ended by whitespace, a line end or the end of the text.
-pub fn address_follows(region: &str, next: Option<char>) -> bool {
-    region.strip_prefix(ADDRESS_SEPARATOR).is_some_and(|after| {
-        let local = after.trim_start_matches(is_local);
-        local.len() < after.len()
-            && local.strip_prefix('@').is_some_and(|domain| {
-                let rest = domain.trim_start_matches(is_domain);
-                rest.len() < domain.len()
-                    && !rest.contains('@')
-                    && rest.chars().next().map_or(next.is_none_or(|end| end == '\n'), char::is_whitespace)
-            })
-    })
-}
-
-
 /// The shapes that hold on one reading of the text around a match.
-pub fn vouch(shapes: Shapes, before: &str, head: &str, bound: usize) -> Vouched {
+pub fn vouch(before: &str, head: &str, bound: usize) -> Vouched {
     let closed = closes_attribute(before, head);
-    let (cid, address) = match split_region(head, bound) {
-        Region::Closed(region) => (
-            cid_reference(region),
-            shapes == Shapes::Plain
-                && !before.ends_with(['"', '\'', '='])
-                && address_follows(region, head.get(region.len()..).and_then(|after| after.chars().next())),
-        ),
-        Region::Open => (false, false),
+    let cid = match split_region(head, bound) {
+        Region::Closed(region) => cid_reference(region),
+        Region::Open => false,
     };
     Vouched {
         ambiguity: closed,
-        userinfo: closed || cid || address,
+        userinfo: closed || cid,
     }
 }

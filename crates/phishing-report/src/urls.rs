@@ -305,10 +305,10 @@ pub struct Site<'text> {
 }
 
 
-fn vouched(shapes: Shapes, site: &Site<'_>, limits: &Limits) -> Vouched {
+fn vouched(site: &Site<'_>, limits: &Limits) -> Vouched {
     let bound = limits.url_bytes;
-    let plain = vouch(shapes, &edge(site.before, bound, false), &head(site.tail, bound, false), bound);
-    let stripped = vouch(shapes, &edge(site.before, bound, true), &head(site.tail, bound, true), bound);
+    let plain = vouch(&edge(site.before, bound, false), &head(site.tail, bound, false), bound);
+    let stripped = vouch(&edge(site.before, bound, true), &head(site.tail, bound, true), bound);
     Vouched {
         ambiguity: plain.ambiguity && stripped.ambiguity,
         userinfo: plain.userinfo && stripped.userinfo,
@@ -321,11 +321,7 @@ fn read_region(urls: Vec<UrlHit>, site: &Site<'_>, rest: &str, limits: &Limits, 
     let ambiguous = is_ambiguous(rest);
     let honoured = (ambiguous || first.is_some()) && index.shapes != Shapes::Refuse;
     index.window_bytes += usize::from(honoured) * VOUCH_WINDOWS * site.tail.len().min(limits.url_bytes);
-    let vouch = if honoured {
-        vouched(index.shapes, site, limits)
-    } else {
-        Vouched::default()
-    };
+    let vouch = if honoured { vouched(site, limits) } else { Vouched::default() };
     counts.url_host_ambiguous += usize::from(ambiguous && !vouch.ambiguity);
     counts.url_userinfo_split += usize::from(first.is_some() && !vouch.userinfo);
     let last = at_cut(split_last, rest);

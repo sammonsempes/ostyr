@@ -1,10 +1,8 @@
 use cases::model::ObservableKind;
 use phishing_report::limits::Limits;
-use phishing_report::model::{ReporterPolicy, Shapes, Triage};
+use phishing_report::model::{ReporterPolicy, Triage};
 use phishing_report::observables::observables;
-use phishing_report::shapes::{
-    address_follows, cid_reference, closes_attribute, edge, has_reference, head, vouch, window_after, window_before, Vouched,
-};
+use phishing_report::shapes::{cid_reference, closes_attribute, edge, has_reference, head, vouch, window_after, window_before, Vouched};
 use phishing_report::triage::triage_with;
 
 
@@ -12,6 +10,9 @@ const AMBIGUOUS: &str = "url_host_ambiguous";
 
 
 const SPLIT: &str = "url_userinfo_split";
+
+
+const PARTS_SKIPPED: &str = "parts_skipped";
 
 
 const FOLLOWERS: [&str; FOLLOWER_COUNT] = [
@@ -114,7 +115,7 @@ fn every_follower_after_a_quote_in_text_href_and_entity_is_listed_and_flagged() 
 }
 
 
-const ORDINARY: [(&str, &str, &str); 7] = [
+const ORDINARY: [(&str, &str, &str); 6] = [
     ("href_close", "text/html", "<a href=\"https://corp.test\">Go</a>"),
     ("href_single", "text/html", "<a href='https://corp.test'>Go</a>"),
     ("href_attribute", "text/html", "<a href=\"https://corp.test\" target=\"_blank\">Go</a>"),
@@ -124,7 +125,6 @@ const ORDINARY: [(&str, &str, &str); 7] = [
         "text/html",
         "<p>https://corp.test <img src=\"cid:image001.png@01D0.EF12\"></p>",
     ),
-    ("address", "text/plain", "https://corp.test | ceo@corp.test"),
     ("word", "text/plain", "Visit https://corp.test for details"),
 ];
 
@@ -143,18 +143,6 @@ fn each_ordinary_form_is_not_flagged_and_still_lists_its_host() -> Result<(), Bo
         assert!(domains(&record).iter().any(|host| host == "corp.test"), "{name}: {:?}", domains(&record));
         Ok(())
     })
-}
-
-
-#[test]
-fn the_address_shape_over_two_lines_and_at_the_end_of_the_text_is_honoured() -> Result<(), Box<dyn std::error::Error>> {
-    ["https://corp.test | ceo@corp.test\r\nnext line", "https://corp.test | ceo@corp.test next"]
-        .iter()
-        .try_for_each(|body| {
-            let record = message("text/plain", body)?;
-            assert!(!record.original_uncertain, "{body}");
-            Ok(())
-        })
 }
 
 
@@ -242,21 +230,6 @@ fn a_shape_that_fails_on_the_stripped_copy_is_flagged() -> Result<(), Box<dyn st
 
 
 #[test]
-fn a_window_with_no_region_end_in_the_raw_bound_is_not_vouched() -> Result<(), Box<dyn std::error::Error>> {
-    let limits = Limits {
-        url_bytes: SMALL_BOUND,
-        ..Limits::default()
-    };
-    let body = "https://corp.test | ceoceoceoceoceoceo@corp.test\nx";
-    let record = run("text/plain", body, &limits)?;
-    assert_eq!(reasons(&record, AMBIGUOUS), 1);
-    let short = run("text/plain", "https://corp.test | ceo@corp.test\nx", &limits)?;
-    assert_eq!(reasons(&short, SPLIT), 0);
-    Ok(())
-}
-
-
-#[test]
 fn a_region_with_no_end_in_the_bound_names_both_reasons() -> Result<(), Box<dyn std::error::Error>> {
     let limits = Limits {
         url_bytes: SMALL_BOUND,
@@ -334,36 +307,15 @@ fn cid_reference_needs_one_at_sign_and_its_own_closing_quote() -> Result<(), Box
 
 
 #[test]
-fn address_follows_needs_the_separator_one_address_and_a_clean_end() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(address_follows(" | ceo+x@corp.test", None));
-    assert!(address_follows(" | ceo@corp.test", Some('\n')));
-    assert!(address_follows(" | ceo@corp.test next", Some('/')));
-    assert!(!address_follows(" | ceo@corp.test", Some('/')));
-    assert!(!address_follows(" | ceo@corp.test", Some('?')));
-    assert!(!address_follows(" | ceo@corp.test\"", None));
-    assert!(!address_follows(" | ceo@corp.test x@y", None));
-    assert!(!address_follows(" | ceo@a@b", None));
-    assert!(!address_follows(" | @corp.test", None));
-    assert!(!address_follows(" | ceo@ x", None));
-    assert!(!address_follows(" |ceo@corp.test", None));
-    assert!(!address_follows(" | ceo", None));
-    Ok(())
-}
-
-
-#[test]
 fn vouch_is_empty_when_no_shape_holds_and_the_region_is_open() -> Result<(), Box<dyn std::error::Error>> {
     let none = Vouched::default();
-    assert_eq!(vouch(Shapes::Plain, "x", ", y", REGION_BOUND), none);
-    let open = vouch(Shapes::Plain, "x", &" | ceo@corp.test and long long text".repeat(SHORT_HEAD), TIGHT_BOUND);
-    assert_eq!(open, none);
-    assert!(vouch(Shapes::Plain, "x", " | ceo@corp.test", REGION_BOUND).userinfo);
-    assert!(!vouch(Shapes::Markup, "x", " | ceo@corp.test", REGION_BOUND).userinfo);
-    assert!(!vouch(Shapes::Plain, "=\"", " | ceo@corp.test", REGION_BOUND).userinfo);
-    assert!(vouch(Shapes::Markup, "x", " src=\"cid:a@b\"", REGION_BOUND).userinfo);
-    assert!(!vouch(Shapes::Markup, "x", " src=\"cid:a@b\"", REGION_BOUND).ambiguity);
+    assert_eq!(vouch("x", ", y", REGION_BOUND), none);
+    assert_eq!(vouch("x", &" src=\"cid:a@b\" and long long text".repeat(SHORT_HEAD), TIGHT_BOUND), none);
+    assert!(!vouch("x", " | ceo@corp.test", REGION_BOUND).userinfo);
+    assert!(vouch("x", " src=\"cid:a@b\"", REGION_BOUND).userinfo);
+    assert!(!vouch("x", " src=\"cid:a@b\"", REGION_BOUND).ambiguity);
     assert_eq!(
-        vouch(Shapes::Markup, "=\"", "\">", REGION_BOUND),
+        vouch("=\"", "\">", REGION_BOUND),
         Vouched {
             ambiguity: true,
             userinfo: true
@@ -377,7 +329,6 @@ fn vouch_is_empty_when_no_shape_holds_and_the_region_is_open() -> Result<(), Box
 fn a_vouched_shape_still_lists_the_host_after_the_at_sign() -> Result<(), Box<dyn std::error::Error>> {
     [
         ("text/html", "<p>https://good.test <img src=\"cid:a@x.evil.test\"></p>"),
-        ("text/plain", "https://good.test | ceo@x.evil.test"),
         ("text/html", "<a href=\"https://good.test\" title=\"mail @x.evil.test\">x</a>"),
     ]
     .iter()
@@ -422,17 +373,20 @@ fn the_attack_shape_with_line_noise_after_each_match_is_flagged_within_the_bound
 
 
 #[test]
-fn only_text_plain_exactly_is_plain_and_every_other_text_subtype_is_markup() -> Result<(), Box<dyn std::error::Error>> {
+fn every_text_part_is_read_as_markup_whatever_its_declared_subtype() -> Result<(), Box<dyn std::error::Error>> {
     let body = "<a href=\"https://good.test&quot;x.evil.test/\">x</a>";
-    ["text/x-amp-html", "text/enriched", "text/html"].iter().try_for_each(|kind| {
-        let record = message(kind, body)?;
-        assert_eq!(reasons(&record, AMBIGUOUS), 1, "{kind}: {:?}", record.uncertain_reasons);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
-    let plain = message("TEXT/Plain", "Visit https://corp.test | ceo@corp.test")?;
-    assert_eq!(reasons(&plain, AMBIGUOUS) + reasons(&plain, SPLIT), 0);
-    let bare = message("text", "https://corp.test | ceo@corp.test")?;
-    assert!(domains(&bare).iter().any(|host| host == "corp.test"));
+    ["text/x-amp-html", "text/enriched", "text/html", "text/plain", "TEXT/Plain"]
+        .iter()
+        .try_for_each(|kind| {
+            let record = message(kind, body)?;
+            assert_eq!(reasons(&record, AMBIGUOUS), 1, "{kind}: {:?}", record.uncertain_reasons);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+    let hostile = message("text/plain", HIDDEN_LINK)?;
+    assert!(domains(&hostile).iter().any(|host| host == "evil.test"), "{:?}", domains(&hostile));
+    let ordinary = message("text/plain", "Visit https://corp.test for details")?;
+    assert!(!ordinary.original_uncertain);
+    assert!(domains(&ordinary).iter().any(|host| host == "corp.test"));
     Ok(())
 }
 
@@ -454,7 +408,7 @@ fn a_part_with_two_content_type_headers_is_read_as_markup() -> Result<(), Box<dy
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     let single = message("text/plain", body)?;
-    assert!(!domains(&single).iter().any(|host| host == "bad.test"));
+    assert!(domains(&single).iter().any(|host| host == "bad.test"));
     Ok(())
 }
 
@@ -518,6 +472,51 @@ fn an_unreadable_content_type_is_never_plain_in_any_placement() -> Result<(), Bo
     ))?;
     assert!(domains(&broken).iter().any(|host| host == "evil.test"), "{:?}", domains(&broken));
     let none = raw_triage(&format!("From: p@sender.test\r\n\r\n{HIDDEN_LINK}\r\n"))?;
-    assert!(!domains(&none).iter().any(|host| host == "evil.test"));
+    assert!(domains(&none).iter().any(|host| host == "evil.test"));
+    Ok(())
+}
+
+
+const BLANK_FIRST_LINES: [&str; 2] = [" \r\n", "\t\r\n"];
+
+
+#[test]
+fn a_part_whose_header_block_starts_with_a_blank_line_is_read_as_markup() -> Result<(), Box<dyn std::error::Error>> {
+    BLANK_FIRST_LINES.iter().try_for_each(|blank| {
+        placements(&format!("{blank}Content-Type: text/html")).iter().try_for_each(|raw| {
+            let record = raw_triage(raw)?;
+            assert!(
+                domains(&record).iter().any(|host| host == "evil.test"),
+                "{blank:?}: {:?}",
+                domains(&record)
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+    })
+}
+
+
+const MANY_PARTS: usize = 301;
+
+
+const SMALL_PART_BYTES: usize = 64;
+
+
+#[test]
+fn parts_beyond_the_cap_or_over_the_size_make_the_record_uncertain() -> Result<(), Box<dyn std::error::Error>> {
+    let filler = "--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n".repeat(MANY_PARTS);
+    let many = raw_triage(&format!(
+        "From: p@sender.test\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n{filler}--b\r\nContent-Type: text/html\r\n\r\n{HIDDEN_LINK}\r\n--b--\r\n"
+    ))?;
+    assert_eq!(reasons(&many, PARTS_SKIPPED), 1, "{:?}", many.uncertain_reasons);
+    assert!(many.original_uncertain);
+    let limits = Limits {
+        part_bytes: SMALL_PART_BYTES,
+        ..Limits::default()
+    };
+    let big = run("text/html", &format!("{HIDDEN_LINK}{}", "x".repeat(SMALL_PART_BYTES)), &limits)?;
+    assert_eq!(reasons(&big, PARTS_SKIPPED), 1, "{:?}", big.uncertain_reasons);
+    let small = run("text/html", HIDDEN_LINK, &limits)?;
+    assert_eq!(reasons(&small, PARTS_SKIPPED), 0);
     Ok(())
 }

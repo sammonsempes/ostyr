@@ -609,6 +609,9 @@ const URL_CAP_REACHED: &str = "url_cap_reached";
 const SCAN_REFUSED: &str = "scan_refused";
 
 
+const PARTS_SKIPPED: &str = "parts_skipped";
+
+
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
     if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
         mark_uncertain(record, reason);
@@ -647,46 +650,13 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     mark_once(&mut record, ambiguous, URL_HOST_AMBIGUOUS);
     mark_once(&mut record, capped, URL_CAP_REACHED);
     mark_once(&mut record, context.scan_refused, SCAN_REFUSED);
+    let skipped = record.counts.parts_skipped > 0;
+    mark_once(&mut record, skipped, PARTS_SKIPPED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
     record.levels.push(info);
     record
-}
-
-
-const CONTENT_TYPE_HEADER: &str = "Content-Type";
-
-
-/// Plain only with no `Content-Type` header, or exactly one that parses to `text/plain`; every other case, an unparsable value included, is markup.
-pub fn is_plain(part: &MessagePart<'_>) -> bool {
-    let declared = part
-        .headers()
-        .iter()
-        .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
-        .count();
-    declared == 0
-        || (declared == 1
-            && part.content_type().is_some_and(|content_type| {
-                content_type.ctype().eq_ignore_ascii_case("text")
-                    && content_type.subtype().is_some_and(|subtype| subtype.eq_ignore_ascii_case("plain"))
-            }))
-}
-
-
-/// Whether the raw header bytes of the part hold a CR not followed by LF: mail-parser ends a header at LF, other readers at a lone CR.
-pub fn has_bare_cr(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
-    let base = message.parts.first().map_or(0, |root| root.offset_header);
-    let start = part.offset_header.checked_sub(base);
-    let end = part.offset_body.checked_sub(base);
-    start
-        .zip(end)
-        .and_then(|(from, to)| message.raw_message().get(from as usize..to as usize))
-        .is_none_or(|head| {
-            head.iter()
-                .enumerate()
-                .any(|(at, byte)| *byte == b'\r' && head.get(at + 1) != Some(&b'\n'))
-        })
 }
 
 
@@ -705,10 +675,6 @@ fn collect_urls(
             PartType::Text(_) | PartType::Html(_) if oversized => {
                 counts.parts_skipped += 1;
                 urls
-            }
-            PartType::Text(text) if is_plain(part) && !context.scan_refused && !has_bare_cr(message, part) => {
-                urls_index.shapes = Shapes::Plain;
-                collect_indexed(context.rule, text, level, limits, urls, urls_index, counts)
             }
             PartType::Text(markup) | PartType::Html(markup) => {
                 urls_index.shapes = if has_reference(markup) { Shapes::Refuse } else { Shapes::Markup };

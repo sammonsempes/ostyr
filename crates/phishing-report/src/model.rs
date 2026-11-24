@@ -92,7 +92,6 @@ pub enum Shapes {
     #[default]
     Refuse,
     Markup,
-    Plain,
 }
 
 
