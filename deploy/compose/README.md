@@ -36,7 +36,9 @@ The output carries the TOTP secret to enrol in an authenticator. Other commands 
 
 ## Configuration
 
-`config/` is mounted read-only at `/etc/ostyr` in both services: `web-ui.yaml` (web settings), `module.yaml` (modules and file paths), `pg.yaml` (PostgreSQL host, database, service user, its password file, CA), `risk-weights.yaml`, `compromised.txt`. The service watches these files: an edit on the host applies without a restart, except the start-only keys `settings.modules`, `settings.pg_settings` and `settings.risk.weights_file`, which need `docker compose restart platform`.
+The `playbooks` service (`ostyr-playbooks`, uid 65533, no published port) reads new alerts for tenant `default` from the database, runs the playbooks of `config/playbooks-notify.yaml` as a dry run and logs one line per round that found alerts (`docker compose logs playbooks`); nothing is executed. It has its own copy of the service password (`secrets/playbooks_pg_password`) and its own volume `playbooksstate`. Run one instance per tenant.
+
+`config/` is mounted read-only at `/etc/ostyr` in the services: `web-ui.yaml` (web settings), `module.yaml` (modules and file paths), `pg.yaml` (PostgreSQL host, database, service user, its password file, CA), `risk-weights.yaml`, `compromised.txt`. The service watches these files: an edit on the host applies without a restart, except the start-only keys `settings.modules`, `settings.pg_settings` and `settings.risk.weights_file`, which need `docker compose restart platform`.
 
 ## Upgrade
 

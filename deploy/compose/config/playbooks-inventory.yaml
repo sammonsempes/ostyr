@@ -1,0 +1,10 @@
+hosts:
+  dc-01:
+    tags: [critical, domain-controller]
+  ws-0042:
+    tags: [workstation]
+accounts:
+  admin-ops:
+    tags: [privileged]
+  jdoe:
+    tags: []

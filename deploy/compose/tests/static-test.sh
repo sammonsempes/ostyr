@@ -9,7 +9,7 @@ COMPOSE_DIR="$(dirname "$TESTS_DIR")"
 readonly TESTS_DIR COMPOSE_DIR
 readonly COMPOSE_FILE="${STATIC_TEST_COMPOSE_FILE:-$COMPOSE_DIR/compose.yaml}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate file pg_password pg_service_password pg_server_key pg_server_cert pg_ca api_tls_key api_tls_cert store_key"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
 readonly BLOCK_KEYS="ports volumes services networks"
 failures=0
@@ -46,6 +46,29 @@ images_are_pinned() {
 
 web_service() {
     awk '/^  web:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+playbooks_service() {
+    awk '/^  playbooks:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+playbooks_has() {
+    playbooks_service | grep -q -- "$1"
+}
+
+playbooks_is_hardened() {
+    playbooks_has '^    read_only: true$' && playbooks_has '^    cap_drop: \[ALL\]$' && playbooks_has 'no-new-privileges:true' \
+        && playbooks_has '^    user: 65533:65533$' && playbooks_has '^    secrets: \[playbooks_pg_password, pg_ca\]$' \
+        && playbooks_has '^    command: \["/usr/local/bin/ostyr-playbooks", "/etc/ostyr/playbooks.yaml"\]$' \
+        && ! playbooks_has '^    ports:' && ! playbooks_has 'cap_add' && ! playbooks_has 'store_key' && ! playbooks_has 'pg_service_password'
+}
+
+playbooks_volume_items() {
+    playbooks_service | awk '/^    volumes:$/ {inside = 1; next} inside && /^      - / {print; next} {inside = 0}'
+}
+
+playbooks_mounts_only_settings_and_its_state() {
+    [[ "$(playbooks_volume_items)" == '      - ./config:/etc/ostyr:ro'$'\n''      - playbooksstate:/var/lib/ostyr-playbooks' ]]
 }
 
 web_volume_items() {
@@ -182,24 +205,25 @@ service_has_key() {
 
 each_service_publishes_only_its_port() {
     [[ "$(service_items platform ports)" == '      - "0.0.0.0:8443:8443"' && "$(service_items web ports)" == '      - "0.0.0.0:9443:9443"' ]] \
-        && ! service_has_key postgres ports
+        && ! service_has_key postgres ports && ! service_has_key playbooks ports
 }
 
 every_service_mounts_only_its_volumes() {
     [[ "$(service_items postgres volumes)" == '      - pgdata:/var/lib/postgresql/data'$'\n''      - ./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro'$'\n''      - ./config/pg-init-service-role.sh:/docker-entrypoint-initdb.d/10-service-role.sh:ro' \
-        && "$(service_items platform volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - state:/var/lib/ostyr' ]] && web_mounts_only_settings_and_state
+        && "$(service_items platform volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - state:/var/lib/ostyr' ]] && web_mounts_only_settings_and_state \
+        && playbooks_mounts_only_settings_and_its_state
 }
 
 only_postgres_adds_capabilities() {
-    [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add
+    [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add && ! service_has_key playbooks cap_add
 }
 
 definitions_are_pinned() {
     local expected
-    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' 'secrets:' \
+    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' 'secrets:' \
         '  pg_password:' '    file: ./secrets/pg_password' '  pg_service_password:' '    file: ./secrets/pg_service_password' \
         '  pg_server_key:' '    file: ./secrets/pg_server.key' '  pg_server_cert:' '    file: ./secrets/pg_server.crt' \
-        '  pg_ca:' '    file: ./secrets/ca.crt' '  api_tls_key:' '    file: ./secrets/api_tls.key' '  api_tls_cert:' '    file: ./secrets/api_tls.crt' \
+        '  pg_ca:' '    file: ./secrets/ca.crt' '  playbooks_pg_password:' '    file: ./secrets/playbooks_pg_password' '  api_tls_key:' '    file: ./secrets/api_tls.key' '  api_tls_cert:' '    file: ./secrets/api_tls.crt' \
         '  store_key:' '    file: ./secrets/store.key')"
     [[ "$(sed -n '/^volumes:$/,$p' "$COMPOSE_FILE")" == "$expected" && "$(count_lines '^ *name:')" -eq 1 && "$(count_lines '^name: ostyr$')" -eq 1 ]]
 }
@@ -230,7 +254,7 @@ compose_config_accepts() {
     local scratch name
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -243,7 +267,7 @@ parsed_config_passes() {
     local scratch name status=0
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -295,6 +319,9 @@ expect "the platform trusts the web address only as forwarder" grep -qx '  trust
 expect "the module file selects all fifteen modules the platform mounts" grep -qx '  modules: alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths' "$COMPOSE_DIR/config/module.yaml"
 expect "the module file names the status page file" grep -qx '  status.page_file: /etc/ostyr/status-page.yaml' "$COMPOSE_DIR/config/module.yaml"
 expect "the status page belongs to the module file tenant" test "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/status-page.yaml")" = "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/module.yaml")"
+expect "the playbooks service is hardened, runs as 65533 and holds only its password copy and the CA" playbooks_is_hardened
+expect "the playbooks service reads the compose tenant" test "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/playbooks.yaml")" = "$(sed -n 's/^tenant: //p' "$COMPOSE_DIR/config/module.yaml")"
+expect "the playbooks database settings name its own password file" grep -qx 'password_file: /run/secrets/playbooks_pg_password' "$COMPOSE_DIR/config/playbooks-pg.yaml"
 expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'
 expect "web-ui.yaml serves TLS and verifies the API against the CA" web_yaml_serves_tls_and_verifies_api
 expect "every image is pinned by digest or built locally" images_are_pinned

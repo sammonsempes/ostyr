@@ -22,6 +22,10 @@ PROFILED_SERVICE = (
 )
 
 
+PLAYBOOKS_SECRETS = "    secrets: [playbooks_pg_password, pg_ca]\n"
+PLAYBOOKS_VOLUMES = "      - playbooksstate:/var/lib/ostyr-playbooks\n"
+
+
 def with_platform_ports(replacement):
     return lambda text: replace_once(text, PLATFORM_PORT, replacement)
 
@@ -91,6 +95,12 @@ MUTANTS = {
         "    volumes:\n    - ./config:/etc/ostyr:ro\n    - webstate:/var/lib/ostyr\n    - ./secrets:/srv/secrets:ro\n",
     ),
     "entrypoint_moved": lambda text: replace_once(text, "      - postgres-entrypoint\n", '      - postgres-entrypoint\n        exec docker-entrypoint.sh "$$@"\n'),
+    "playbooks_cap_add": lambda text: replace_once(text, PLAYBOOKS_SECRETS, PLAYBOOKS_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "playbooks_secret_extra": lambda text: replace_once(text, PLAYBOOKS_SECRETS, "    secrets: [playbooks_pg_password, pg_ca, store_key]\n"),
+    "playbooks_bind_secrets": lambda text: replace_once(text, PLAYBOOKS_VOLUMES, PLAYBOOKS_VOLUMES + "      - ./secrets:/srv/secrets:ro\n"),
+    "playbooks_state_shared": lambda text: replace_once(text, PLAYBOOKS_VOLUMES, "      - state:/var/lib/ostyr-playbooks\n"),
+    "playbooks_publish": lambda text: replace_once(text, PLAYBOOKS_SECRETS, PLAYBOOKS_SECRETS + '    ports:\n      - "0.0.0.0:7000:7000"\n'),
+    "playbooks_root": lambda text: replace_once(text, "    user: 65533:65533\n", "    user: 0:0\n"),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),
 }
 

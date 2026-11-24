@@ -1,0 +1,14 @@
+name: Notify on store alert
+version: 1
+mode: simulate
+trigger:
+  alert.severity: high
+  alert.summary.process.name: whoami
+steps:
+  - connector: slack
+    action: notify
+    params: { channel: soc, message: "{{ alert.rule_title }} on {{ alert.host }}" }
+on_error:
+  - connector: pagerduty
+    action: page
+    params: { severity: high, summary: "notify failed" }
