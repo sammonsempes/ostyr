@@ -82,6 +82,7 @@ struct Context<'a> {
     domains: &'a HashSet<String>,
     read: RawReadFn,
     has_attached: bool,
+    scan_refused: bool,
 }
 
 
@@ -158,6 +159,7 @@ fn parse_and_extract(
     note_scan(&mut counts, &scanned);
     let chain = open_chain(root, limits, &mut counts);
     let domains = domain_set(reporters);
+    let scan_refused = counts.nested_refused > 0 || counts.scan_lost_bytes > 0;
     let context = Context {
         trusted,
         limits,
@@ -166,6 +168,7 @@ fn parse_and_extract(
         domains: &domains,
         read,
         has_attached: chain.len() > 1,
+        scan_refused,
     };
     let start = Triage { counts, ..Triage::default() };
     Ok(chain
@@ -603,6 +606,9 @@ const URL_HOST_AMBIGUOUS: &str = "url_host_ambiguous";
 const URL_CAP_REACHED: &str = "url_cap_reached";
 
 
+const SCAN_REFUSED: &str = "scan_refused";
+
+
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
     if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
         mark_uncertain(record, reason);
@@ -640,6 +646,7 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     mark_once(&mut record, split, URL_USERINFO_SPLIT);
     mark_once(&mut record, ambiguous, URL_HOST_AMBIGUOUS);
     mark_once(&mut record, capped, URL_CAP_REACHED);
+    mark_once(&mut record, context.scan_refused, SCAN_REFUSED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -667,6 +674,22 @@ pub fn is_plain(part: &MessagePart<'_>) -> bool {
 }
 
 
+/// Whether the raw header bytes of the part hold a CR not followed by LF: mail-parser ends a header at LF, other readers at a lone CR.
+pub fn has_bare_cr(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
+    let base = message.parts.first().map_or(0, |root| root.offset_header);
+    let start = part.offset_header.checked_sub(base);
+    let end = part.offset_body.checked_sub(base);
+    start
+        .zip(end)
+        .and_then(|(from, to)| message.raw_message().get(from as usize..to as usize))
+        .is_none_or(|head| {
+            head.iter()
+                .enumerate()
+                .any(|(at, byte)| *byte == b'\r' && head.get(at + 1) != Some(&b'\n'))
+        })
+}
+
+
 fn collect_urls(
     message: &Message<'_>,
     level: usize,
@@ -683,7 +706,7 @@ fn collect_urls(
                 counts.parts_skipped += 1;
                 urls
             }
-            PartType::Text(text) if is_plain(part) => {
+            PartType::Text(text) if is_plain(part) && !context.scan_refused && !has_bare_cr(message, part) => {
                 urls_index.shapes = Shapes::Plain;
                 collect_indexed(context.rule, text, level, limits, urls, urls_index, counts)
             }
