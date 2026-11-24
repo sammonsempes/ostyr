@@ -13,12 +13,16 @@ use intel_feeds::retro_alerts::{
     alert_of, build_alerts, escaped_host, event_id_of, micros_of, store_run, truncated_alert, AlertsError, BuildError, RETRO_RULE_ID, RETRO_TITLE,
     TRUNCATED_RULE_ID, TRUNCATED_TITLE,
 };
+use intel_feeds::sample::BLANK_LETTERS;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use time::macros::{date, datetime};
 use time::{Date, OffsetDateTime};
 use types::TestResult;
+
+
+const HEX_RADIX: u32 = 16;
 
 
 const FIRST: OffsetDateTime = datetime!(2026-11-03 01:00:00 UTC);
@@ -275,6 +279,29 @@ fn the_host_is_escaped_and_cut_on_an_escape_boundary() -> TestResult {
     assert!(cut.ends_with('}'));
     let (long, long_cut) = escaped_host(&"a".repeat(TEN_KIB));
     assert_eq!((long.len(), long_cut), (HOST_LIMIT, true));
+    Ok(())
+}
+
+
+#[test]
+fn blank_rendering_letters_in_a_host_are_escaped_and_the_list_is_status_pages() -> TestResult {
+    assert_eq!(escaped_host("a\u{3164}b\u{115F}"), ("a\\u{3164}b\\u{115f}".to_owned(), false));
+    let alert = alert_of(&group("203.0.113.0/24", "\u{3164}\u{115F}"), NOW_MICROS)?;
+    assert_eq!(alert.host_name.as_deref(), Some("\\u{3164}\\u{115f}"));
+    let source = include_str!("../../status-page/src/store.rs");
+    let block = source
+        .split("INVISIBLE_CHARACTERS: [char; ")
+        .nth(1)
+        .and_then(|rest| rest.split("];").next())
+        .ok_or("no status-page list")?;
+    let theirs: Vec<char> = block
+        .split("'\\u{")
+        .skip(1)
+        .filter_map(|part| part.split("}'").next())
+        .filter_map(|hex| u32::from_str_radix(hex, HEX_RADIX).ok())
+        .filter_map(char::from_u32)
+        .collect();
+    assert_eq!(theirs.as_slice(), BLANK_LETTERS.as_slice());
     Ok(())
 }
 
