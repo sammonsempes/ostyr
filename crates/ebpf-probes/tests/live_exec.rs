@@ -3,13 +3,15 @@
 use aya::programs::loaded_programs;
 use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
 use ebpf_probes::error::LoadError;
-use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, Probe};
+use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, run_exec_probe, Probe};
 use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
 use ebpf_probes::shape::{ShapeError, PROGRAM_NAME};
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 
 const UNPRIVILEGED_UID: u32 = 65534;
@@ -25,6 +27,12 @@ const HALVES: usize = 2;
 
 
 const MARKER: &str = "MARKER-7f3a9c";
+
+
+const UNLOAD_POLL_ATTEMPTS: u32 = 200;
+
+
+const UNLOAD_POLL_MILLIS: u64 = 50;
 
 
 fn load() -> Result<Probe, Box<dyn Error>> {
@@ -47,6 +55,19 @@ fn run_true_as_nobody() -> Result<u32, Box<dyn Error>> {
 fn program_ids() -> Result<Vec<u32>, Box<dyn Error>> {
     let infos = loaded_programs().collect::<Result<Vec<_>, _>>()?;
     Ok(infos.iter().map(|info| info.id()).collect())
+}
+
+
+fn wait_until_unloaded(held: u32) -> Result<bool, Box<dyn Error>> {
+    let gone = (0..UNLOAD_POLL_ATTEMPTS).find_map(|_| match program_ids() {
+        Ok(ids) if !ids.contains(&held) => Some(Ok(())),
+        Ok(_) => {
+            std::thread::sleep(Duration::from_millis(UNLOAD_POLL_MILLIS));
+            None
+        }
+        Err(error) => Some(Err(error)),
+    });
+    Ok(gone.transpose()?.is_some())
 }
 
 
@@ -97,7 +118,7 @@ fn dropping_the_probe_unloads_the_program() -> Result<(), Box<dyn Error>> {
     let held = probe.ebpf.program(PROGRAM_NAME).ok_or("program is missing")?.info()?.id();
     assert!(program_ids()?.contains(&held));
     drop(probe);
-    assert!(!program_ids()?.contains(&held), "program {held} is still loaded after the drop");
+    assert!(wait_until_unloaded(held)?, "program {held} is still loaded after the drop");
     Ok(())
 }
 
@@ -112,5 +133,23 @@ fn a_forged_object_fails_by_name_and_keeps_no_aya_text() -> Result<(), Box<dyn E
     truncated.truncate(truncated.len() / HALVES);
     let cut = load_exec_probe_from_bytes(&truncated).err().ok_or("a truncated object loaded")?;
     assert_no_marker(&cut);
+    Ok(())
+}
+
+
+#[test]
+fn a_stop_set_before_the_attach_attaches_nothing_and_leaves_no_program() -> Result<(), Box<dyn Error>> {
+    let before = program_ids()?;
+    let stop = AtomicBool::new(true);
+    let attached = AtomicBool::new(false);
+    let polls = run_exec_probe(&stop, 1, &mut || attached.store(true, Ordering::Relaxed), &mut |_| ())?;
+    assert_eq!(polls, 0);
+    assert!(!attached.load(Ordering::Relaxed), "the probe attached after the stop flag was set");
+    let fresh: Vec<u32> = program_ids()?.into_iter().filter(|id| !before.contains(id)).collect();
+    let gone = fresh.iter().map(|id| wait_until_unloaded(*id)).collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        gone.iter().all(|unloaded| *unloaded),
+        "a program loaded by the stopped run is still listed: {fresh:?}"
+    );
     Ok(())
 }

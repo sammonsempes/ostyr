@@ -11,7 +11,7 @@ const TINY_PART: usize = 30;
 const DIFFERING_CASES: usize = 2;
 
 
-const ORDINARY_CASES: usize = 8;
+const ORDINARY_CASES: usize = 7;
 
 
 fn mail_with(headers: &str, body: &[u8]) -> Vec<u8> {
@@ -64,7 +64,12 @@ fn a_utf_8_bom_under_a_label_that_hides_it_lists_the_host_and_flags() -> Result<
     .iter()
     .try_for_each(|label| {
         let record = run(label, &body)?;
-        assert_eq!(record.uncertain_reasons, ["charset_mismatch"], "{label}");
+        let expected: &[&str] = if label.starts_with("utf-16") {
+            &["charset_undecoded", "charset_mismatch"]
+        } else {
+            &["charset_mismatch"]
+        };
+        assert_eq!(record.uncertain_reasons, expected, "{label}");
         assert_eq!(record.counts.charset_mismatch, 1, "{label}");
         assert!(
             domains(&record).contains(&host_of("https://hidden.evil.test/x")?),
@@ -102,7 +107,6 @@ fn a_table_that_differs_from_whatwg_lists_the_whatwg_host_and_flags() -> Result<
 #[test]
 fn the_ordinary_forms_are_not_flagged() -> Result<(), Box<dyn std::error::Error>> {
     let utf_8 = "https://plain.evil.test/\u{e9}".as_bytes();
-    let japanese = b"\x1b$B$3$s\x1b(B https://plain.evil.test/x\r\n";
     let cases: [(&str, &[u8]); ORDINARY_CASES] = [
         ("utf-8", utf_8),
         ("us-ascii", b"https://plain.evil.test/x"),
@@ -110,7 +114,6 @@ fn the_ordinary_forms_are_not_flagged() -> Result<(), Box<dyn std::error::Error>
         ("iso-8859-9", b"https://plain.evil.test/x"),
         ("koi8-r", b"https://plain.evil.test/x"),
         ("macintosh", b"https://plain.evil.test/x"),
-        ("iso-2022-jp", japanese),
         ("utf-8", b"\xef\xbb\xbfhttps://plain.evil.test/x"),
     ];
     cases.iter().try_for_each(|(label, body)| {
@@ -151,6 +154,6 @@ fn raw_bytes_over_the_part_limit_are_flagged_not_decoded() -> Result<(), Box<dyn
     let raw = mail_with("Content-Type: text/plain; charset=utf-16le\r\n", &body);
     let record = triage_with(&raw, &[], &ReporterPolicy::default(), &limits)?;
     assert!(body.len() > TINY_PART);
-    assert_eq!(record.uncertain_reasons, ["charset_mismatch"]);
+    assert_eq!(record.uncertain_reasons, ["charset_undecoded", "charset_mismatch"]);
     Ok(())
 }

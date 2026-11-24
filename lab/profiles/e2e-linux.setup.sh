@@ -21,7 +21,7 @@ readonly ADMIN_PASSWORD="Lab-Admin-Pass-1"
 readonly CERT_DAYS=30
 readonly MUSL_TARGET="x86_64-unknown-linux-musl"
 readonly STORE_KEY_BYTES=32
-readonly STREAM_DUPLICATE_WINDOW="10m"
+readonly STREAM_DUPLICATE_WINDOW_NS=600000000000
 readonly CONSUMER_ACK_WAIT="30s"
 readonly SERVICES=(event-gateway siem-ingest detection alerts-api web-ui)
 
@@ -305,9 +305,9 @@ client_target="$client_user@$client_address"
 log "installing on the datastore VM"
 tar -C "$stage/datastore" --owner=0 --group=0 -cf - . | ssh "${ssh_options[@]}" "$datastore_target" "sudo tar -C / -xpf -"
 scp "${ssh_options[@]}" "$repo_dir/lab/tests/fixtures/e2e-events.sql" "$datastore_target:/tmp/e2e-events.sql"
-ssh "${ssh_options[@]}" "$datastore_target" "sudo bash -s $STREAM_DUPLICATE_WINDOW $CONSUMER_ACK_WAIT" <<'REMOTE'
+ssh "${ssh_options[@]}" "$datastore_target" "sudo bash -s $STREAM_DUPLICATE_WINDOW_NS $CONSUMER_ACK_WAIT" <<'REMOTE'
 set -euo pipefail
-duplicate_window="$1"
+duplicate_window_ns="$1"
 ACK_WAIT="$2"
 source /etc/ostyr-lab/datastore.env
 for service_user in ostyr-gateway ostyr-siem ostyr-detection ostyr-alerts ostyr-web; do
@@ -347,17 +347,59 @@ export NATS_PASSWORD
 nats() {
     /usr/local/share/ostyr-lab/client/nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" "$@"
 }
+stream_die() {
+    echo "stream $1: $2" >&2
+    exit 1
+}
+stream_check() {
+    nats stream info "$1" --json | python3 -I -c '
+import json, sys
+config = json.load(sys.stdin)["config"]
+subject, max_msgs, max_bytes, max_msg_size, per_subject, window = sys.argv[1:]
+expected = {"subjects": [subject], "retention": "limits", "max_consumers": -1, "max_msgs_per_subject": int(per_subject),
+            "max_msgs": int(max_msgs), "max_bytes": int(max_bytes), "max_age": 0, "max_msg_size": int(max_msg_size), "storage": "file",
+            "discard": "old", "num_replicas": 1, "duplicate_window": int(window), "sealed": False, "deny_delete": False, "deny_purge": False,
+            "allow_rollup_hdrs": False, "allow_direct": True, "mirror_direct": False, "consumer_limits": {}}
+actual = {key: value for key, value in config.items() if key != "name"}
+operator_metadata = {key: value for key, value in actual.pop("metadata", {}).items() if not key.startswith("_nats.")}
+if operator_metadata:
+    actual["metadata"] = operator_metadata
+def dump(table, key):
+    return json.dumps(table[key], sort_keys=True) if key in table else None
+bad = sorted(key for key in set(actual) | set(expected) if dump(actual, key) != dump(expected, key))
+if bad:
+    sys.exit(" ".join(bad))
+' "${@:2}" || stream_die "$1" "the stored configuration differs from the expected one on the fields above (the script never deletes letters: delete and recreate the stream)"
+}
 add_stream() {
     nats stream info "$1" >/dev/null 2>&1 || nats stream add "$1" --subjects "$2" --storage file --retention limits --discard old \
-        --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
+        --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "${duplicate_window_ns}ns" --replicas 1 \
         --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+    stream_check "$1" "$2" -1 -1 -1 -1 "$duplicate_window_ns"
 }
 add_durable() {
     nats consumer info events "$1" >/dev/null 2>&1 || nats consumer add events "$1" --pull --deliver all --ack explicit --filter 'events.>' --replay instant \
         --max-deliver=-1 --max-pending 1000 --no-headers-only --wait "$ACK_WAIT" --defaults >/dev/null
 }
 add_stream events 'events.>'
-add_stream dead 'dead.events'
+readonly DEAD_TENANT_BUDGET=16 DEAD_MAX_MSGS_PER_TENANT=1000 DEAD_MAX_MSG_SIZE=8192 DEAD_MAX_MSGS=16000 DEAD_MAX_BYTES=134217728
+dead_die() {
+    stream_die dead "$*"
+}
+((DEAD_MAX_BYTES >= DEAD_MAX_MSGS_PER_TENANT * DEAD_MAX_MSG_SIZE * DEAD_TENANT_BUDGET)) || dead_die "DEAD_MAX_BYTES is below the per-tenant budget"
+((DEAD_MAX_MSGS >= DEAD_MAX_MSGS_PER_TENANT * DEAD_TENANT_BUDGET)) || dead_die "DEAD_MAX_MSGS is below the per-tenant budget"
+dead_limits=(--subjects 'dead.events.*' --max-msgs="$DEAD_MAX_MSGS" --max-bytes="$DEAD_MAX_BYTES" --max-age=0 --max-msg-size="$DEAD_MAX_MSG_SIZE"
+    --max-msgs-per-subject="$DEAD_MAX_MSGS_PER_TENANT")
+dead_settings=(--discard old --dupe-window "${duplicate_window_ns}ns" --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge)
+add_dead_stream() {
+    if nats stream info dead >/dev/null 2>&1; then
+        nats stream edit dead --force "${dead_limits[@]}" "${dead_settings[@]}" >/dev/null
+    else
+        nats stream add dead "${dead_limits[@]}" "${dead_settings[@]}" --storage file --retention limits >/dev/null
+    fi
+    stream_check dead 'dead.events.*' "$DEAD_MAX_MSGS" "$DEAD_MAX_BYTES" "$DEAD_MAX_MSG_SIZE" "$DEAD_MAX_MSGS_PER_TENANT" "$duplicate_window_ns"
+}
+add_dead_stream
 for durable in siem-ingest detection metrics-ingest; do
     add_durable "$durable"
 done

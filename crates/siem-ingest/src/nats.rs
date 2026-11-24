@@ -2,7 +2,7 @@ use crate::error::{without_peer_text, NatsError};
 use crate::model::{AckAction, Delivery, Link, Session, Wiring};
 use crate::parse::truncate_reason;
 use crate::settings::{IngestSettings, MODULE};
-use crate::tenant::EVENTS_SUBJECT_PREFIX;
+use crate::tenant::{dead_letter_token, EVENTS_SUBJECT_PREFIX};
 use crate::types::{AckToken, ConnectionFields};
 use async_nats::jetstream::consumer::{self, pull, AckPolicy};
 use async_nats::jetstream::{self, AckKind};
@@ -40,6 +40,16 @@ pub const TENANT_HEADER: &str = "Ostyr-Tenant";
 
 
 pub const REASON_HEADER: &str = "Ostyr-Reason";
+
+
+pub const ORIGINAL_BYTES_HEADER: &str = "Ostyr-Original-Bytes";
+
+
+pub const TRUNCATED_HEADER: &str = "Ostyr-Truncated";
+
+
+/// A dead-letter body is cut here; the stream's `--max-msg-size` (lab `DEAD_MAX_MSG_SIZE`, 8192) leaves 4 KiB for the headers.
+pub const MAX_DEAD_LETTER_BODY_BYTES: usize = 4096;
 
 
 pub const MESSAGE_ID_HEADER: &str = "Nats-Msg-Id";
@@ -486,10 +496,14 @@ pub fn acknowledge(link: &Link, token: AckToken, action: AckAction) -> Result<()
 }
 
 
-pub fn dead_letter_headers(tenant: &str, reason: &str) -> HeaderMap {
+pub fn dead_letter_headers(token: &str, reason: &str, (original_bytes, cut): (usize, bool)) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(TENANT_HEADER, tenant);
+    headers.insert(TENANT_HEADER, token);
     headers.insert(REASON_HEADER, reason);
+    headers.insert(ORIGINAL_BYTES_HEADER, original_bytes.to_string());
+    if cut {
+        headers.insert(TRUNCATED_HEADER, "true");
+    }
     headers
 }
 
@@ -497,9 +511,11 @@ pub fn dead_letter_headers(tenant: &str, reason: &str) -> HeaderMap {
 /// Published with a confirmation from the stream: without it the caller naks, so a lost dead letter is never acknowledged.
 pub async fn publish_in(slot: &Option<Session>, settings: &IngestSettings, (tenant, payload, reason): (&str, &[u8], &str)) -> Result<(), NatsError> {
     let session = slot.as_ref().ok_or(NatsError::NotConnected)?;
-    let headers = dead_letter_headers(tenant, reason);
-    let subject = settings.nats_dead_letter_subject.clone();
-    let body = Bytes::copy_from_slice(payload);
+    let token = dead_letter_token(tenant, settings.max_tenant_bytes);
+    let subject = format!("{}.{token}", settings.nats_dead_letter_subject);
+    let cut = payload.len() > MAX_DEAD_LETTER_BODY_BYTES;
+    let headers = dead_letter_headers(&token, reason, (payload.len(), cut));
+    let body = Bytes::copy_from_slice(payload.get(..MAX_DEAD_LETTER_BODY_BYTES).unwrap_or(payload));
     let confirmed = async { session.jetstream.publish_with_headers(subject, headers, body).await?.await };
     bounded(millis(settings.nats_request_timeout_ms), confirmed).await.map(|_| ())
 }

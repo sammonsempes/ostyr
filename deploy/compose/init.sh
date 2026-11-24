@@ -11,6 +11,7 @@ COMPOSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly COMPOSE_DIR
 readonly SECRETS_DIR="$COMPOSE_DIR/secrets"
 readonly SERVICE_UID=65532
+readonly PLAYBOOKS_UID=65533
 readonly CERT_DAYS=825
 readonly KEY_BYTES=32
 readonly ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -132,6 +133,7 @@ is_present() {
 expected_owner() {
     case "$1" in
     api_tls.key | pg_service_password | store.key) printf '%s:%s' "$SERVICE_UID" "$SERVICE_UID" ;;
+    playbooks_pg_password) printf '%s:%s' "$PLAYBOOKS_UID" "$PLAYBOOKS_UID" ;;
     *) printf '0:0' ;;
     esac
 }
@@ -139,6 +141,7 @@ expected_owner() {
 expected_mode() {
     case "$1" in
     *.crt) printf '644' ;;
+    playbooks_pg_password) printf '400' ;;
     *) printf '600' ;;
     esac
 }
@@ -179,6 +182,19 @@ make_random_file() {
         fi
         chown -h "$(expected_owner "$name")" "$temporary"
         chmod 0600 "$temporary"
+        ln "$temporary" "$SECRETS_DIR/$name"
+    fi
+}
+
+make_copy_file() {
+    local name="$1" source="$2" temporary
+    if is_present "$SECRETS_DIR/$name"; then
+        check_present "$name" "$BASE64_LENGTH"
+    else
+        temporary="$(mktemp "$scratch/$name.XXXXXX")"
+        cat "$SECRETS_DIR/$source" >"$temporary"
+        chown -h "$(expected_owner "$name")" "$temporary"
+        chmod 0400 "$temporary"
         ln "$temporary" "$SECRETS_DIR/$name"
     fi
 }
@@ -309,4 +325,5 @@ fi
 make_random_file pg_password base64
 make_random_file pg_service_password base64
 make_random_file store.key raw
+make_copy_file playbooks_pg_password pg_service_password
 printf 'secrets ready in %s\n' "$SECRETS_DIR"

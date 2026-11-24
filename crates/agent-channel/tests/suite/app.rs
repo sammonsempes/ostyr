@@ -577,6 +577,7 @@ async fn a_timed_out_call_is_a_failed_attempt() -> TestResult {
         exhausted,
         Err(AppError::AttemptsExhausted {
             attempts: MAX_AGENT_ATTEMPTS,
+            rate_refused: false,
             last: Some(_)
         })
     ));

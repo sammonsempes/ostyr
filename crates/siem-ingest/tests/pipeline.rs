@@ -2,10 +2,11 @@ use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use siem_ingest::batcher::{new_batcher, push};
+use siem_ingest::dead::{MAX_DEAD_LETTER_GROUPS, SUMMARY_SECONDS};
 use siem_ingest::error::{InsertClass, InsertError, PipelineError};
 use siem_ingest::model::{AckAction, CycleReport, Delivery, FlushReport, LoopReport, Message, Pipeline, Wiring};
 use siem_ingest::parse::{is_host_metrics, HOST_DATASET};
-use siem_ingest::pipeline::{new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, settle, MAX_LOOP_CYCLES, POISON_REASON};
+use siem_ingest::pipeline::{dead_letter, new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, settle, MAX_LOOP_CYCLES, POISON_REASON};
 use siem_ingest::settings::open_settings;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -440,7 +441,9 @@ fn the_loop_backs_off_on_a_dead_bus_and_restarts_after_a_success() -> Result<(),
         LoopReport {
             cycles: CYCLES,
             fetch_failures: FAILING_CYCLES,
-            host_metrics_skipped: 0
+            host_metrics_skipped: 0,
+            dead_lettered: 0,
+            dead_letter_failed: 0
         }
     );
     let expected: Vec<Duration> = [FIRST_DELAY_MS, SECOND_DELAY_MS, THIRD_DELAY_MS]
@@ -616,5 +619,177 @@ fn the_dataset_check_reads_only_event_dataset() -> Result<(), Box<dyn Error>> {
     assert!(!is_host_metrics(br#"{"event":"ostyr.host_metrics"}"#));
     assert!(!is_host_metrics(br#"{"event":{"dataset":5}}"#));
     assert!(!is_host_metrics(br#"{"dataset":"ostyr.host_metrics"}"#));
+    Ok(())
+}
+
+
+#[derive(Clone)]
+pub struct Capture(pub Arc<Mutex<Vec<u8>>>);
+
+
+impl io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+static ANCHOR: std::sync::LazyLock<tracing::Dispatch> =
+    std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
+
+
+fn captured<Output>(work: impl FnOnce() -> Output) -> Result<(Output, String), Box<dyn Error>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&bytes));
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+    let output = tracing::subscriber::with_default(subscriber, work);
+    let text = String::from_utf8(bytes.lock().map_err(|_| "poisoned")?.clone())?;
+    Ok((output, text))
+}
+
+
+#[test]
+fn confirmed_dead_letters_are_one_grouped_line_per_cycle() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    enqueue(
+        &rig,
+        vec![
+            delivery("events.tenant-a", "not json", TOKEN_ONE),
+            delivery("events.tenant-a", "also not json", TOKEN_TWO),
+            delivery("events.tenant-b", "{}", TOKEN_THREE),
+        ],
+    )?;
+    let (report, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!(report?.dead_lettered, THREE);
+    assert_eq!(logs.matches("dead letters of this cycle").count(), 1, "{logs}");
+    assert!(logs.contains("tenant-a/not_ecs:Syntax=2"), "{logs}");
+    assert!(logs.contains("tenant-b/not_ecs:Data=1"), "{logs}");
+    assert!(rig.pipeline.dead_groups.groups.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_unconfirmed_dead_letter_is_counted_apart_and_never_recorded() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    rig.dead_fails.store(true, Ordering::SeqCst);
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_ONE)])?;
+    let (outcome, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    let report = outcome?;
+    assert_eq!((report.dead_lettered, report.dead_letter_failed), (0, 1));
+    assert!(!logs.contains("dead letters of this cycle"), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn the_poison_and_oversize_classes_are_recorded() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\nretry_attempts: 1\nmax_message_bytes: 90\nmax_batch_bytes: 90\n")?;
+    rig.poison.store(true, Ordering::SeqCst);
+    let large = format!("{{\"padding\":\"{}\"}}", "x".repeat(HOLD_BYTES));
+    enqueue(
+        &rig,
+        vec![
+            delivery("events.tenant-a", EVENT, TOKEN_ONE),
+            delivery("events.tenant-a", &large, TOKEN_TWO),
+        ],
+    )?;
+    let (report, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!(report?.dead_lettered, TWO);
+    assert!(logs.contains("tenant-a/poison=1") && logs.contains("tenant-a/oversize=1"), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn many_tenants_in_one_fetch_are_one_line_with_the_rest_counted() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    let total = MAX_DEAD_LETTER_GROUPS + THREE;
+    let items: Vec<Delivery> = (0..total)
+        .map(|index| delivery(&format!("events.tenant-{index}"), "not json", index as u64 + 1))
+        .collect();
+    enqueue(&rig, items)?;
+    let (report, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!(report?.dead_lettered, total);
+    assert_eq!(logs.matches("dead letters of this cycle").count(), 1, "{logs}");
+    assert!(logs.contains(&format!("other_groups={THREE}")), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn the_summary_is_periodic_on_the_injected_clock_and_cumulative() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_ONE)])?;
+    let clock = Arc::clone(&rig.clock);
+    let seen = AtomicU64::new(0);
+    let stop = move || {
+        clock.fetch_add(SUMMARY_SECONDS, Ordering::SeqCst);
+        seen.fetch_add(1, Ordering::SeqCst) >= TWO as u64
+    };
+    let (summary, logs) = captured(|| run_loop(&mut rig.pipeline, &stop))?;
+    assert_eq!((summary.dead_lettered, summary.dead_letter_failed), (1, 0));
+    assert!(
+        logs.contains("ingest summary") && logs.contains("dead_lettered=1") && logs.contains("host_metrics_skipped=0"),
+        "{logs}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn no_summary_is_written_while_the_clock_is_frozen() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_ONE)])?;
+    let (_, logs) = captured(|| run_loop(&mut rig.pipeline, &stop_after(TWO as u64)))?;
+    assert!(!logs.contains("ingest summary"), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn a_dead_letter_published_directly_is_recorded_for_its_tenant() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    let message = Message {
+        tenant: "tenant-a".to_owned(),
+        payload: b"x".to_vec(),
+        token: TOKEN_ONE,
+    };
+    rig.pipeline.pending.insert(TOKEN_ONE, message);
+    let mut report = CycleReport::default();
+    dead_letter(&mut rig.pipeline, TOKEN_ONE, "reason", &mut report);
+    assert_eq!(
+        rig.pipeline.dead_groups.groups.get(&("tenant-a".to_owned(), "other".to_owned())),
+        Some(&1)
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_dead_letter_groups_are_logged_before_a_fetch_error_returns() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    let message = Message {
+        tenant: "tenant-a".to_owned(),
+        payload: b"x".to_vec(),
+        token: TOKEN_ONE,
+    };
+    rig.pipeline.pending.insert(TOKEN_ONE, message);
+    let mut report = CycleReport::default();
+    dead_letter(&mut rig.pipeline, TOKEN_ONE, "reason", &mut report);
+    rig.queue.items.lock().map_err(|_| "poisoned")?.push_back(Err("bus down".to_owned()));
+    let (outcome, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert!(matches!(outcome, Err(PipelineError::Fetch(_))));
+    assert!(logs.contains("dead letters of this cycle") && logs.contains("tenant-a/other=1"), "{logs}");
+    assert!(rig.pipeline.dead_groups.groups.is_empty());
     Ok(())
 }

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+ebpf = ["ebpf-probes/ebpf-load"]
+
 [dependencies]
 agent-channel = { path = "../agent-channel" }
 agent-shell = { path = "../agent-shell" }
@@ -12,6 +15,7 @@ arc-swap = "1.9.3"
 core-audit = { path = "../core-audit" }
 core-config = { path = "../core-config" }
 core-export = { path = "../core-export" }
+ebpf-probes = { path = "../ebpf-probes" }
 ecs-normalise = { path = "../ecs-normalise" }
 libc = "0.2"
 linux-fim = { path = "../linux-fim" }

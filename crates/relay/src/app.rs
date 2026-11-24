@@ -9,6 +9,7 @@ use core_config::reload::current_config;
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use rustix::fs::{flock, fstat, statat, AtFlags, FlockOperation, CWD};
+use rustix::io::Errno;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,7 +43,17 @@ pub fn refuse_root(euid: u32) -> Result<(), RelayError> {
 
 /// One writer per audit file: a non-blocking exclusive `flock` on the handle that is then verified and appended to.
 pub fn lock_audit(file: &File) -> Result<(), RelayError> {
-    flock(file, FlockOperation::NonBlockingLockExclusive).map_err(|errno| RelayError::AuditLocked(io::Error::from(errno)))
+    flock(file, FlockOperation::NonBlockingLockExclusive).map_err(lock_error)
+}
+
+
+/// `EWOULDBLOCK` is another relay holding the lock; any other `flock` errno (`ENOLCK`, `EINTR`, ...) is named apart and also refuses the start.
+pub fn lock_error(errno: Errno) -> RelayError {
+    if errno == Errno::WOULDBLOCK {
+        RelayError::AuditLocked(io::Error::from(errno))
+    } else {
+        RelayError::AuditLockFailed(io::Error::from(errno))
+    }
 }
 
 
@@ -59,10 +70,9 @@ pub fn same_inode(file: &File, path: &Path) -> Result<(), RelayError> {
 
 
 /// Opens the audit file once, locks that handle, then verifies and continues the log through the same handle: the head is read under the lock.
-pub fn open_locked_log(path: &Path, opened: &dyn Fn(&File)) -> Result<(AuditLog<File>, File), RelayError> {
+pub fn open_locked_log(path: &Path, lock: &dyn Fn(&File) -> Result<(), RelayError>) -> Result<(AuditLog<File>, File), RelayError> {
     let file = open_checked(path, &SYSTEM_OPENER)?;
-    opened(&file);
-    lock_audit(&file)?;
+    lock(&file)?;
     same_inode(&file, path)?;
     let audit_lock = file.try_clone()?;
     Ok((continue_log(file)?, audit_lock))
@@ -71,13 +81,13 @@ pub fn open_locked_log(path: &Path, opened: &dyn Fn(&File)) -> Result<(AuditLog<
 
 /// Opens the audit log under its lock, then opens the settings engine; the first settings must be valid.
 pub fn open_runtime(paths: &Paths, soft: u64) -> Result<Runtime, RelayError> {
-    open_runtime_with(paths, soft, &|_| ())
+    open_runtime_with(paths, soft, &lock_audit)
 }
 
 
-/// `opened` runs after the audit file is opened and before it is locked: the test seam for an overlapping relay.
-pub fn open_runtime_with(paths: &Paths, soft: u64, opened: &dyn Fn(&File)) -> Result<Runtime, RelayError> {
-    let (opened_log, audit_lock) = open_locked_log(&paths.audit, opened)?;
+/// `lock` is the lock step (`lock_audit` in production), run after the open and before the head is read: a test delays or replaces it.
+pub fn open_runtime_with(paths: &Paths, soft: u64, lock: &dyn Fn(&File) -> Result<(), RelayError>) -> Result<Runtime, RelayError> {
+    let (opened_log, audit_lock) = open_locked_log(&paths.audit, lock)?;
     let log = Arc::new(opened_log);
     let engine = Arc::new(open_settings_engine(
         paths.settings.clone(),

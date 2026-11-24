@@ -10,6 +10,7 @@ pub mod mime;
 pub mod model;
 pub mod observables;
 pub mod policy;
+pub mod region;
 pub mod scan;
 pub mod shapes;
 pub mod text;

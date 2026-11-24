@@ -48,21 +48,12 @@ fn an_undecodable_charset_names_the_record_uncertain() -> Result<(), Box<dyn std
 
 #[test]
 fn a_decodable_or_absent_charset_is_not_flagged() -> Result<(), Box<dyn std::error::Error>> {
-    [
-        "utf-8",
-        "UTF8",
-        "us-ascii",
-        "iso-2022-jp",
-        "shift_jis",
-        "gb18030",
-        "windows-1252",
-        "iso-8859-1",
-    ]
-    .iter()
-    .try_for_each(|label| {
-        assert!(reasons(&format!("text/plain; charset={label}"))?.is_empty(), "{label}");
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    ["utf-8", "UTF8", "us-ascii", "shift_jis", "gb18030", "windows-1252", "iso-8859-1"]
+        .iter()
+        .try_for_each(|label| {
+            assert!(reasons(&format!("text/plain; charset={label}"))?.is_empty(), "{label}");
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
     assert!(reasons("text/plain")?.is_empty());
     let record = run(&mail("text/plain; charset=utf-8"))?;
     let hosts: Vec<String> = observables(&record, &ReporterPolicy::default())
@@ -192,11 +183,7 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
         assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{body}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
-    let clean = [
-        "<meta charset=\"utf-8\">https://plain.evil.test/x",
-        "<meta name=\"a\">https://plain.evil.test/x",
-        "<meta>https://plain.evil.test/x",
-    ];
+    let clean = ["<meta charset=\"utf-8\">https://plain.evil.test/x"];
     clean.iter().try_for_each(|body| {
         let record = run(&mail_with_body("text/html", body.as_bytes()))?;
         assert!(record.uncertain_reasons.is_empty(), "{body}");
@@ -206,7 +193,7 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
         "text/html; charset=utf-8",
         b"<meta charset=\"shift_jis\">https://plain.evil.test/x",
     ))?;
-    assert!(labelled.uncertain_reasons.is_empty());
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
     let late = format!("{}<meta charset=\"shift_jis\">", "a".repeat(LONG_PADDING));
     assert_eq!(
         run(&mail_with_body("text/html", late.as_bytes()))?.uncertain_reasons,
@@ -241,14 +228,23 @@ fn a_replacement_or_user_defined_label_is_flagged_over_ascii() -> Result<(), Box
 
 
 #[test]
-fn a_genuine_iso_2022_jp_part_is_not_flagged_for_its_escape() -> Result<(), Box<dyn std::error::Error>> {
-    let plain = run(&mail_with_body("text/plain; charset=iso-2022-jp", b"\x1b(Bhttps://plain.evil.test/x"))?;
-    assert!(plain.uncertain_reasons.is_empty());
-    assert!(domains(&plain).iter().any(|host| host == "plain.evil.test"));
-    let hidden = run(&mail_with_body("text/plain; charset=iso-2022-jp", b"https://pl\x1b(Bain.evil.test/x"))?;
-    assert!(domains(&hidden).iter().any(|host| host == "plain.evil.test"));
+fn a_non_ascii_compatible_label_is_flagged_whatever_the_body() -> Result<(), Box<dyn std::error::Error>> {
+    ["iso-2022-jp", "csiso2022jp", "utf-16", "utf-16le", "UTF-16BE", "unicode"]
+        .iter()
+        .try_for_each(|label| {
+            let plain = run(&mail_with_body(&format!("text/plain; charset={label}"), b"https://plain.evil.test/x"))?;
+            assert!(plain.uncertain_reasons.iter().any(|reason| reason == "charset_undecoded"), "{label}");
+            let escaped = run(&mail_with_body(
+                &format!("text/html; charset={label}"),
+                b"\x1b(Bhttps://plain.evil.test/x",
+            ))?;
+            assert!(escaped.uncertain_reasons.iter().any(|reason| reason == "charset_undecoded"), "{label}");
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
     let other = run(&mail_with_body("text/plain; charset=utf-8", b"\x1b(Bhttps://plain.evil.test/x"))?;
     assert_eq!(other.uncertain_reasons, ["charset_undecoded"]);
+    let ascii = run(&mail_with_body("text/plain; charset=windows-1252", b"https://plain.evil.test/x"))?;
+    assert!(ascii.uncertain_reasons.is_empty());
     Ok(())
 }
 
@@ -281,6 +277,10 @@ fn a_meta_tag_read_two_ways_is_flagged() -> Result<(), Box<dyn std::error::Error
         "<meta charset=utf-8 charset=utf-8>",
         "<meta x=\"<meta charset=utf-8>\" charset=shift_jis>",
         "<meta content=\"> charset=utf-8>",
+        "<meta name=\"a\">",
+        "<meta>",
+        "<meta name=\"viewport\" content=\"width=device-width\">",
+        "<meta name=\"viewport\" content=\"width=device-width\"><meta charset=\"utf-8\">",
     ]
     .iter()
     .try_for_each(|tag| {
@@ -296,8 +296,7 @@ fn a_meta_tag_read_one_way_is_not_flagged() -> Result<(), Box<dyn std::error::Er
     [
         "<meta charset=\"utf-8\">",
         "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">",
-        "<meta name=\"a>b\" content=\"c\"><meta charset=utf-8>",
-        "<meta charset=utf-8><meta name=viewport>",
+        "<meta charset=utf-8><meta charset='utf-8' />",
     ]
     .iter()
     .try_for_each(|tag| {
@@ -378,7 +377,6 @@ fn only_the_allowlisted_utf_8_meta_forms_are_not_flagged() -> Result<(), Box<dyn
         "<meta http-equiv=\"content-type\"\r\n content=\"text/html; charset=utf-8\" />",
         "<meta http-equiv='content-type' content='text/html; charset=utf-8'>",
         "<meta http-equiv='content-type' content='text/html; charset=utf-8' />",
-        "<meta name=\"viewport\" content=\"width=device-width\"><meta charset=\"utf-8\">",
     ]
     .iter()
     .try_for_each(|tag| {
@@ -485,5 +483,114 @@ fn a_meta_tag_past_byte_1024_is_judged_too() -> Result<(), Box<dyn std::error::E
     );
     let allowed = format!("<title>{padding}</title><meta charset=utf-8>{PLAIN_URL}");
     assert!(run(&mail_with_body("text/html", allowed.as_bytes()))?.uncertain_reasons.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_meta_spelled_with_character_references_or_unlisted_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    [
+        "<meta http-equiv=\"Content-Type\" content=\"text/html; &#99;harset=shift_jis\">",
+        "<meta http-equiv=\"Content-Type\" content=\"text/html; &#x63;&#x68;&#x61;&#x72;&#x73;&#x65;&#x74;=shift_jis\">",
+        "<meta content=\"text/html; c&#104;arset=shift_jis\" http-equiv=content-type>",
+        "<meta http-equiv=content-type content=\"text/html; &#67;HARSET=shift_jis\">",
+        "<meta http-equiv=content-type content=\"text/html; charset&#61;shift_jis\">",
+        "<meta name=viewport content=\"width=device-width\">",
+    ]
+    .iter()
+    .try_for_each(|tag| {
+        let record = run(&mail_with_body("text/html", format!("<html><head>{tag}</head>{PLAIN_URL}").as_bytes()))?;
+        assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{tag}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_meta_tag_without_a_close_inside_the_window_is_flagged_labelled_or_not() -> Result<(), Box<dyn std::error::Error>> {
+    let long = format!("<meta charset=utf-8{}>", " ".repeat(LONG_PADDING));
+    assert_eq!(
+        run(&mail_with_body("text/html", long.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
+    let repeated = "<meta ".repeat(LONG_PADDING);
+    assert_eq!(
+        run(&mail_with_body("text/html", repeated.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
+    let labelled = run(&mail_with_body("text/html; charset=utf-8", b"<meta name=viewport>"))?;
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
+    Ok(())
+}
+
+
+#[test]
+fn an_xml_declaration_naming_an_encoding_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    [
+        "<?xml version=\"1.0\" encoding=\"shift_jis\"?><html></html>",
+        "<?XML version=\"1.0\" ENCODING=\"shift_jis\"?><html></html>",
+        "<html><?xml encoding=shift_jis ?></html>",
+        "<?xml version=\"a>\" encoding=shift_jis?>",
+        "<?xml version=\"1.0\" encoding=\"utf-8\"",
+    ]
+    .iter()
+    .try_for_each(|body| {
+        let record = run(&mail_with_body("text/html", format!("{body}{PLAIN_URL}").as_bytes()))?;
+        assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{body}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    ["<?xml version=\"1.0\"?><html>encoding</html>", "<?xml version=\"1.0\"?>"]
+        .iter()
+        .try_for_each(|body| {
+            let record = run(&mail_with_body("text/html", format!("{body}{PLAIN_URL}").as_bytes()))?;
+            assert!(record.uncertain_reasons.is_empty(), "{body}");
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+    let labelled = run(&mail_with_body("text/html; charset=utf-8", b"<?xml encoding=shift_jis?>"))?;
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_padded_xml_declaration_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    let padded = format!("<?xml version=\"1.0\"{}encoding=\"shift_jis\"?><html></html>", " ".repeat(LONG_PADDING));
+    let unclosed = format!("<?xml version=\"1.0\"{}", " ".repeat(LONG_PADDING));
+    [padded, unclosed].iter().try_for_each(|body| {
+        let record = run(&mail_with_body("text/html", body.as_bytes()))?;
+        assert_eq!(record.uncertain_reasons, ["charset_undecoded"]);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_foreign_meta_in_a_labelled_part_is_flagged_and_an_allowlisted_one_is_not() -> Result<(), Box<dyn std::error::Error>> {
+    let flagged = run(&mail_with_body("text/html; charset=windows-1252", b"<html><meta charset=shift_jis>"))?;
+    assert_eq!(flagged.uncertain_reasons, ["charset_undecoded"]);
+    let clean = run(&mail_with_body("text/html; charset=utf-8", b"<meta charset=\"utf-8\">"))?;
+    assert!(clean.uncertain_reasons.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_encoded_word_in_a_content_type_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    [
+        "text/html; charset==?utf-8?q?shift=5Fjis?=",
+        "text/html; charset=\"=?utf-8?q?shift=5Fjis?=\"",
+        "text/html; charset==?us-ascii?b?c2hpZnRfamlz?=",
+        "text/html; charset=utf-8; name==?utf-8?q?a?=",
+        "text/html; name=\"=?utf-8?q?a?=\"",
+    ]
+    .iter()
+    .try_for_each(|content_type| {
+        assert!(
+            reasons(content_type)?.iter().any(|reason| reason == "charset_undecoded"),
+            "{content_type}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    assert!(reasons("text/html; charset=utf-8; name=\"a=b\"")?.is_empty());
     Ok(())
 }

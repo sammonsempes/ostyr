@@ -462,11 +462,21 @@ pub struct LinuxFile {
     #[serde(default)]
     pub metrics: MetricsSettings,
     #[serde(default)]
+    pub exec_probe: ExecProbeSettings,
+    #[serde(default)]
     pub isolation: IsolationSettings,
     #[serde(default = "default_credentials_path")]
     pub credentials_path: PathBuf,
     #[serde(default)]
     pub fim: Option<FimFile>,
+}
+
+
+/// The exec probe switch: off until an operator turns it on, because exec events duplicate Tetragon's `process_exec`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ExecProbeSettings {
+    pub enabled: bool,
 }
 
 

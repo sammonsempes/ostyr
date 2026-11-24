@@ -50,6 +50,8 @@ jobs:
         run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-load -- -D warnings
       - name: Lint the host crate with the live test feature
         run: cargo clippy --locked -p ebpf-probes --all-targets --features ebpf-live-test -- -D warnings
+      - name: Lint the Linux agent with the ebpf feature
+        run: cargo clippy --locked -p agent-linux --all-targets --features ebpf -- -D warnings
       - name: Install the object root-owned at the path the loader reads
         run: sudo install -D -m 644 -o root -g root crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel /usr/lib/ostyr/ebpf/exec.o
       - name: Run the live tests as root, failing when they cannot run

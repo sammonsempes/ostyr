@@ -1366,6 +1366,44 @@ fn a_switch_without_a_matching_prepared_log_changes_nothing_and_a_failing_new_lo
 
 
 #[test]
+fn a_writer_panic_then_a_reload_swap_leaves_a_log_that_appends() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let context = ReloadContext {
+        actor_id: "test".to_owned(),
+        tenant: "default".to_owned(),
+        module: "example".to_owned(),
+        target: "module.yaml".to_owned(),
+        request_id: "test".to_owned(),
+    };
+    std::thread::scope(|scope| {
+        let _panicked = scope
+            .spawn(|| {
+                let _guard = running.state.audit.state.lock();
+                assert!(running.state.audit.state.is_poisoned(), "poison the writer lock");
+            })
+            .join();
+    });
+    assert!(running.state.audit.state.is_poisoned());
+    let swapped = directory.join("swapped.log");
+    let fresh = PreparedAudit {
+        path: settings.config.audit_log.clone(),
+        state: LogState {
+            writer: fs::OpenOptions::new().create(true).append(true).open(&swapped)?,
+            head: GENESIS_HASH.to_owned(),
+            poisoned: false,
+        },
+    };
+    let current = Mutex::new(directory.join("audit.log"));
+    switch_audit(&running.state, &context, &current, &Mutex::new(Some(fresh)), &settings);
+    assert!(!running.state.audit.state.is_poisoned());
+    assert_eq!(verify(std::io::BufReader::new(fs::File::open(&swapped)?), None)?.records, 1);
+    Ok(())
+}
+
+
+#[test]
 fn the_first_server_refuses_a_plain_public_address_and_an_address_in_use() -> TestResult {
     let running = live("")?;
     let fx = fixture()?;

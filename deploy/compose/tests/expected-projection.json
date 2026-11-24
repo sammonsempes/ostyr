@@ -42,6 +42,10 @@
       "file": "secrets/pg_service_password",
       "name": "ostyr_pg_service_password"
     },
+    "playbooks_pg_password": {
+      "file": "secrets/playbooks_pg_password",
+      "name": "ostyr_playbooks_pg_password"
+    },
     "store_key": {
       "file": "secrets/store.key",
       "name": "ostyr_store_key"
@@ -117,6 +121,60 @@
         {
           "source": "state",
           "target": "/var/lib/ostyr",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "playbooks": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-playbooks",
+        "/etc/ostyr/playbooks.yaml"
+      ],
+      "depends_on": {
+        "platform": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "playbooks_pg_password",
+          "target": "/run/secrets/playbooks_pg_password"
+        },
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65533:65533",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "playbooksstate",
+          "target": "/var/lib/ostyr-playbooks",
           "type": "volume",
           "volume": {}
         }
@@ -297,6 +355,9 @@
   "volumes": {
     "pgdata": {
       "name": "ostyr_pgdata"
+    },
+    "playbooksstate": {
+      "name": "ostyr_playbooksstate"
     },
     "state": {
       "name": "ostyr_state"

@@ -5,7 +5,7 @@ use aya::programs::ProgramError;
 use aya::sys::SyscallError;
 use aya::EbpfError;
 use ebpf_probes::btf::Unsupported;
-use ebpf_probes::error::{attach_error, ebpf_error, errno_of, map_error, program_load_error, LoadError};
+use ebpf_probes::error::{attach_error, ebpf_error, errno_of, load_error_name, map_error, program_load_error, LoadError};
 use ebpf_probes::object::ObjectError;
 use ebpf_probes::shape::{ShapeError, DROPS_NAME, RING_NAME};
 use std::error::Error;
@@ -122,6 +122,7 @@ fn every_variant_has_fixed_text_and_the_inner_causes_are_kept() -> Result<(), Bo
         LoadError::WrongProgramType,
         LoadError::TakeMap(RING_NAME),
         LoadError::TakeMap(DROPS_NAME),
+        LoadError::NotBuilt,
     ];
     let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
     assert_eq!(texts.iter().collect::<std::collections::HashSet<_>>().len(), all.len());
@@ -132,5 +133,41 @@ fn every_variant_has_fixed_text_and_the_inner_causes_are_kept() -> Result<(), Bo
     assert!(with_source.iter().take(CAUSED_VARIANTS).all(|has| *has));
     assert!(with_source.iter().skip(CAUSED_VARIANTS).all(|has| !has));
     assert_eq!(all.first(), Some(&LoadError::Object(ObjectError::Owner)));
+    Ok(())
+}
+
+
+#[test]
+fn every_variant_has_one_fixed_name_without_errno_or_cause() -> Result<(), Box<dyn Error>> {
+    let all = [
+        LoadError::from(ObjectError::Owner),
+        LoadError::from(ShapeError::PinnedMap),
+        LoadError::from(Unsupported("no task_struct")),
+        LoadError::Parse,
+        LoadError::MapCreate { errno: Some(1) },
+        LoadError::ProgramLoad { errno: Some(NO_ACCESS) },
+        LoadError::Attach { errno: None },
+        LoadError::MissingProgram,
+        LoadError::WrongProgramType,
+        LoadError::TakeMap(RING_NAME),
+        LoadError::NotBuilt,
+    ];
+    let names: Vec<&str> = all.iter().map(load_error_name).collect();
+    assert_eq!(
+        names,
+        [
+            "Object",
+            "Shape",
+            "Btf",
+            "Parse",
+            "MapCreate",
+            "ProgramLoad",
+            "Attach",
+            "MissingProgram",
+            "WrongProgramType",
+            "TakeMap",
+            "NotBuilt"
+        ]
+    );
     Ok(())
 }

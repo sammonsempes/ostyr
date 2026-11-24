@@ -545,3 +545,63 @@ fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) ->
 fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path.as_ref(), content)
 }
+
+
+#[derive(Clone)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+static ANCHOR: std::sync::LazyLock<tracing::Dispatch> =
+    std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+#[test]
+fn confirmed_identity_dead_letters_are_one_grouped_line_per_cycle() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let forms: [&[&str]; THREE_FORMS] = [&[], &[], &["a::1:0"]];
+    let deliveries: Vec<Delivery> = forms.iter().zip(TOKEN_ONE..).map(|(ids, token)| host(token, ids)).collect();
+    let (mut wiring, _bus) = make_bus(deliveries, (None, false));
+    let (send, _) = recording_sender(false);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&bytes));
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+    let report = tracing::subscriber::with_default(subscriber, || cycle(&mut wiring, &*send))?;
+    let logs = String::from_utf8(held(&bytes).clone())?;
+    assert_eq!(tally(&report, "identity_unusable"), THREE_FORMS as u64);
+    assert_eq!(logs.matches("dead letters of this cycle").count(), 1, "{logs}");
+    assert!(logs.contains("a/identity_unusable:no_message_id=2"), "{logs}");
+    assert!(logs.contains("a/identity_unusable:bad_agent_id=1"), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn an_unconfirmed_identity_dead_letter_is_not_recorded() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let (mut wiring, _bus) = make_bus(vec![host(TOKEN_ONE, &[])], (None, true));
+    let (send, _) = recording_sender(false);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&bytes));
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+    tracing::subscriber::with_default(subscriber, || cycle(&mut wiring, &*send))?;
+    assert!(!String::from_utf8(held(&bytes).clone())?.contains("dead letters of this cycle"));
+    Ok(())
+}
+
+
+const THREE_FORMS: usize = 3;

@@ -2,6 +2,7 @@ use crate::harness::{bounded, client_paths, empty_revocation, init_logging, long
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
 use crate::revocation_support::RevocationControl;
 use crate::services::{counter, settings};
+use crate::spool_refused::captured_log;
 use crate::state::{default_state, discarding_audit, envelope_source, make_audited_state, new_stored, recording_sink};
 use crate::types::TestResult;
 use agent_channel::client::{connect_channel, heartbeat};
@@ -885,12 +886,20 @@ fn listener_texts_naming_one_address_compare_equal() -> TestResult {
 
 #[test]
 fn an_empty_relay_source_list_warns_at_a_reload_and_a_listed_one_does_not() -> TestResult {
-    let _logging = scoped_logging();
-    warn_empty_relay_sources(&ChannelSettings::default());
-    warn_empty_relay_sources(&ChannelSettings {
+    init_logging()?;
+    let (captured, _guard) = captured_log();
+    let listed = ChannelSettings {
         relay_sources: vec![host(RELAY_BYTE)],
         ..ChannelSettings::default()
-    });
+    };
+    warn_empty_relay_sources(&ChannelSettings::default(), false);
+    warn_empty_relay_sources(&listed, true);
+    warn_empty_relay_sources(&listed, false);
+    assert!(captured.lock().map_err(|_| "poisoned")?.is_empty());
+    warn_empty_relay_sources(&ChannelSettings::default(), true);
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains("no relay_sources"));
     Ok(())
 }
 

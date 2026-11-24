@@ -23,6 +23,9 @@ pub const MAX_HEADERS: usize = 512;
 pub const MAX_HEADER_BYTES: usize = 16 * KIB;
 
 
+pub const MAX_HEADER_REGION_BYTES: usize = MAX_HEADERS * MAX_HEADER_BYTES;
+
+
 pub const MAX_URLS: usize = 500;
 
 

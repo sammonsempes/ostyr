@@ -1,6 +1,8 @@
 #![cfg(unix)]
 mod capabilities;
 mod cursor;
+mod exec_events;
+mod exec_probe;
 mod fim;
 mod follow;
 mod hostmetrics;
