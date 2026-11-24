@@ -199,6 +199,12 @@ pub const REASON_TYPE_CHAIN: &str = "task_struct member type chain is too long o
 pub const REASON_OUT_OF_STRUCT: &str = "task_struct member lies outside the struct";
 
 
+pub const REASON_NOT_64_BIT: &str = "the probe supports 64-bit hosts only (a pointer is read as 8 bytes)";
+
+
+pub const POINTER_BITS: u32 = 64;
+
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TaskOffsets {
     pub real_parent: u32,
@@ -229,6 +235,16 @@ impl std::fmt::Display for Unsupported {
 
 
 impl std::error::Error for Unsupported {}
+
+
+/// Refuses a host whose pointers are not 8 bytes: `REAL_PARENT_BYTES` assumes it.
+pub fn require_64_bit(pointer_bits: u32) -> Result<(), Unsupported> {
+    if pointer_bits == POINTER_BITS {
+        Ok(())
+    } else {
+        Err(Unsupported(REASON_NOT_64_BIT))
+    }
+}
 
 
 /// Opens the BTF file once and reads the offsets from that handle.
