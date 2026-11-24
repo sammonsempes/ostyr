@@ -418,6 +418,12 @@ pub fn log_replay(range: Option<(u64, u64)>, records: u32) {
 }
 
 
+pub fn log_partial_ack(range: Option<(u64, u64)>, deleted: usize, expected: usize) {
+    let text = format!("playbooks round partial ack range {range:?}: {deleted} of {expected} rows deleted, the rest replays");
+    warn!("{text}");
+}
+
+
 /// One round: read the oldest page of the tenant's feed, simulate, write the trace, append one record, then delete the rows.
 pub async fn run_round<Out: Write>(
     exec: StoreExec<'_, '_>,
@@ -450,8 +456,12 @@ pub async fn run_round<Out: Write>(
             audit(round_entry(tenant_of(scope), &outcome, now()))?;
             *replays = next_replays(replays, outcome.range);
         }
-        ack_playbook_feed(exec, scope, &items).await?;
-        *replays = Replays::default();
+        let deleted = ack_playbook_feed(exec, scope, &items).await?;
+        if deleted < items.len() {
+            log_partial_ack(outcome.range, deleted, items.len());
+        } else {
+            *replays = Replays::default();
+        }
         Ok(outcome)
     }
 }
@@ -467,6 +477,12 @@ pub fn next_failures(failures: u32, outcome: &Result<Outcome, RoundError>) -> u3
 
 pub fn backoff(interval_seconds: u64, failures: u32) -> Duration {
     Duration::from_secs(interval_seconds).saturating_mul(1 << failures.min(MAX_BACKOFF_SHIFT))
+}
+
+
+/// A failure streak is loud at its second failure and again at each power of two.
+pub fn is_loud(failures: u32) -> bool {
+    failures >= LOUD_AFTER_FAILURES && failures.is_power_of_two()
 }
 
 
@@ -488,7 +504,7 @@ pub fn log_round(outcome: &Result<Outcome, RoundError>, failures: u32) {
         Ok(_empty) => {}
         Err(failed) => {
             let text = format!("playbooks round failed ({failures} in a row), rows kept: {failed}");
-            if failures == LOUD_AFTER_FAILURES {
+            if is_loud(failures) {
                 error!("{text}");
             } else {
                 warn!("{text}");

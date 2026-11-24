@@ -19,9 +19,9 @@ use response_playbooks::error::RoundError;
 use response_playbooks::feed::{alert_json, summary_value};
 use response_playbooks::model::{ConditionOutcome, Mode, Trace, TraceEvent};
 use response_playbooks::service::{
-    backoff, bounded_name, list, load_settings, next_failures, next_replays, open_service_settings, outcome_of, round_entry, run_id, run_round,
-    serve, shown_id, sort_page, start_only_changed, validate_settings, Live, Outcome, Replays, ServiceSettings, Sorted, INVALID_ID,
-    MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
+    backoff, bounded_name, is_loud, list, load_settings, log_partial_ack, next_failures, next_replays, open_service_settings, outcome_of,
+    round_entry, run_id, run_round, serve, shown_id, sort_page, start_only_changed, validate_settings, Live, Outcome, Replays, ServiceSettings,
+    Sorted, INVALID_ID, MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -42,6 +42,15 @@ const THREE: usize = 3;
 
 
 const FIVE: usize = 5;
+
+
+const FOUR: u32 = 4;
+
+
+const EIGHT: u32 = 8;
+
+
+const SIXTEEN: u32 = 16;
 
 
 const BIG_NAME: usize = 10_000;
@@ -96,6 +105,7 @@ pub struct Fake {
     pub fail_feed: Mutex<bool>,
     pub fail_ack: Mutex<bool>,
     pub fail_audit: Mutex<bool>,
+    pub short_ack: Mutex<bool>,
 }
 
 
@@ -178,7 +188,9 @@ pub fn handle(fake: &Fake, sql: &'static str, params: &[String]) -> Result<Vec<R
             let ids: Vec<String> = serde_json::from_str(first).map_err(|_bad| server_error())?;
             let mut rows = lock(&fake.rows);
             let before = rows.len();
-            rows.retain(|row| row.first().is_none_or(|id| !ids.contains(id)));
+            if !*lock(&fake.short_ack) {
+                rows.retain(|row| row.first().is_none_or(|id| !ids.contains(id)));
+            }
             Ok(vec![vec![(before - rows.len()).to_string()]])
         }
     } else {
@@ -274,6 +286,7 @@ pub fn env_with(settings: impl FnOnce(&mut ServiceSettings)) -> Result<Env, Box<
         fail_feed: Mutex::new(false),
         fail_ack: Mutex::new(false),
         fail_audit: Mutex::new(false),
+        short_ack: Mutex::new(false),
     };
     Ok(Env {
         dir,
@@ -886,5 +899,38 @@ fn nothing_in_the_service_can_reach_a_connector() -> TestResult {
         .for_each(|name| assert!(!text.contains(name), "{file} names {name}"));
         Ok(())
     })?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_partial_delete_is_not_a_success_and_keeps_the_replay_count() -> TestResult {
+    let env = env()?;
+    put(&env, vec![row_of(&whoami("e1"), FIRST_SEQ, 0)]);
+    *lock(&env.fake.short_ack) = true;
+    let mut replays = Replays::default();
+    round_with(&env, &mut replays).await?;
+    assert_eq!(
+        replays,
+        Replays {
+            range: Some((FIRST_SEQ, FIRST_SEQ)),
+            records: 1
+        }
+    );
+    assert_eq!(left(&env), 1);
+    round_with(&env, &mut replays).await?;
+    assert_eq!(replays.records, TWO as u32);
+    *lock(&env.fake.short_ack) = false;
+    round_with(&env, &mut replays).await?;
+    assert_eq!((left(&env), replays), (0, Replays::default()));
+    log_partial_ack(None, 0, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_failure_streak_is_loud_at_each_power_of_two_from_the_second_failure() -> TestResult {
+    let loud: Vec<u32> = (0..=SIXTEEN).filter(|failures| is_loud(*failures)).collect();
+    assert_eq!(loud, [TWO as u32, FOUR, EIGHT, SIXTEEN]);
     Ok(())
 }

@@ -28,6 +28,7 @@ signal-hook = "0.4.6"
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tracing-log = "0.2"
 tracing-subscriber = "0.3"
 
 [lints]
