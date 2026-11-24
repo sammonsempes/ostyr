@@ -4955,6 +4955,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "status-page",
+ "strum",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
