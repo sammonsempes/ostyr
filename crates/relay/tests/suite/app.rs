@@ -7,7 +7,7 @@ use relay::app::{
 use relay::audit::{append_entry, lifecycle_entry, START_ACTION};
 use relay::error::RelayError;
 use relay::header::proxy_header;
-use relay::model::{Options, Paths};
+use relay::model::{Options, Paths, RelaySettings};
 use rustix::process::{getpid, kill_process, Signal};
 use std::io;
 use std::path::Path;
@@ -119,6 +119,19 @@ async fn roundtrip(address: std::net::SocketAddr) -> TestResult {
     let mut answer = String::new();
     client.read_to_string(&mut answer).await?;
     assert_eq!(answer, "echo me");
+    Ok(())
+}
+
+
+async fn config_reaches(engine: &core_config::reload::ReloadEngine<RelaySettings>, wanted: usize) -> TestResult {
+    let mut seen = false;
+    for _attempt in 0..POLL_ATTEMPTS {
+        seen = seen || current_config(engine).max_connections == wanted;
+        if !seen {
+            tokio::time::sleep(POLL_STEP).await;
+        }
+    }
+    assert!(seen, "max_connections never reached {wanted}");
     Ok(())
 }
 
@@ -236,6 +249,7 @@ async fn the_relay_forwards_audits_start_and_stop_and_reloads_on_file_change() -
     );
     std::fs::write(&settings, lowered)?;
     audit_contains(&audit, "applied").await?;
+    config_reaches(&engine, LOWERED).await?;
     assert_eq!(current_config(&engine).max_connections, LOWERED);
     stop.send(()).map_err(|()| "stop dropped")?;
     timeout(SIGNAL_WAIT, running).await???;
