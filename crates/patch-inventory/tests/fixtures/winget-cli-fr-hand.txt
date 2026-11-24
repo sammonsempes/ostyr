@@ -1,0 +1,9 @@
+   - 
+   \ 
+   | 
+Nom                       ID             Version   Disponible
+----------------------------------------------------------------
+7-Zip 22.01 (x64 edition) 7zip.7zip      22.01     26.06
+Microsoft Edge            Microsoft.Edge 100.0.1.0 156.0.4314.58
+2 mises à niveau disponibles.
+1 package(s) ont des numéros de version qui ne peuvent pas être déterminés. Utilisez --include-unknown pour voir tous les résultats.
