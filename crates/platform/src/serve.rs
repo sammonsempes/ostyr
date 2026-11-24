@@ -1,11 +1,16 @@
-//! Usage: platform_api <module.yaml>. Serves the fifteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
+//! The `ostyr-platform` service: serves the fifteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
 
 
+use crate::merge::{
+    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, start_only_keys, weights_file_of, ACTOR,
+};
+use crate::permits::{module_semaphores, start_permits};
+use crate::types::InterruptWait;
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
 use alerts::settings::{api_startup_reloads, module_audit, open_pg_engine_from, DEFAULT_TENANT};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
-use core_api::server::{new_listener, run_loaded, stop_listener};
+use core_api::server::{listening_address, new_listener, run_loaded, stop_listener};
 use core_api::types::{SharedListener, StartupReloadFn};
 use core_config::load::load_module;
 use core_config::reload::{open_engine, reload, ReloadContext};
@@ -13,15 +18,10 @@ use core_config::reload::{open_engine, reload, ReloadContext};
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
-use platform::merge::{
-    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, start_only_keys, weights_file_of, ACTOR,
-};
-use platform::permits::{module_semaphores, start_permits};
 use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
-use std::io::{stderr, stdout, Write};
+use std::io::stdout;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -36,18 +36,28 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
 const STARTUP_REQUEST: &str = "startup";
 
 
-const USAGE: &str = "usage: platform_api <module.yaml>";
+const USAGE: &str = "usage: ostyr-platform <module.yaml>";
 
 
-async fn stop_on_interrupt(listener: SharedListener) {
-    match tokio::signal::ctrl_c().await {
+pub async fn stop_on(listener: SharedListener, wait: InterruptWait) {
+    match wait.await {
         Ok(()) => stop_listener(&listener, Some(Duration::from_secs(SHUTDOWN_GRACE_SECONDS))),
         Err(error) => tracing::error!(%error, "cannot listen for the interrupt signal"),
     }
 }
 
 
-async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+/// Logs the bound address once the server listens, so a caller that asked for port 0 can find it.
+pub async fn announce(listener: SharedListener) {
+    let address = listening_address(&listener).await;
+    address.iter().for_each(|bound| {
+        let text = bound.to_string();
+        tracing::info!(address = text, "serving");
+    });
+}
+
+
+pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let module_file = arguments.first().ok_or(USAGE)?;
     let loaded = load_module(Path::new(module_file))?;
     let modules = modules_of(&loaded.settings)?;
@@ -101,7 +111,8 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     }
     drop(held);
     let (router, access, documents) = module_parts(&modules, &engine, &module_semaphores(&modules), weights.as_ref(), page.as_ref())?;
-    tokio::spawn(stop_on_interrupt(listener.clone()));
+    tokio::spawn(stop_on(listener.clone(), Box::pin(tokio::signal::ctrl_c())));
+    tokio::spawn(announce(listener.clone()));
     let mut startup_reloads = api_startup_reloads(Arc::clone(&engine));
     if let Some(weights_engine) = weights {
         startup_reloads.push(Box::new(move || reload(&weights_engine)) as StartupReloadFn);
@@ -117,14 +128,4 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     )
     .await?;
     Ok(())
-}
-
-
-#[tokio::main]
-async fn main() -> std::io::Result<ExitCode> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    match run(&arguments).await {
-        Ok(()) => Ok(ExitCode::SUCCESS),
-        Err(error) => writeln!(stderr(), "{error}").map(|()| ExitCode::FAILURE),
-    }
 }

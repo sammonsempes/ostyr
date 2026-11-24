@@ -13,7 +13,7 @@ WEB_SECOPT = '    security_opt: ["no-new-privileges:true"]\n'
 WEB_COMMAND = '    command: ["/usr/local/bin/web_ui"'
 PG_CAPS = "    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]\n"
 PG_SECRETS = "    secrets: [pg_password, pg_service_password, pg_server_key, pg_server_cert, pg_ca]\n"
-PLATFORM_COMMAND = '    command: ["/usr/local/bin/platform_api", "/etc/ostyr/module.yaml"]\n'
+PLATFORM_COMMAND = '    command: ["/usr/local/bin/ostyr-platform", "/etc/ostyr/module.yaml"]\n'
 PG_ENV = "      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password\n"
 POSTGRES_RESTART = "  postgres:\n    image:"
 PROFILED_SERVICE = (
@@ -75,7 +75,7 @@ MUTANTS = {
         text, PG_SECRETS, "    secrets: [pg_password, pg_service_password, pg_server_key, pg_server_cert, !!binary JHtQR19TRUNSRVQ6LXBnX2NhfQ==]\n"
     ),
     "bin_platform_cmd": lambda text: replace_once(
-        text, PLATFORM_COMMAND, '    command: ["/usr/local/bin/platform_api", !!binary JHtQTEFURk9STV9DRkc6LS9ldGMvb3N0eXIvbW9kdWxlLnlhbWx9]\n'
+        text, PLATFORM_COMMAND, '    command: ["/usr/local/bin/ostyr-platform", !!binary JHtQTEFURk9STV9DRkc6LS9ldGMvb3N0eXIvbW9kdWxlLnlhbWx9]\n'
     ),
     "flow_anchor": lambda text: replace_once(text, PG_CAPS, "    cap_add: [&cap CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]\n"),
     "flow_alias": lambda text: replace_once(text, PG_CAPS, "    cap_add: [&cap CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, *cap]\n"),

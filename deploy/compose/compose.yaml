@@ -50,7 +50,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    command: ["/usr/local/bin/platform_api", "/etc/ostyr/module.yaml"]
+    command: ["/usr/local/bin/ostyr-platform", "/etc/ostyr/module.yaml"]
     depends_on:
       postgres:
         condition: service_healthy

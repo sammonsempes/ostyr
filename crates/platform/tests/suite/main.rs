@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod binary;
 mod fifo;
 mod fixture;
 mod merge;
