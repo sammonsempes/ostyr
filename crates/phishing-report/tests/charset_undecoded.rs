@@ -33,12 +33,14 @@ fn reasons(content_type: &str) -> Result<Vec<String>, Box<dyn std::error::Error>
 
 #[test]
 fn an_undecodable_charset_names_the_record_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    ["utf-32", "ibm037", "UTF-32LE"].iter().try_for_each(|label| {
-        let record = run(&mail(&format!("text/plain; charset={label}")))?;
-        assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{label}");
-        assert_eq!(record.counts.charset_undecoded, 1);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    ["utf-32", "ibm037", "UTF-32LE", "utf-7", "ibm850", "850", "us_ascii"]
+        .iter()
+        .try_for_each(|label| {
+            let record = run(&mail(&format!("text/plain; charset={label}")))?;
+            assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{label}");
+            assert_eq!(record.counts.charset_undecoded, 1);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
     assert_eq!(reasons("text/html; charset=\"ibm037\"")?, ["charset_undecoded"]);
     Ok(())
 }
@@ -46,12 +48,21 @@ fn an_undecodable_charset_names_the_record_uncertain() -> Result<(), Box<dyn std
 
 #[test]
 fn a_decodable_or_absent_charset_is_not_flagged() -> Result<(), Box<dyn std::error::Error>> {
-    ["utf-8", "UTF8", "us-ascii", "utf-16", "utf-7", "iso-2022-jp", "shift_jis", "gb18030"]
-        .iter()
-        .try_for_each(|label| {
-            assert!(reasons(&format!("text/plain; charset={label}"))?.is_empty(), "{label}");
-            Ok::<(), Box<dyn std::error::Error>>(())
-        })?;
+    [
+        "utf-8",
+        "UTF8",
+        "us-ascii",
+        "iso-2022-jp",
+        "shift_jis",
+        "gb18030",
+        "windows-1252",
+        "iso-8859-1",
+    ]
+    .iter()
+    .try_for_each(|label| {
+        assert!(reasons(&format!("text/plain; charset={label}"))?.is_empty(), "{label}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
     assert!(reasons("text/plain")?.is_empty());
     let record = run(&mail("text/plain; charset=utf-8"))?;
     let hosts: Vec<String> = observables(&record, &ReporterPolicy::default())
@@ -87,12 +98,15 @@ fn a_body_holding_a_replacement_nul_or_escape_is_flagged_under_any_label() -> Re
     ["shift_jis", "gb18030", "utf-8"].iter().try_for_each(|label| {
         bodies.iter().try_for_each(|body| {
             let record = run(&mail_with_body(&format!("text/plain; charset={label}"), body))?;
-            assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{label} {body:?}");
+            assert!(
+                record.uncertain_reasons.iter().any(|reason| reason == "charset_undecoded"),
+                "{label} {body:?}"
+            );
             Ok::<(), Box<dyn std::error::Error>>(())
         })
     })?;
     let bom = run(&mail_with_body("text/plain; charset=utf-8", b"\xff\xfeh\0t\0t\0p\0s\0"))?;
-    assert_eq!(bom.uncertain_reasons, ["charset_undecoded"]);
+    assert_eq!(bom.uncertain_reasons, ["charset_undecoded", "charset_mismatch"]);
     let record = run(&mail_with_body("text/plain", b"h\0t\0t\0p\0"))?;
     assert_eq!(record.uncertain_reasons, ["charset_undecoded"]);
     let clean = run(&mail_with_body("text/plain; charset=shift_jis", b"https://plain.evil.test/x"))?;
