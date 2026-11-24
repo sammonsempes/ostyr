@@ -10,7 +10,7 @@ use crate::text::{clean, clean_address, is_refused_address};
 use crate::types::RawReadFn;
 use crate::urls::{collect_indexed, html_text, index_from, URL_RULE};
 use data_encoding::HEXLOWER;
-use encoding_rs::{Encoding, ISO_2022_JP, REPLACEMENT, X_USER_DEFINED};
+use encoding_rs::{Encoding, REPLACEMENT, X_USER_DEFINED};
 use mail_parser::decoders::charsets::map::charset_decoder;
 use mail_parser::{Address, Header, HeaderValue, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use regex::Regex;
@@ -653,6 +653,21 @@ const META_TAG: &str = "<meta";
 const CHARSET_WORD: &str = "charset";
 
 
+const XML_DECLARATION: &str = "<?xml";
+
+
+const XML_DECLARATION_END: &str = "?>";
+
+
+const ENCODING_WORD: &str = "encoding";
+
+
+const ENCODED_WORD_MARK: &str = "=?";
+
+
+const TAG_WINDOW_BYTES: usize = 256;
+
+
 const CONTENT_TYPE_HEADER: &str = "content-type";
 
 
@@ -756,8 +771,8 @@ fn is_replacement_label(label: &str) -> bool {
 }
 
 
-fn is_iso_2022_jp(label: &str) -> bool {
-    encoding_of(label).is_some_and(|found| found == ISO_2022_JP)
+fn is_ascii_incompatible(label: &str) -> bool {
+    encoding_of(label.trim()).is_some_and(|found| !found.is_ascii_compatible())
 }
 
 
@@ -768,19 +783,20 @@ fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bo
             || is_replacement_label(name)
             || Encoding::for_label(name.trim().as_bytes()).is_none()
     });
-    let escape_allowed = label.is_some_and(is_iso_2022_jp);
-    let unlabelled_meta = label.is_none() && has_foreign_meta_charset(text);
+    let ascii_incompatible = label.is_some_and(is_ascii_incompatible);
+    let unlabelled_meta = has_foreign_meta_charset(text);
     unknown_label
-        || has_lost_bytes(text, escape_allowed)
+        || ascii_incompatible
+        || has_lost_bytes(text)
         || has_duplicate_charset(part)
         || unlabelled_meta
         || has_ambiguous_content_type(message, part)
 }
 
 
-fn has_lost_bytes(text: &str, escape_allowed: bool) -> bool {
+fn has_lost_bytes(text: &str) -> bool {
     text.chars()
-        .any(|character| LOST_BYTE_CHARACTERS.contains(&character) || (character == ESCAPE_CHARACTER && !escape_allowed))
+        .any(|character| LOST_BYTE_CHARACTERS.contains(&character) || character == ESCAPE_CHARACTER)
 }
 
 
@@ -797,12 +813,48 @@ fn is_utf8_label(label: &str) -> bool {
 }
 
 
+fn tag_window(lowered: &str, start: usize) -> &[u8] {
+    let tail = lowered.get(start..).map_or(&[][..], str::as_bytes);
+    tail.get(..TAG_WINDOW_BYTES).unwrap_or(tail)
+}
+
+
+fn find_bytes(haystack: &[u8], needle: &str) -> Option<usize> {
+    haystack.windows(needle.len()).position(|candidate| candidate == needle.as_bytes())
+}
+
+
+fn collapse_whitespace(tag: &[u8]) -> Vec<u8> {
+    tag.split(u8::is_ascii_whitespace)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(&b' ')
+}
+
+
+fn is_allowed_meta(window: &[u8]) -> bool {
+    let tag = window.iter().position(|byte| *byte == b'>').and_then(|end| window.get(..=end));
+    tag.map(collapse_whitespace)
+        .is_some_and(|collapsed| META_ALLOWED_FORMS.iter().any(|form| form.as_bytes() == collapsed.as_slice()))
+}
+
+
+fn has_encoding_declaration(window: &[u8]) -> bool {
+    find_bytes(window, XML_DECLARATION_END)
+        .and_then(|end| window.get(..end))
+        .is_none_or(|declaration| find_bytes(declaration, ENCODING_WORD).is_some())
+}
+
+
 fn has_foreign_meta_charset(text: &str) -> bool {
-    let collapsed = text.to_ascii_lowercase().split_ascii_whitespace().collect::<Vec<_>>().join(" ");
-    let remainder = META_ALLOWED_FORMS.iter().fold(collapsed, |current, form| current.replace(form, " "));
-    let charset_after = remainder.split_once(META_TAG).is_some_and(|(_, tail)| tail.contains(CHARSET_WORD));
-    let unclosed = remainder.rsplit_once(META_TAG).is_some_and(|(_, last)| !last.contains('>'));
-    charset_after || unclosed
+    let lowered = text.to_ascii_lowercase();
+    let foreign_meta = lowered
+        .match_indices(META_TAG)
+        .any(|(start, _)| !is_allowed_meta(tag_window(&lowered, start)));
+    foreign_meta
+        || lowered
+            .match_indices(XML_DECLARATION)
+            .any(|(start, _)| has_encoding_declaration(tag_window(&lowered, start)))
 }
 
 
@@ -863,7 +915,11 @@ fn is_ambiguous_content_type(raw: &str) -> bool {
     let continuations: Vec<&String> = names.iter().filter(|name| name.starts_with(CONTINUATION_MARKER)).collect();
     let has_first = continuations.iter().any(|name| FIRST_CONTINUATIONS.contains(&name.as_str()));
     let repeated = occurrences > 1 && (names.len() != occurrences || continuations.len() != names.len());
-    raw.contains(BACKSLASH) || repeated || continuations.iter().any(|name| is_bad_continuation(name)) || (!continuations.is_empty() && !has_first)
+    raw.contains(BACKSLASH)
+        || raw.contains(ENCODED_WORD_MARK)
+        || repeated
+        || continuations.iter().any(|name| is_bad_continuation(name))
+        || (!continuations.is_empty() && !has_first)
 }
 
 
