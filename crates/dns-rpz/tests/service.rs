@@ -6,8 +6,12 @@ mod engine;
 mod logging;
 #[path = "common/memory.rs"]
 mod memory;
+#[path = "common/readback.rs"]
+mod readback;
 #[path = "common/runner.rs"]
 mod runner;
+#[path = "common/sample.rs"]
+mod sample;
 #[path = "common/types.rs"]
 mod types;
 
@@ -18,18 +22,21 @@ use core_audit::log::{append, genesis_log};
 use core_audit::model::Outcome;
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use core_config::types::SharedAuditFn;
-use dns_rpz::cli::{run_round, Session};
+use dns_rpz::cli::{run_round, run_round_with, Session};
 use dns_rpz::error::ServiceError;
 use dns_rpz::model::{CommandStatus, LoopEnd, Reloader, RoundLoop, RoundOutcome, ServiceSettings};
+use dns_rpz::policy::Policy;
 use dns_rpz::service::{
     changed_pinned, check_allowlist, exit_code, failed_stage, invalid_settings, open_settings_engine, read_service_settings, round_failed_entry,
-    serve_rounds, service_context, service_runner, settings_state, validate_settings,
+    serve_rounds, service_context, service_readback, service_runner, settings_state, validate_settings, zone_file_matches,
 };
 use dns_rpz::source::open_source;
 use dns_rpz::types::{RunnerFn, WaitFn};
 use engine::{audit, context, engine_for, policy_text, replace_file};
 use memory::LimitedWriter;
+use readback::{stale_readback, zone_listing};
 use runner::{failing_runner, succeeding_runner};
+use sample::sample_policy;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -124,6 +131,15 @@ fn settings_engine(dir: &Path) -> Result<ReloadEngine<ServiceSettings>, ServiceE
 }
 
 
+/// Unbound serves the new zone exactly when the reload command succeeded.
+pub fn simulated_readback(runner: &RunnerFn, zone: &Path, program: &str, arguments: &[String], deadline: Duration) -> std::io::Result<String> {
+    match runner(program, arguments, deadline)? {
+        CommandStatus::Success => zone_listing(zone),
+        CommandStatus::Failed(_) | CommandStatus::TimedOut => stale_readback(program, arguments, deadline),
+    }
+}
+
+
 fn drive(
     dir: &Path,
     settings: &ReloadEngine<ServiceSettings>,
@@ -139,13 +155,14 @@ fn drive(
     let spec = dir.join("iocs.jsonl").display().to_string();
     let open = open_source(&spec, &rejected);
     let zone_context = context();
+    let zone = dir.join("zone.db");
     let reloader = Reloader {
         runner,
+        readback: &|program: &str, arguments: &[String], deadline: Duration| simulated_readback(runner, &zone, program, arguments, deadline),
         audit: audit_sink,
         context: &zone_context,
     };
     let counter = dir.join("counter");
-    let zone = dir.join("zone.db");
     let mut session = Session {
         engine: &policy,
         clock: &now,
@@ -428,8 +445,10 @@ fn run_round_names_which_step_failed() -> TestResult {
     let spec = ioc_path.display().to_string();
     let open = open_source(&spec, &rejected);
     let outcome = |runner: &RunnerFn| -> Result<RoundOutcome, std::io::Error> {
+        let zone_path = dir.path().join("zone.db");
         let reloader = Reloader {
             runner,
+            readback: &|program: &str, arguments: &[String], deadline: Duration| simulated_readback(runner, &zone_path, program, arguments, deadline),
             audit: &*sink,
             context: &zone_context,
         };
@@ -710,5 +729,96 @@ fn the_exit_codes_tell_the_endings_apart() -> TestResult {
     );
     assert_eq!(format!("{:?}", exit_code(Err(ServiceError::Usage))), format!("{:?}", ExitCode::FAILURE));
     assert_eq!(THRICE, TWICE + 1);
+    Ok(())
+}
+
+
+fn round_outcome(dir: &Path, policy_override: Option<&Policy>) -> Result<RoundOutcome, Box<dyn std::error::Error>> {
+    logging::init_logging();
+    let policy = engine_for(&dir.join("policy.yaml"))?;
+    let rejected = AtomicU64::new(0);
+    let zone_context = context();
+    let sink = audit();
+    let counter = dir.join("counter");
+    let zone = dir.join("zone.db");
+    let spec = dir.join("iocs.jsonl").display().to_string();
+    let open = open_source(&spec, &rejected);
+    let reloader = Reloader {
+        runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
+        audit: &*sink,
+        context: &zone_context,
+    };
+    let mut report = Vec::new();
+    let mut session = Session {
+        engine: &policy,
+        clock: &now,
+        open: &*open,
+        rejected: &rejected,
+        counter: &counter,
+        output: &zone,
+        report: &mut report,
+        reloader: &reloader,
+    };
+    match policy_override {
+        Some(snapshot) => Ok(run_round_with(&mut session, snapshot)?),
+        None => Ok(run_round(&mut session)?),
+    }
+}
+
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) -> TestResult {
+    assert!(std::process::Command::new("mkfifo").arg(path).status()?.success());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_or_a_device_behind_the_counter_or_the_source_is_a_failed_round_never_a_hang() -> TestResult {
+    let dir = tempdir()?;
+    write_files(dir.path(), "first.example.com", INTERVAL)?;
+    assert_eq!(round_outcome(dir.path(), None)?, RoundOutcome::Published);
+    let counter = dir.path().join("counter");
+    fs::remove_file(&counter)?;
+    make_fifo(&counter)?;
+    assert_eq!(round_outcome(dir.path(), None)?, RoundOutcome::GenerationFailed);
+    fs::remove_file(&counter)?;
+    std::os::unix::fs::symlink("/dev/zero", &counter)?;
+    assert_eq!(round_outcome(dir.path(), None)?, RoundOutcome::GenerationFailed);
+    fs::remove_file(&counter)?;
+    let source = dir.path().join("iocs.jsonl");
+    fs::remove_file(&source)?;
+    make_fifo(&source)?;
+    assert_eq!(round_outcome(dir.path(), None)?, RoundOutcome::GenerationFailed);
+    fs::remove_file(&source)?;
+    std::os::unix::fs::symlink("/dev/zero", &source)?;
+    assert_eq!(round_outcome(dir.path(), None)?, RoundOutcome::GenerationFailed);
+    Ok(())
+}
+
+
+#[test]
+fn a_round_uses_the_policy_snapshot_it_is_given() -> TestResult {
+    let dir = tempdir()?;
+    write_files(dir.path(), "first.example.com", INTERVAL)?;
+    let mut snapshot = sample_policy();
+    snapshot.zone = "snapshot.example.net".to_owned();
+    snapshot.unbound.zonefile = dir.path().join("zone.db").display().to_string();
+    round_outcome(dir.path(), Some(&snapshot))?;
+    assert!(fs::read_to_string(dir.path().join("zone.db"))?.contains("$ORIGIN snapshot.example.net."));
+    assert!(zone_file_matches(&snapshot, &dir.path().join("zone.db")));
+    assert!(!zone_file_matches(&snapshot, &dir.path().join("other.db")));
+    Ok(())
+}
+
+
+#[test]
+fn the_service_reads_back_only_through_its_own_control_program() -> TestResult {
+    let refused = service_readback("/bin/true", &[], Duration::from_secs(1));
+    assert!(refused.err().is_some_and(|error| error.to_string().contains("another control program")));
+    let arguments = ["--no-such-option".to_owned()];
+    assert!(service_readback("unbound-control", &arguments, Duration::from_secs(INTERVAL)).is_err());
     Ok(())
 }

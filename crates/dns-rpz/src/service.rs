@@ -1,4 +1,4 @@
-use crate::cli::{run_round, Session};
+use crate::cli::{run_round_with, Session};
 use crate::error::{ReloadError, ServiceError};
 use crate::limits::{
     AUDIT_DECLARED_KEYS, CLICKHOUSE_PREFIX, DEFAULT_UNBOUND_COMMAND, MAX_INTERVAL_SECONDS, MAX_SERVICE_SETTINGS_BYTES, MIN_INTERVAL_SECONDS,
@@ -6,8 +6,9 @@ use crate::limits::{
     SERVICE_TENANT, SERVICE_UNBOUND_COMMAND, STAGE_GENERATION, STAGE_ZONE_FILE,
 };
 use crate::model::{CommandStatus, LoopEnd, RoundLoop, RoundOutcome, ServiceSettings};
+use crate::policy::Policy;
 use crate::types::WaitFn;
-use crate::unbound::run_with_deadline;
+use crate::unbound::{run_readback, run_with_deadline};
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome, Record};
@@ -156,6 +157,16 @@ pub fn service_runner(program: &str, arguments: &[String], deadline: Duration) -
 }
 
 
+/// The same refusal and absolute path as `service_runner`, for the read-back of the served serial.
+pub fn service_readback(program: &str, arguments: &[String], deadline: Duration) -> io::Result<String> {
+    if program == DEFAULT_UNBOUND_COMMAND {
+        run_readback(SERVICE_UNBOUND_COMMAND, arguments, deadline)
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, ReloadError::Refused))
+    }
+}
+
+
 pub fn round_failed_entry(context: &ReloadContext, zone_file: &Path, stage: &str) -> NewEntry {
     NewEntry {
         timestamp: OffsetDateTime::now_utc(),
@@ -196,8 +207,8 @@ pub fn audit_failed_round(round_loop: &RoundLoop, zone_file: &Path, outcome: Rou
 
 
 /// Unbound reloads the zone file its own configuration names: the policy's `unbound.zonefile` must be the file this service writes.
-pub fn zone_file_matches(session: &Session) -> bool {
-    Path::new(&current_config(session.engine).unbound.zonefile) == session.output
+pub fn zone_file_matches(policy: &Policy, output: &Path) -> bool {
+    Path::new(&policy.unbound.zonefile) == output
 }
 
 
@@ -214,8 +225,9 @@ pub fn shared_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 
 /// One round, its failure audit, then the wait; `true` when the wait reported a stop.
 pub fn one_round(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, round: u64) -> Result<bool, ServiceError> {
-    let outcome = if zone_file_matches(session) {
-        run_round(session)?
+    let policy = current_config(session.engine);
+    let outcome = if zone_file_matches(&policy, session.output) {
+        run_round_with(session, &policy)?
     } else {
         let zone_file = session.output.display().to_string();
         error!(zone_file, "policy unbound.zonefile is not the service zone_file, round skipped");

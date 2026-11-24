@@ -55,9 +55,19 @@ pub enum CommandStatus {
 }
 
 
+/// What Unbound was read to serve after a reload attempt: the new serial, another serial, or no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadVerdict {
+    Applied,
+    Failed,
+    Unknown,
+}
+
+
 /// What a zone reload needs: the command runner, the audit sink and who is acting.
 pub struct Reloader<'a> {
     pub runner: &'a crate::types::RunnerFn<'a>,
+    pub readback: &'a crate::types::ReadbackFn<'a>,
     pub audit: &'a core_config::types::SharedAuditFn,
     pub context: &'a core_config::reload::ReloadContext,
 }

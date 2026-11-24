@@ -46,6 +46,10 @@ pub enum SerialError {
         #[source]
         source: ParseIntError,
     },
+    #[error("serial counter file: {0}")]
+    Open(#[source] ConfigError),
+    #[error("serial counter file `{0}` is larger than allowed")]
+    TooLarge(PathBuf),
     #[error("all 99 serials of the day are used, last was {0}")]
     Exhausted(u32),
     #[error("the clock {0} cannot be turned into a serial")]

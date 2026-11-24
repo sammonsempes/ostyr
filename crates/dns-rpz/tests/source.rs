@@ -220,6 +220,11 @@ fn run_from(open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>, dir: 
 }
 
 
+fn idle_readback(_program: &str, _arguments: &[String], _deadline: Duration) -> io::Result<String> {
+    Ok(String::new())
+}
+
+
 fn idle_runner(_program: &str, _arguments: &[String], _deadline: Duration) -> io::Result<CommandStatus> {
     Ok(CommandStatus::Success)
 }
@@ -300,6 +305,7 @@ fn the_rows_left_out_are_counted_in_the_summary() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &idle_runner,
+        readback: &idle_readback,
         audit: &*sink,
         context: &zone_context,
     };

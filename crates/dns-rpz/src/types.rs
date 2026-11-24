@@ -24,3 +24,6 @@ pub type ConnectionOutcome = Result<Result<(), hyper::Error>, tokio::time::error
 
 
 pub type PageResponse = hyper::Response<http_body_util::Full<bytes::Bytes>>;
+
+
+pub type ReadbackFn<'a> = dyn Fn(&str, &[String], Duration) -> io::Result<String> + 'a;

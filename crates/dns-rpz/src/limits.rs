@@ -203,3 +203,24 @@ pub const DEBOUNCE_MILLIS: u64 = 300;
 
 
 pub const AUDIT_DECLARED_KEYS: [&str; 7] = ["result", "diff", "reason", "changed_settings", "changed_files", "diff_sha256", "stage"];
+
+
+pub const MAX_COUNTER_BYTES: u64 = 32;
+
+
+pub const MAX_IOC_SOURCE_BYTES: u64 = 536_870_912;
+
+
+pub const MAX_IOC_LINES: u64 = 2_000_000;
+
+
+pub const READBACK_SUBCOMMAND: &str = "list_auth_zones";
+
+
+pub const MAX_CAPTURE_BYTES: u64 = 1_048_576;
+
+
+pub const SERIAL_WORD: &str = "serial";
+
+
+pub const NEW_ZONE_ON_DISK: &str = "the new zone is on disk and is loaded at the next Unbound start";

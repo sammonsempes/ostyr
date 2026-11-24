@@ -4,7 +4,8 @@ use crate::limits::{DEBOUNCE_MILLIS, MAX_ROUNDS};
 use crate::model::{LoopEnd, Reloader, RoundLoop};
 use crate::policy::open_policy;
 use crate::service::{
-    exit_code, open_settings_engine, read_service_settings, serve_rounds, service_context, service_runner, shared_audit, validate_settings,
+    exit_code, open_settings_engine, read_service_settings, serve_rounds, service_context, service_readback, service_runner, shared_audit,
+    validate_settings,
 };
 use crate::source::open_source;
 use crate::types::WaitFn;
@@ -82,6 +83,7 @@ pub fn run_service(args: &[String], wait: &WaitFn, max_rounds: u64, report: &mut
     let audit = shared_audit(&log);
     let reloader = Reloader {
         runner: &service_runner,
+        readback: &service_readback,
         audit: &*audit,
         context: &reload_context,
     };

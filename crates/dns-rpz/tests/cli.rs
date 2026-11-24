@@ -4,6 +4,8 @@ mod clock;
 mod engine;
 #[path = "common/memory.rs"]
 mod memory;
+#[path = "common/readback.rs"]
+mod readback;
 #[path = "common/runner.rs"]
 mod runner;
 #[path = "common/types.rs"]
@@ -15,11 +17,13 @@ use dns_rpz::cli::{run_command, run_session, Session};
 use dns_rpz::model::Reloader;
 use engine::{audit, context, engine_for, policy_text, replace_file};
 use memory::LimitedWriter;
+use readback::{stale_readback, zone_listing};
 use runner::{failing_runner, succeeding_runner};
 use std::fs;
 use std::io::{self, BufRead, Cursor};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 use types::TestResult;
@@ -54,6 +58,7 @@ fn a_session_generates_reloads_and_stops_at_quit() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
         audit: &*sink,
         context: &zone_context,
     };
@@ -97,6 +102,7 @@ fn a_failed_run_is_reported_and_the_session_goes_on() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
         audit: &*sink,
         context: &zone_context,
     };
@@ -132,6 +138,7 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
         audit: &*sink,
         context: &zone_context,
     };
@@ -183,6 +190,7 @@ fn a_failed_zone_reload_is_reported_after_the_summary() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &failing_runner,
+        readback: &stale_readback,
         audit: &*sink,
         context: &zone_context,
     };
@@ -218,6 +226,7 @@ fn one_run_reads_the_clock_once_and_the_source_and_the_zone_share_it() -> TestRe
     let zone_context = context();
     let reloader = Reloader {
         runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
         audit: &*sink,
         context: &zone_context,
     };

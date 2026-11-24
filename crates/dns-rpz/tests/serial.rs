@@ -3,12 +3,28 @@ mod types;
 
 
 use dns_rpz::error::SerialError;
+use dns_rpz::limits::MAX_COUNTER_BYTES;
 use dns_rpz::serial::{advance, day_base, next_serial, read_counter};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
 use tempfile::tempdir;
 use time::macros::datetime;
 use time::OffsetDateTime;
 use types::TestResult;
+
+
+const FIRST_DIGITS: usize = 10;
+
+
+const COUNTER_SERIAL: u32 = 2_026_110_301;
+
+
+const INVALID_UTF8: [u8; 2] = [0xff, 0xfe];
 
 
 const TODAY: u32 = 2_026_110_300;
@@ -119,7 +135,8 @@ fn an_unusable_counter_is_an_error_and_is_never_reset() -> TestResult {
     assert!(matches!(read_counter(&path), Err(SerialError::Counter { .. })));
     assert!(advance(&path, MORNING).is_err());
     assert_eq!(fs::read_to_string(&path)?, "garbage\n");
-    assert!(matches!(read_counter(dir.path()), Err(SerialError::Io(_))));
+    assert!(matches!(read_counter(dir.path()), Err(SerialError::Open(_))));
+    assert!(matches!(read_counter(&path.join("below")), Err(SerialError::Open(_))));
     Ok(())
 }
 
@@ -129,5 +146,44 @@ fn a_counter_that_cannot_be_written_is_an_error() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("missing").join("counter");
     assert!(matches!(advance(&path, MORNING), Err(SerialError::Io(_))));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) -> TestResult {
+    assert!(Command::new("mkfifo").arg(path).status()?.success());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_or_a_device_as_the_counter_is_refused_without_blocking() -> TestResult {
+    let dir = tempdir()?;
+    let fifo = dir.path().join("fifo");
+    make_fifo(&fifo)?;
+    assert!(matches!(read_counter(&fifo), Err(SerialError::Open(_))));
+    assert!(advance(&fifo, MORNING).is_err());
+    let link = dir.path().join("zero");
+    symlink("/dev/zero", &link)?;
+    assert!(matches!(read_counter(&link), Err(SerialError::Open(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_counter_larger_than_the_cap_is_refused_and_one_at_the_cap_is_read() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("counter");
+    fs::write(&path, vec![b'1'; usize::try_from(MAX_COUNTER_BYTES)? + 1])?;
+    assert!(matches!(read_counter(&path), Err(SerialError::TooLarge(_))));
+    fs::write(
+        &path,
+        format!("{}{}", " ".repeat(usize::try_from(MAX_COUNTER_BYTES)? - FIRST_DIGITS), "2026110301"),
+    )?;
+    assert_eq!(read_counter(&path)?, Some(COUNTER_SERIAL));
+    fs::write(&path, INVALID_UTF8)?;
+    assert!(matches!(read_counter(&path), Err(SerialError::Io(_))));
     Ok(())
 }

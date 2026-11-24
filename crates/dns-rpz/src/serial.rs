@@ -1,8 +1,10 @@
 use crate::atomic::write_atomic;
 use crate::error::SerialError;
-use crate::limits::{SERIAL_DAY_UNIT, SERIAL_MONTH_UNIT, SERIAL_YEAR_UNIT};
-use std::fs;
-use std::io::ErrorKind;
+use crate::limits::{MAX_COUNTER_BYTES, SERIAL_DAY_UNIT, SERIAL_MONTH_UNIT, SERIAL_YEAR_UNIT};
+use core_config::error::ConfigError;
+use core_config::parse::open_regular;
+use std::fs::File;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -32,15 +34,27 @@ pub fn next_serial(previous: Option<u32>, today: u32) -> Result<u32, SerialError
 }
 
 
-/// A missing file is a first run; an unreadable or non-numeric one is an error, never a reset.
+/// A missing file is a first run; a non-regular, oversized, unreadable or non-numeric one is an error, never a reset or a hang.
 pub fn read_counter(path: &Path) -> Result<Option<u32>, SerialError> {
-    match fs::read_to_string(path) {
-        Ok(text) => text.trim().parse::<u32>().map(Some).map_err(|source| SerialError::Counter {
+    match open_regular(path, &path.display().to_string()) {
+        Ok(handle) => parse_counter(handle, path).map(Some),
+        Err(ConfigError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(SerialError::Open(error)),
+    }
+}
+
+
+/// At most `MAX_COUNTER_BYTES` are read; one more is `TooLarge`.
+pub fn parse_counter(handle: File, path: &Path) -> Result<u32, SerialError> {
+    let mut text = String::new();
+    handle.take(MAX_COUNTER_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_COUNTER_BYTES {
+        Err(SerialError::TooLarge(path.to_path_buf()))
+    } else {
+        text.trim().parse::<u32>().map_err(|source| SerialError::Counter {
             path: path.to_path_buf(),
             source,
-        }),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(SerialError::Io(error)),
+        })
     }
 }
 

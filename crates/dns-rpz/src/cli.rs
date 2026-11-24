@@ -1,5 +1,5 @@
 use crate::error::RpzError;
-use crate::model::{Reloader, RoundOutcome, RunSummary};
+use crate::model::{ReloadVerdict, Reloader, RoundOutcome, RunSummary};
 use crate::policy::Policy;
 use crate::run::generate;
 use crate::types::{ClockFn, OpenFn};
@@ -33,11 +33,16 @@ pub fn run_generation(session: &mut Session) -> io::Result<()> {
 
 /// One generation and zone reload, shared by the `run` command and the service loop; the outcome says which step failed.
 pub fn run_round(session: &mut Session) -> io::Result<RoundOutcome> {
-    let policy = current_config(session.engine);
+    run_round_with(session, &current_config(session.engine))
+}
+
+
+/// The round on one policy snapshot, so the zone check and the generation cannot see two policies.
+pub fn run_round_with(session: &mut Session, policy: &Policy) -> io::Result<RoundOutcome> {
     let instant = (session.clock)();
     let result: Result<_, RpzError> = (session.open)(instant)
         .map_err(RpzError::from)
-        .and_then(|mut input| generate(&policy, &mut input, instant, session.counter, session.output))
+        .and_then(|mut input| generate(policy, &mut input, instant, session.counter, session.output))
         .map(|summary| RunSummary {
             source_bad_rows: session.rejected.load(Ordering::Relaxed),
             ..summary
@@ -46,9 +51,9 @@ pub fn run_round(session: &mut Session) -> io::Result<RoundOutcome> {
         Ok(summary) => {
             serde_json::to_writer(&mut *session.report, &summary)?;
             writeln!(session.report)?;
-            match reload_zone(&policy, session.reloader) {
-                Ok(()) => Ok(RoundOutcome::Published),
-                Err(failure) => writeln!(session.report, "failed reload {failure}").map(|()| RoundOutcome::ReloadFailed),
+            match reload_zone(policy, session.reloader, summary.serial) {
+                ReloadVerdict::Applied => Ok(RoundOutcome::Published),
+                verdict => writeln!(session.report, "failed reload {verdict:?}").map(|()| RoundOutcome::ReloadFailed),
             }
         }
         Err(failure) => {
