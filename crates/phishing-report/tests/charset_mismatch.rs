@@ -138,7 +138,7 @@ fn a_part_without_a_label_has_no_whatwg_reading() -> Result<(), Box<dyn std::err
 fn a_part_whose_raw_bytes_are_unreadable_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
     let raw = "From: a@x.test\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 7bit; x=y\r\n\r\nhttps://plain.evil.test/x\r\n";
     let record = triage(raw.as_bytes(), &[], &ReporterPolicy::default())?;
-    assert_eq!(record.uncertain_reasons, ["charset_mismatch"]);
+    assert_eq!(record.uncertain_reasons, ["charset_mismatch", "header_region_ambiguous"]);
     assert_eq!(record.counts.charset_mismatch, 1);
     Ok(())
 }
