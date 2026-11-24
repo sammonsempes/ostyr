@@ -15,6 +15,7 @@ pub struct Counts {
     pub messages_unopened: usize,
     pub headers_skipped: usize,
     pub parts_skipped: usize,
+    pub charset_undecoded: usize,
     pub attachments_skipped: usize,
     pub urls_refused: usize,
     pub urls_dropped: usize,
