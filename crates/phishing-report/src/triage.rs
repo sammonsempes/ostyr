@@ -671,6 +671,23 @@ const PARAMETER_SEPARATOR: char = ';';
 const QUOTE_CHARACTER: char = '"';
 
 
+const BACKSLASH: char = '\\';
+
+
+const META_ALLOWED_FORMS: &[&str] = &[
+    "<meta charset=\"utf-8\">",
+    "<meta charset=\"utf-8\" />",
+    "<meta charset='utf-8'>",
+    "<meta charset='utf-8' />",
+    "<meta charset=utf-8>",
+    "<meta charset=utf-8 />",
+    "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">",
+    "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" />",
+    "<meta http-equiv='content-type' content='text/html; charset=utf-8'>",
+    "<meta http-equiv='content-type' content='text/html; charset=utf-8' />",
+];
+
+
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
     if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
         mark_uncertain(record, reason);
@@ -759,9 +776,8 @@ fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bo
     unknown_label
         || has_lost_bytes(text, escape_allowed)
         || has_duplicate_charset(part)
-        || has_conflicting_content_types(message, part)
         || unlabelled_meta
-        || has_orphan_continuation(message, part)
+        || has_ambiguous_content_type(message, part)
 }
 
 
@@ -790,56 +806,12 @@ fn sniff_prefix(text: &str) -> String {
 }
 
 
-fn is_label_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
-}
-
-
-fn meta_label(tag: &str) -> Option<&str> {
-    let declared = tag.split('>').next().unwrap_or(tag);
-    declared.split_once(CHARSET_WORD).and_then(|(_, after)| {
-        let value = after.trim_start().trim_start_matches('=').trim_start().trim_start_matches(['"', '\'']);
-        value.split(|character: char| !is_label_character(character)).next()
-    })
-}
-
-
-#[derive(Clone, Copy, Default)]
-struct TagScan {
-    quote: Option<char>,
-    end: Option<usize>,
-    quoted_gt: bool,
-}
-
-
-fn scan_step(scan: TagScan, (index, character): (usize, char)) -> TagScan {
-    match (scan.end, scan.quote, character) {
-        (Some(_), _, _) => scan,
-        (None, None, '>') => TagScan { end: Some(index), ..scan },
-        (None, Some(_), '>') => TagScan { quoted_gt: true, ..scan },
-        (None, None, '"' | '\'') => TagScan {
-            quote: Some(character),
-            ..scan
-        },
-        (None, Some(open), _) if open == character => TagScan { quote: None, ..scan },
-        _ => scan,
-    }
-}
-
-
-fn is_meta_ambiguous(tag: &str) -> bool {
-    let scan = tag.char_indices().fold(TagScan::default(), scan_step);
-    let declared = tag.get(..scan.end.unwrap_or(tag.len())).unwrap_or(tag);
-    declared.matches(CHARSET_WORD).count() > 1 || (scan.quoted_gt && tag.contains(CHARSET_WORD))
-}
-
-
 fn has_foreign_meta_charset(text: &str) -> bool {
-    let prefix = sniff_prefix(text);
-    prefix
-        .split(META_TAG)
-        .skip(1)
-        .any(|tag| is_meta_ambiguous(tag) || meta_label(tag).is_some_and(|label| !is_utf8_label(label)))
+    let collapsed = sniff_prefix(text).split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    let remainder = META_ALLOWED_FORMS.iter().fold(collapsed, |current, form| current.replace(form, " "));
+    let charset_after = remainder.split_once(META_TAG).is_some_and(|(_, tail)| tail.contains(CHARSET_WORD));
+    let unclosed = remainder.rsplit_once(META_TAG).is_some_and(|(_, last)| !last.contains('>'));
+    charset_after || unclosed
 }
 
 
@@ -882,19 +854,6 @@ fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) ->
 }
 
 
-fn has_conflicting_content_types(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
-    let values: Vec<Option<String>> = content_type_raws(message, part)
-        .map(|raw| {
-            parameter_pairs(raw)
-                .into_iter()
-                .find(|(name, _)| name == CHARSET_WORD)
-                .map(|(_, value)| value)
-        })
-        .collect();
-    values.iter().any(|value| Some(value) != values.first())
-}
-
-
 fn is_bad_continuation(name: &str) -> bool {
     let number = name.strip_prefix(CONTINUATION_MARKER).map(|rest| rest.strip_suffix('*').unwrap_or(rest));
     number.is_some_and(|digits| {
@@ -903,16 +862,23 @@ fn is_bad_continuation(name: &str) -> bool {
 }
 
 
-fn has_orphan_continuation(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
-    content_type_raws(message, part).any(|raw| {
-        let names: Vec<String> = parameter_pairs(raw)
-            .into_iter()
-            .map(|(name, _)| name)
-            .filter(|name| name.starts_with(CONTINUATION_MARKER))
-            .collect();
-        let has_first = names.iter().any(|name| FIRST_CONTINUATIONS.contains(&name.as_str()));
-        names.iter().any(|name| is_bad_continuation(name)) || (!names.is_empty() && !has_first)
-    })
+fn is_ambiguous_content_type(raw: &str) -> bool {
+    let occurrences = raw.to_ascii_lowercase().matches(CHARSET_WORD).count();
+    let names: Vec<String> = parameter_pairs(raw)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with(CHARSET_WORD))
+        .collect();
+    let continuations: Vec<&String> = names.iter().filter(|name| name.starts_with(CONTINUATION_MARKER)).collect();
+    let has_first = continuations.iter().any(|name| FIRST_CONTINUATIONS.contains(&name.as_str()));
+    let repeated = occurrences > 1 && (names.len() != occurrences || continuations.len() != names.len());
+    raw.contains(BACKSLASH) || repeated || continuations.iter().any(|name| is_bad_continuation(name)) || (!continuations.is_empty() && !has_first)
+}
+
+
+fn has_ambiguous_content_type(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
+    let raws: Vec<&str> = content_type_raws(message, part).collect();
+    raws.len() > 1 || raws.iter().any(|raw| is_ambiguous_content_type(raw))
 }
 
 

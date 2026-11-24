@@ -181,6 +181,7 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
     [
         "<meta charset=\"shift_jis\">https://plain.evil.test/x",
         "<META CHARSET=shift_jis>https://plain.evil.test/x",
+        "<meta charset=\"UTF-8\" name=a>https://plain.evil.test/x",
         "<meta charset=us-ascii>https://plain.evil.test/x",
         "<meta charset=ascii>https://plain.evil.test/x",
         "<html><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\">https://plain.evil.test/x",
@@ -193,7 +194,6 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
     })?;
     let clean = [
         "<meta charset=\"utf-8\">https://plain.evil.test/x",
-        "<meta charset=\"UTF-8\" name=a>https://plain.evil.test/x",
         "<meta name=\"a\">https://plain.evil.test/x",
         "<meta>https://plain.evil.test/x",
     ];
@@ -267,6 +267,13 @@ fn a_meta_tag_read_two_ways_is_flagged() -> Result<(), Box<dyn std::error::Error
         "<meta\r\ncharset=\"utf-8\"\r\nCHARSET=\"shift_jis\">",
         "<!-- x --><meta charset=utf-8 charset=shift_jis>",
         "<meta content='>' charset=utf-8>",
+        "<meta\r\nCHARSET = \"utf-8\"\r\n>",
+        "<meta x\"=\">\" charset=shift_jis>",
+        "<meta x=\"<\" y='>' charset=shift_jis>",
+        "<meta charset=\"utf-8",
+        "<meta name=viewport",
+        "<meta charset=utf-8 charset=utf-8>",
+        "<meta x=\"<meta charset=utf-8>\" charset=shift_jis>",
         "<meta content=\"> charset=utf-8>",
     ]
     .iter()
@@ -282,7 +289,6 @@ fn a_meta_tag_read_two_ways_is_flagged() -> Result<(), Box<dyn std::error::Error
 fn a_meta_tag_read_one_way_is_not_flagged() -> Result<(), Box<dyn std::error::Error>> {
     [
         "<meta charset=\"utf-8\">",
-        "<meta\r\nCHARSET = \"utf-8\"\r\n>",
         "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">",
         "<meta name=\"a>b\" content=\"c\"><meta charset=utf-8>",
         "<meta charset=utf-8><meta name=viewport>",
@@ -319,9 +325,73 @@ fn two_content_type_headers_with_different_charsets_are_flagged() -> Result<(), 
         .iter()
         .try_for_each(|(first, second)| {
             let record = run(&two_content_types(first, second))?;
-            assert!(!record.uncertain_reasons.contains(&"charset_undecoded".to_owned()), "{first} / {second}");
+            assert!(record.uncertain_reasons.contains(&"charset_undecoded".to_owned()), "{first} / {second}");
             Ok::<(), Box<dyn std::error::Error>>(())
         })
+}
+
+
+#[test]
+fn a_content_type_with_a_backslash_or_a_repeated_charset_text_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    [
+        "text/plain; x=\"\\\"; charset=utf-8; y=\"; charset=shift_jis",
+        "text/plain; charset=utf-8; charset=shift_jis",
+        "text/plain; x=\"charset\"; charset=utf-8",
+        "text/plain; charset=utf-8; x=charset",
+        "text/plain; x=\"a\\\"b\"; charset=utf-8",
+        "text/plain; charset*0=utf-; charset=8",
+        "text/plain; charset*0=utf-; x=charset",
+    ]
+    .iter()
+    .try_for_each(|content_type| {
+        assert_eq!(reasons(content_type)?, ["charset_undecoded"], "{content_type}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_header_that_is_not_the_last_content_type_is_judged_too() -> Result<(), Box<dyn std::error::Error>> {
+    let record = run(&two_content_types("text/plain; charset=utf-8; charset=shift_jis", "text/plain"))?;
+    assert!(record.uncertain_reasons.contains(&"charset_undecoded".to_owned()));
+    Ok(())
+}
+
+
+#[test]
+fn only_the_allowlisted_utf_8_meta_forms_are_not_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    [
+        "<meta charset=\"utf-8\">",
+        "<META  CHARSET=\"UTF-8\">",
+        "<meta charset='utf-8'>",
+        "<meta charset=utf-8>",
+        "<meta charset=\"utf-8\" />",
+        "<meta charset='utf-8' />",
+        "<meta charset=utf-8 />",
+        "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">",
+        "<meta http-equiv=\"content-type\"\r\n content=\"text/html; charset=utf-8\" />",
+        "<meta http-equiv='content-type' content='text/html; charset=utf-8'>",
+        "<meta http-equiv='content-type' content='text/html; charset=utf-8' />",
+        "<meta name=\"viewport\" content=\"width=device-width\"><meta charset=\"utf-8\">",
+    ]
+    .iter()
+    .try_for_each(|tag| {
+        let record = run(&mail_with_body("text/html", format!("{tag}{PLAIN_URL}").as_bytes()))?;
+        assert!(record.uncertain_reasons.is_empty(), "{tag}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    [
+        "<meta charset=\"utf-8\" data-x>",
+        "<meta content=\"text/html; charset=utf-8\" http-equiv=\"content-type\">",
+        "<meta charset=\"utf8\">",
+        "<meta charset=\"utf-8\" >",
+    ]
+    .iter()
+    .try_for_each(|tag| {
+        let record = run(&mail_with_body("text/html", format!("{tag}{PLAIN_URL}").as_bytes()))?;
+        assert_eq!(record.uncertain_reasons, ["charset_undecoded"], "{tag}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
 }
 
 
