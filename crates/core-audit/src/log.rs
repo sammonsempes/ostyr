@@ -1,6 +1,7 @@
 use crate::canonical::{render_line, restrict_parameters, seal};
 use crate::error::AuditError;
 use crate::model::{NewEntry, Record, GENESIS_HASH};
+use crate::types::Slot;
 #[cfg(unix)]
 use crate::types::{FactsReader, Reopener};
 use crate::verify::{verify, MAX_RECORD_BYTES};
@@ -17,7 +18,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::time::Duration;
 
 
 #[derive(Debug)]
@@ -28,11 +30,28 @@ pub struct LogState<Output> {
 }
 
 
-/// One handle per log, shared by reference or `Arc`; the mutex serialises appenders.
+/// Where a queued entry's outcome is left, with a signal for the caller that waits for it.
+#[derive(Debug, Default)]
+pub struct SlotCell {
+    pub outcome: Mutex<Option<Result<Record, AuditError>>>,
+    pub ready: Condvar,
+}
+
+
+/// An entry waiting for the next group commit, and the slot its caller reads the outcome from.
+#[derive(Debug)]
+pub struct Pending {
+    pub entry: NewEntry,
+    pub slot: Slot,
+}
+
+
+/// One handle per log, shared by reference or `Arc`; the mutex serialises writers and `pending` queues the entries of the next group commit.
 #[derive(Debug)]
 pub struct AuditLog<Output> {
     pub state: Mutex<LogState<Output>>,
     pub sync: fn(&mut Output) -> io::Result<()>,
+    pub pending: Mutex<Vec<Pending>>,
 }
 
 
@@ -55,6 +74,7 @@ pub fn new_log<Output: Write>(writer: Output, head: &str, sync: fn(&mut Output) 
             poisoned: false,
         }),
         sync,
+        pending: Mutex::new(Vec::new()),
     }
 }
 
@@ -376,31 +396,145 @@ pub fn continue_log(file: File) -> Result<AuditLog<File>, AuditError> {
 }
 
 
-pub fn write_durably<Output: Write>(writer: &mut Output, sync: fn(&mut Output) -> io::Result<()>, line: &str) -> io::Result<()> {
-    writer.write_all(line.as_bytes())?;
-    writer.flush()?;
-    sync(writer)
+pub const MAX_GROUP_RECORDS: usize = 256;
+
+
+pub const MAX_APPEND_ATTEMPTS: usize = 1_000_000;
+
+
+/// Queues the entry; whoever holds the writer lock seals, writes and syncs a group of queued entries once. Returns only after the sync covering this record.
+pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
+    append_bounded(log, entry, MAX_APPEND_ATTEMPTS)
 }
 
 
-/// Chains, writes, flushes and syncs one record; the head only advances once the whole line is durable.
-pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
-    let mut state = log.state.lock().map_err(|_| AuditError::LogPoisoned)?;
+/// `append` with a cap on the lock rounds; an entry still queued when the cap ends is withdrawn, never written unacknowledged.
+pub fn append_bounded<Output: Write>(log: &AuditLog<Output>, entry: NewEntry, attempts: usize) -> Result<Record, AuditError> {
+    let slot: Slot = Arc::new(SlotCell::default());
+    log.pending.lock().map_err(|_| AuditError::LogPoisoned)?.push(Pending {
+        entry,
+        slot: Arc::clone(&slot),
+    });
+    let outcome = (0..attempts)
+        .find_map(|_| commit_round(log, &slot))
+        .unwrap_or(Err(AuditError::LogPoisoned));
+    withdraw(log, &slot);
+    outcome
+}
+
+
+pub const WAIT_SLICE: Duration = Duration::from_millis(1);
+
+
+/// One turn: lead a group when the writer lock is free, else wait a slice for the leader to finish this entry.
+pub fn commit_round<Output: Write>(log: &AuditLog<Output>, slot: &Slot) -> Option<Result<Record, AuditError>> {
+    match log.state.try_lock() {
+        Ok(mut state) => take_outcome(slot).or_else(|| {
+            flush_group(log, &mut state);
+            take_outcome(slot)
+        }),
+        Err(TryLockError::Poisoned(_)) => Some(Err(AuditError::LogPoisoned)),
+        Err(TryLockError::WouldBlock) => wait_outcome(slot),
+    }
+}
+
+
+pub fn take_outcome(slot: &Slot) -> Option<Result<Record, AuditError>> {
+    slot.outcome.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
+
+/// Waits at most `WAIT_SLICE` for the entry's outcome; the writer lock is not needed to learn it.
+pub fn wait_outcome(slot: &Slot) -> Option<Result<Record, AuditError>> {
+    let guard = slot.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut waited, _timeout) = slot
+        .ready
+        .wait_timeout_while(guard, WAIT_SLICE, |outcome| outcome.is_none())
+        .unwrap_or_else(PoisonError::into_inner);
+    waited.take()
+}
+
+
+pub fn fill_slot(slot: &Slot, outcome: Result<Record, AuditError>) {
+    *slot.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+    slot.ready.notify_all();
+}
+
+
+/// Removes a still queued entry: after the cap or a poisoned writer lock nothing may write it later.
+pub fn withdraw<Output>(log: &AuditLog<Output>, slot: &Slot) {
+    log.pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|pending| !Arc::ptr_eq(&pending.slot, slot));
+}
+
+
+pub fn take_group<Output>(log: &AuditLog<Output>) -> Vec<Pending> {
+    let mut queue = log.pending.lock().unwrap_or_else(PoisonError::into_inner);
+    let count = queue.len().min(MAX_GROUP_RECORDS);
+    queue.drain(..count).collect()
+}
+
+
+/// Seals each queued entry against the file it lands in, writes the lines, then syncs once for the whole group.
+pub fn flush_group<Output: Write>(log: &AuditLog<Output>, state: &mut MutexGuard<'_, LogState<Output>>) {
+    let group = take_group(log);
     if state.poisoned {
-        Err(AuditError::LogPoisoned)
+        group.iter().for_each(|pending| fill_slot(&pending.slot, Err(AuditError::LogPoisoned)));
     } else {
-        let (record, line) = seal_checked(entry, &state.head)?;
-        match write_durably(&mut state.writer, log.sync, &line) {
-            Ok(()) => {
-                state.head.clone_from(&record.hash);
-                Ok(record)
-            }
-            Err(error) => {
-                state.poisoned = true;
-                Err(AuditError::Io(error))
-            }
+        commit_group(log.sync, state, group);
+    }
+}
+
+
+pub fn commit_group<Output: Write>(sync: fn(&mut Output) -> io::Result<()>, state: &mut LogState<Output>, group: Vec<Pending>) {
+    let mut head = state.head.clone();
+    let mut written: Vec<(Slot, Record)> = Vec::new();
+    let mut failure: Option<io::Error> = None;
+    group.into_iter().for_each(|pending| match &failure {
+        Some(error) => fill_slot(&pending.slot, Err(group_failure(error))),
+        None => match seal_checked(pending.entry, &head) {
+            Err(error) => fill_slot(&pending.slot, Err(error)),
+            Ok((record, line)) => match write_line(&mut state.writer, &line) {
+                Ok(()) => {
+                    head.clone_from(&record.hash);
+                    written.push((pending.slot, record));
+                }
+                Err(error) => {
+                    fill_slot(&pending.slot, Err(group_failure(&error)));
+                    failure = Some(error);
+                }
+            },
+        },
+    });
+    let synced = if failure.is_none() && !written.is_empty() {
+        sync(&mut state.writer)
+    } else {
+        Ok(())
+    };
+    match failure.or(synced.err()) {
+        None => {
+            state.head = head;
+            written.into_iter().for_each(|(slot, record)| fill_slot(&slot, Ok(record)));
+        }
+        Some(error) => {
+            state.poisoned = true;
+            written.iter().for_each(|(slot, _)| fill_slot(slot, Err(group_failure(&error))));
         }
     }
+}
+
+
+pub fn write_line<Output: Write>(writer: &mut Output, line: &str) -> io::Result<()> {
+    writer.write_all(line.as_bytes())?;
+    writer.flush()
+}
+
+
+/// Every caller of a failed group gets its own error with the failure's kind and text.
+pub fn group_failure(error: &io::Error) -> AuditError {
+    AuditError::Io(io::Error::new(error.kind(), error.to_string()))
 }
 
 

@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 
 pub type ParameterMap = BTreeMap<String, String>;
+
+
+pub type Slot = Arc<crate::log::SlotCell>;
 
 
 #[cfg(unix)]
