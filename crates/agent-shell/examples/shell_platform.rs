@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         file.settings_file.clone(),
         shared_log_audit(&log),
         reload_context(&file.settings_file, SERVER_MODULE, SERVER_TENANT, "settings-reload"),
+        false,
     )?;
     let (revocation_engine, revocations) = open_revocation_engine(
         file.revocation_file.clone(),

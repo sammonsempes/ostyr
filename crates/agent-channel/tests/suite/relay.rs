@@ -1,22 +1,23 @@
 use crate::app::{fixture, Fixture};
-use crate::harness::long_tempdir;
 use crate::harness::{
     bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server, start_server_state, stop_server,
 };
+use crate::harness::{init_logging, long_tempdir};
 use crate::harness::{Platform, RunningServer};
 use crate::pki::{agent_spec, issue, make_authority, write_file, write_leaf, LeafSpec, AGENT_URI, PRIVATE_MODE, SERVER_NAME, WORLD_READABLE_MODE};
 use crate::services::{agent_verifier, settings, signed_envelope};
+use crate::spool_refused::captured_log;
 use crate::state::{envelope_source, make_state, new_stored, recording_sink};
 use crate::types::TestResult;
-use agent_channel::agent_app::{dialer, ended_on_rate, execute_fn, load_agent_file, note_run, run_agent, run_streams, AgentFile};
+use agent_channel::agent_app::{dialer, ended_on_rate, execute_fn, load_agent_file, note_run, run_agent, run_attempts, run_streams, AgentFile};
 use agent_channel::client::{run_commands_until, subscribe};
 use agent_channel::error::{AppError, ChannelError, EndpointFault};
 use agent_channel::model::{
     CommandRun, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
 };
 use agent_channel::relay::{
-    check_scope, endpoint_addresses, hold_internal, is_held, is_rate_refusal, kind_of, pinned_dialer, select_endpoint, selection_order, stop_at,
-    tripped, EndpointKind, HoldDown, Selected,
+    check_scope, endpoint_addresses, error_text, hold_internal, is_held, is_rate_refusal, kind_of, pinned_dialer, select_endpoint, selection_order,
+    stop_at, tripped, EndpointKind, HoldDown, Selected,
 };
 use agent_channel::server_app::{bind_server, file_events, run_server, ServerFile};
 use agent_channel::spool::{suffixed, SENDING_SUFFIX};
@@ -889,4 +890,80 @@ async fn a_rate_refused_redial_does_not_trip_the_endpoint_or_hold_the_internal_o
     note_run(&hold, &internal, &Err(AppError::AttemptsExhausted { attempts: 1, last: None }));
     assert!(is_held(&hold));
     stop_server(server).await
+}
+
+
+const HUGE_STATUS_BYTES: usize = 1 << 20;
+
+
+const STATUS_MARKER: &str = "STATUS-TAIL-MARKER";
+
+
+const LOG_LINE_BOUND_BYTES: usize = 1024;
+
+
+fn hostile_status(message: String) -> ChannelError {
+    ChannelError::Status(Box::new(tonic::Status::new(tonic::Code::Internal, message)))
+}
+
+
+#[tokio::test]
+async fn a_server_status_message_is_bounded_in_every_agent_log_line() -> TestResult {
+    init_logging()?;
+    let huge = hostile_status(format!("{}{STATUS_MARKER}", "x".repeat(HUGE_STATUS_BYTES)));
+    let text = error_text(&huge);
+    assert!(text.contains("Internal"));
+    assert!(text.len() < LOG_LINE_BOUND_BYTES);
+    assert!(!text.contains(STATUS_MARKER));
+    assert_eq!(error_text(&ChannelError::EndpointLost), ChannelError::EndpointLost.to_string());
+    let (captured, _guard) = captured_log();
+    let pause = |_delay: Duration| Box::pin(async {}) as agent_channel::types::PauseFuture;
+    let first = format!("{}{STATUS_MARKER}", "y".repeat(HUGE_STATUS_BYTES));
+    let attempts = run_attempts(|| async { Err::<(), _>(hostile_status(first.clone())) }, &pause).await;
+    assert!(attempts.is_err());
+    let controlled = hostile_status("first\nforged line level=ERROR\u{1b}[31m".to_owned());
+    let again = run_attempts(|| async { Err::<(), _>(controlled_clone(&controlled)) }, &pause).await;
+    assert!(again.is_err());
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert!(!log.contains(STATUS_MARKER));
+    assert!(log.lines().all(|line| line.len() < LOG_LINE_BOUND_BYTES));
+    assert!(log.contains("first\\nforged line"));
+    assert!(!log.contains('\u{1b}'));
+    Ok(())
+}
+
+
+fn controlled_clone(error: &ChannelError) -> ChannelError {
+    hostile_status(match error {
+        ChannelError::Status(status) => status.message().to_owned(),
+        other => other.to_string(),
+    })
+}
+
+
+#[tokio::test]
+async fn a_selection_refused_on_rate_fails_the_run_without_a_hold_down_or_another_endpoint() -> TestResult {
+    let _logging = scoped_logging();
+    let rig = rig()?;
+    let directory = sub_directory(rig.dir.path(), "limited")?;
+    let state = make_state(
+        settings(|bounds| {
+            bounds.max_requests_per_window = 1;
+            bounds.rate_window_seconds = RATE_WINDOW_FOR_TEST;
+        }),
+        recording_sink(new_stored()),
+        envelope_source(Vec::new()),
+    );
+    let paths = server_paths(&directory, &rig.platform)?;
+    let internal = start_server_state(&paths, empty_revocation(&paths)?, state).await?;
+    let relay = good_server(&rig, "relay").await?;
+    let addresses = [internal.address, relay.address];
+    let hold = HoldDown::default();
+    let first = bounded(select_endpoint(&addresses, &rig.config, SERVER_NAME, &hold)).await??;
+    assert_eq!(first.kind, EndpointKind::Internal);
+    let refused = bounded(select_endpoint(&addresses, &rig.config, SERVER_NAME, &hold)).await?;
+    assert!(refused.is_err_and(|error| is_rate_refusal(&error)));
+    assert!(!is_held(&hold));
+    stop_server(internal).await?;
+    stop_server(relay).await
 }

@@ -1,9 +1,11 @@
 use crate::agent_app::{AgentFile, AGENT_VERSION};
 use crate::client::{connect_channel, heartbeat};
 use crate::error::{AppError, ChannelError, EndpointFault};
+use crate::limits::bounded_text;
 use crate::model::{MAX_RELAYS, PREFERRED_RETRY_SECONDS};
 use crate::types::{DialFn, SharedClientConfig};
 use rustls_pki_types::ServerName;
+use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -170,10 +172,12 @@ async fn try_endpoint(
 ) -> Result<Selected, ChannelError> {
     let kind = kind_of(index);
     let opened = open_checked(address, Arc::clone(config), server_name).await;
+    let rate_refused = opened.as_ref().err().is_some_and(is_rate_refusal);
     if let Err(error) = &opened {
-        tracing::warn!(index, %kind, %error, "agent endpoint failed");
+        let text = error_text(error);
+        tracing::warn!(index, %kind, error = ?text, rate_refused, "agent endpoint failed");
     }
-    if opened.is_err() && kind == EndpointKind::Internal {
+    if opened.is_err() && kind == EndpointKind::Internal && !rate_refused {
         hold_internal(hold);
     }
     opened.map(|_channel| Selected {
@@ -194,7 +198,7 @@ pub async fn select_endpoint(
 ) -> Result<Selected, ChannelError> {
     let mut result = Err(ChannelError::EndpointLost);
     for (index, address) in selection_order(addresses, is_held(hold)) {
-        if result.is_err() {
+        if result.as_ref().is_err_and(|error| !is_rate_refusal(error)) {
             result = try_endpoint(index, address, config, server_name, hold).await;
         }
     }
@@ -205,9 +209,31 @@ pub async fn select_endpoint(
 }
 
 
+/// An error as logged: a server status keeps its code and a bounded message, never the server's whole text.
+pub fn error_text(error: &ChannelError) -> String {
+    match error {
+        ChannelError::RetriesExhausted { attempts, last } => {
+            format!(
+                "event delivery abandoned after {attempts} consecutive failed attempts: {}",
+                leaf_text(last)
+            )
+        }
+        other => leaf_text(other),
+    }
+}
+
+
+fn leaf_text(error: &ChannelError) -> String {
+    match error {
+        ChannelError::Status(status) => format!("call refused: {:?}: {}", status.code(), bounded_text(status.message())),
+        other => other.to_string(),
+    }
+}
+
+
 /// The server answered a rate or slot refusal: it is alive, so the endpoint is neither dropped nor held down.
 pub fn is_rate_refusal(error: &ChannelError) -> bool {
-    matches!(error, ChannelError::Status(status) if status.code() == Code::ResourceExhausted)
+    matches!(error, ChannelError::Status(status) if status.code() == Code::ResourceExhausted && status.source().is_none())
 }
 
 
@@ -219,10 +245,11 @@ pub fn pinned_dialer(address: SocketAddr, config: SharedClientConfig, server_nam
         let tripwire = Arc::clone(&cancel);
         Box::pin(async move {
             open_checked(address, shared, &name).await.inspect_err(|error| {
+                let text = error_text(error);
                 if is_rate_refusal(error) {
-                    tracing::warn!(%error, "pinned endpoint refused on rate, no hold-down");
+                    tracing::warn!(error = ?text, "pinned endpoint refused on rate, no hold-down");
                 } else {
-                    tracing::warn!(%error, "pinned endpoint failed, the run ends");
+                    tracing::warn!(error = ?text, "pinned endpoint failed, the run ends");
                     tripwire.send_replace(true);
                 }
             })

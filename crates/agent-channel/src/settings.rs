@@ -132,20 +132,20 @@ pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<ChannelSettings>> {
 
 
 /// An applied reload with no listed relay: a relay listener then refuses every peer.
-pub fn warn_empty_relay_sources(settings: &ChannelSettings) {
-    if settings.relay_sources.is_empty() {
+pub fn warn_empty_relay_sources(settings: &ChannelSettings, relay_configured: bool) {
+    if relay_configured && settings.relay_sources.is_empty() {
         tracing::warn!("reloaded settings list no relay_sources, a relay listener refuses every peer");
     }
 }
 
 
 /// Refuses an invalid candidate before the swap, then publishes each applied one to `shared`.
-pub fn settings_subscriber(shared: SharedSettings) -> Subscriber<ChannelSettings> {
+pub fn settings_subscriber(shared: SharedSettings, relay_configured: bool) -> Subscriber<ChannelSettings> {
     Subscriber {
         section: SETTINGS_SECTION.to_owned(),
         validate: Box::new(|candidate| validate_settings(candidate).map_err(BoxError::from)),
         apply: Box::new(move |applied| {
-            warn_empty_relay_sources(applied);
+            warn_empty_relay_sources(applied, relay_configured);
             shared.store(Arc::new(applied.clone()));
         }),
     }
@@ -157,13 +157,14 @@ pub fn open_settings_engine(
     path: PathBuf,
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
+    relay_configured: bool,
 ) -> Result<(ReloadEngine<ChannelSettings>, SharedSettings), SettingsError> {
     let engine = open_engine(settings_loader(path), settings_state, Vec::new(), audit, context)?;
     let first = current_config(&engine);
     validate_settings(&first)?;
     let shared = shared_settings(first.as_ref().clone());
     let subscribed = ReloadEngine {
-        subscribers: vec![settings_subscriber(Arc::clone(&shared))],
+        subscribers: vec![settings_subscriber(Arc::clone(&shared), relay_configured)],
         ..engine
     };
     Ok((subscribed, shared))
