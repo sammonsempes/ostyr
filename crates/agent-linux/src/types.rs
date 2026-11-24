@@ -83,13 +83,23 @@ pub type SharedExecProbe = Arc<ArcSwap<ExecProbeSettings>>;
 pub type ProbeResult = Result<u32, LoadError>;
 
 
-/// Loads the probe and polls it until the flag is set (production: `ebpf_probes::loader::run_exec_probe` when built with `ebpf`, else `not_built`); a test double injects any outcome.
+/// Loads the probe, calls the first closure once attached and polls until the flag is set (production: `ebpf_probes::loader::run_exec_probe` when built with `ebpf`, else `not_built`); a test double injects any outcome.
 #[cfg(target_os = "linux")]
-pub type ProbeFn = fn(&AtomicBool, u32, &mut dyn FnMut(Drained)) -> ProbeResult;
+pub type ProbeFn = fn(&AtomicBool, u32, &mut dyn FnMut(), &mut dyn FnMut(Drained)) -> ProbeResult;
 
 
 #[cfg(target_os = "linux")]
 pub type ProbeJob = Box<dyn FnOnce() -> ProbeResult + Send>;
+
+
+/// Realtime minus monotonic nanoseconds; a test double injects any offset.
+#[cfg(target_os = "linux")]
+pub type OffsetFn = fn() -> i128;
+
+
+/// Monotonic seconds; a test double injects any clock.
+#[cfg(target_os = "linux")]
+pub type MonotonicFn = fn() -> u64;
 
 
 /// Starts the probe thread (production: `exec_probe::spawn_thread`); a test double injects a refusal.

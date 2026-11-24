@@ -3,13 +3,14 @@
 use aya::programs::loaded_programs;
 use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
 use ebpf_probes::error::LoadError;
-use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, Probe};
+use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, run_exec_probe, Probe};
 use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
 use ebpf_probes::shape::{ShapeError, PROGRAM_NAME};
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 
@@ -132,5 +133,23 @@ fn a_forged_object_fails_by_name_and_keeps_no_aya_text() -> Result<(), Box<dyn E
     truncated.truncate(truncated.len() / HALVES);
     let cut = load_exec_probe_from_bytes(&truncated).err().ok_or("a truncated object loaded")?;
     assert_no_marker(&cut);
+    Ok(())
+}
+
+
+#[test]
+fn a_stop_set_before_the_attach_attaches_nothing_and_leaves_no_program() -> Result<(), Box<dyn Error>> {
+    let before = program_ids()?;
+    let stop = AtomicBool::new(true);
+    let attached = AtomicBool::new(false);
+    let polls = run_exec_probe(&stop, 1, &mut || attached.store(true, Ordering::Relaxed), &mut |_| ())?;
+    assert_eq!(polls, 0);
+    assert!(!attached.load(Ordering::Relaxed), "the probe attached after the stop flag was set");
+    let fresh: Vec<u32> = program_ids()?.into_iter().filter(|id| !before.contains(id)).collect();
+    let gone = fresh.iter().map(|id| wait_until_unloaded(*id)).collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        gone.iter().all(|unloaded| *unloaded),
+        "a program loaded by the stopped run is still listed: {fresh:?}"
+    );
     Ok(())
 }
