@@ -208,9 +208,15 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
     ))?;
     assert!(labelled.uncertain_reasons.is_empty());
     let late = format!("{}<meta charset=\"shift_jis\">", "a".repeat(LONG_PADDING));
-    assert!(run(&mail_with_body("text/html", late.as_bytes()))?.uncertain_reasons.is_empty());
+    assert_eq!(
+        run(&mail_with_body("text/html", late.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
     let multibyte = format!("{}<meta charset=\"shift_jis\">", "\u{e9}".repeat(MULTIBYTE_PADDING));
-    assert!(run(&mail_with_body("text/html", multibyte.as_bytes()))?.uncertain_reasons.is_empty());
+    assert_eq!(
+        run(&mail_with_body("text/html", multibyte.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
     Ok(())
 }
 
@@ -425,4 +431,59 @@ fn continuations_are_judged_on_parameter_names() -> Result<(), Box<dyn std::erro
         assert!(reasons(content_type)?.is_empty(), "{content_type}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+
+const LATE_PADDING: usize = 1200;
+
+
+const STRADDLE_PADDING: usize = 1010;
+
+
+fn run_bytes(raw: &[u8]) -> Result<Triage, Box<dyn std::error::Error>> {
+    Ok(triage(raw, &["mx.example.org".to_owned()], &ReporterPolicy::default())?)
+}
+
+
+fn with_headers(headers: &[u8]) -> Vec<u8> {
+    let mut raw = b"From: a@x.test\r\nMIME-Version: 1.0\r\n".to_vec();
+    raw.extend_from_slice(headers);
+    raw.extend_from_slice(format!("\r\nhello {PLAIN_URL}\r\n").as_bytes());
+    raw
+}
+
+
+#[test]
+fn a_content_type_that_is_not_utf_8_is_flagged_on_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let cases: Vec<&[u8]> = vec![
+        b"Content-Type: text/plain; charset=utf-8\r\nContent-Type: text/plain; charset=shift_jis; x=\xFF\r\n",
+        b"Content-Type: text/plain; charset=utf-8; charset=shift_jis; x=\xFF\r\nContent-Type: text/plain\r\n",
+        b"Content-Type: text/plain; x=\"\\\"; charset=utf-8; y=\xFF\"; charset=shift_jis\r\n",
+        b"Content-Type: text/plain; charset=utf-8\r\nCONTENT-TYPE: text/plain (\xFF)\r\n",
+        b"Content-Type: text/plain; x=\xFF\r\n",
+    ];
+    cases.iter().try_for_each(|headers| {
+        let record = run_bytes(&with_headers(headers))?;
+        assert!(record.uncertain_reasons.contains(&"charset_undecoded".to_owned()), "{headers:?}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_meta_tag_past_byte_1024_is_judged_too() -> Result<(), Box<dyn std::error::Error>> {
+    let padding = "x".repeat(LATE_PADDING);
+    let late = format!("<title>{padding}</title><meta charset=shift_jis>{PLAIN_URL}");
+    assert_eq!(
+        run(&mail_with_body("text/html", late.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
+    let straddle = format!("{}<meta charset=shift_jis>{PLAIN_URL}", "x".repeat(STRADDLE_PADDING));
+    assert_eq!(
+        run(&mail_with_body("text/html", straddle.as_bytes()))?.uncertain_reasons,
+        ["charset_undecoded"]
+    );
+    let allowed = format!("<title>{padding}</title><meta charset=utf-8>{PLAIN_URL}");
+    assert!(run(&mail_with_body("text/html", allowed.as_bytes()))?.uncertain_reasons.is_empty());
+    Ok(())
 }

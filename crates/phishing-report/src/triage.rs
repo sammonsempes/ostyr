@@ -647,9 +647,6 @@ const ESCAPE_CHARACTER: char = '\u{1B}';
 const LOST_BYTE_CHARACTERS: [char; 2] = ['\u{FFFD}', '\u{0}'];
 
 
-const META_SNIFF_BYTES: usize = 1024;
-
-
 const META_TAG: &str = "<meta";
 
 
@@ -800,14 +797,8 @@ fn is_utf8_label(label: &str) -> bool {
 }
 
 
-fn sniff_prefix(text: &str) -> String {
-    let cut = (0..=META_SNIFF_BYTES.min(text.len())).rev().find(|index| text.is_char_boundary(*index));
-    cut.and_then(|end| text.get(..end)).map_or_else(String::new, str::to_ascii_lowercase)
-}
-
-
 fn has_foreign_meta_charset(text: &str) -> bool {
-    let collapsed = sniff_prefix(text).split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = text.to_ascii_lowercase().split_ascii_whitespace().collect::<Vec<_>>().join(" ");
     let remainder = META_ALLOWED_FORMS.iter().fold(collapsed, |current, form| current.replace(form, " "));
     let charset_after = remainder.split_once(META_TAG).is_some_and(|(_, tail)| tail.contains(CHARSET_WORD));
     let unclosed = remainder.rsplit_once(META_TAG).is_some_and(|(_, last)| !last.contains('>'));
@@ -846,11 +837,11 @@ fn parameter_pairs(raw: &str) -> Vec<(String, String)> {
 }
 
 
-fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) -> impl Iterator<Item = &'a str> {
+fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) -> impl Iterator<Item = Option<&'a [u8]>> {
     part.headers()
         .iter()
         .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
-        .filter_map(|header| raw_value(message, header))
+        .map(|header| raw_bytes(message, header))
 }
 
 
@@ -877,8 +868,12 @@ fn is_ambiguous_content_type(raw: &str) -> bool {
 
 
 fn has_ambiguous_content_type(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
-    let raws: Vec<&str> = content_type_raws(message, part).collect();
-    raws.len() > 1 || raws.iter().any(|raw| is_ambiguous_content_type(raw))
+    let raws: Vec<Option<&[u8]>> = content_type_raws(message, part).collect();
+    raws.len() > 1
+        || raws.iter().any(|raw| {
+            raw.and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .is_none_or(is_ambiguous_content_type)
+        })
 }
 
 
