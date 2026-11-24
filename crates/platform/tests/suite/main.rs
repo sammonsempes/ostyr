@@ -2,6 +2,7 @@
 mod binary;
 mod fifo;
 mod fixture;
+mod log_filter;
 mod merge;
 mod parse;
 mod permits;

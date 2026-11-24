@@ -8,10 +8,16 @@ use walkdir::WalkDir;
 const BRIDGE_MARKERS: [&str; 6] = ["LogTracer", "tracing_log", "fmt::init(", ".init()", ".try_init()", ".set_default("];
 
 
-const FILTERED_BRIDGE_FILE: &str = "platform/src/serve.rs";
+const FILTERED_BRIDGE_FILE: &str = "crates/platform/src/serve.rs";
 
 
-const FILTER_MARKER: &str = "ignore_crate(LOG_IGNORED_CRATE)";
+const FILTERED_CALL: &str = ".ignore_crate(LOG_IGNORED_CRATE).init()";
+
+
+const OWN_CONSTANT: &str = "const LOG_IGNORED_CRATE";
+
+
+const CALL_MARKERS: [&str; 4] = ["::init", ".init()", ".try_init()", ".set_default("];
 
 
 pub fn installs_bridge(text: &str) -> bool {
@@ -19,20 +25,62 @@ pub fn installs_bridge(text: &str) -> bool {
 }
 
 
-pub fn is_filtered_bridge(path: &Path, text: &str) -> bool {
-    path.ends_with(FILTERED_BRIDGE_FILE) && text.contains(FILTER_MARKER)
+pub fn code_lines(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+
+pub fn is_filtered_bridge(relative: &Path, text: &str) -> bool {
+    let code = code_lines(text);
+    let calls: usize = CALL_MARKERS.iter().map(|marker| code.matches(marker).count()).sum();
+    let filtered = code.matches(FILTERED_CALL).count();
+    relative == Path::new(FILTERED_BRIDGE_FILE) && filtered > 0 && calls == filtered && !code.contains(OWN_CONSTANT)
 }
 
 
 #[test]
 fn only_the_platform_service_may_bridge_and_only_with_the_filter() -> Result<(), Box<dyn Error>> {
     let bridge = "tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
-    assert!(is_filtered_bridge(Path::new("crates/platform/src/serve.rs"), bridge));
-    assert!(!is_filtered_bridge(
-        Path::new("crates/platform/src/serve.rs"),
-        "tracing_log::LogTracer::init()"
-    ));
+    let platform = Path::new("crates/platform/src/serve.rs");
+    assert!(is_filtered_bridge(platform, bridge));
+    assert!(!is_filtered_bridge(platform, "tracing_log::LogTracer::init()"));
     assert!(!is_filtered_bridge(Path::new("crates/other/src/serve.rs"), bridge));
+    Ok(())
+}
+
+
+#[test]
+fn survivor_second_unfiltered_bridge_is_refused() -> Result<(), Box<dyn Error>> {
+    let text = "tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;\ntracing_log::LogTracer::init()?;";
+    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    Ok(())
+}
+
+
+#[test]
+fn survivor_marker_only_in_a_comment_is_refused() -> Result<(), Box<dyn Error>> {
+    let text = "/// tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()\nfn f() { LogTracer::init(); }";
+    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    Ok(())
+}
+
+
+#[test]
+fn survivor_local_constant_is_refused() -> Result<(), Box<dyn Error>> {
+    let text = "const LOG_IGNORED_CRATE: &str = \"none\";\nLogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
+    assert!(!is_filtered_bridge(Path::new(FILTERED_BRIDGE_FILE), text));
+    Ok(())
+}
+
+
+#[test]
+fn survivor_nested_path_is_refused() -> Result<(), Box<dyn Error>> {
+    let text = "LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
+    assert!(!is_filtered_bridge(Path::new("crates/cmdb/src/platform/src/serve.rs"), text));
+    assert!(!is_filtered_bridge(Path::new("x/crates/platform/src/serve.rs"), text));
     Ok(())
 }
 
@@ -74,6 +122,12 @@ fn an_unreadable_source_file_is_named_not_skipped() -> Result<(), Box<dyn Error>
 }
 
 
+pub fn workspace_relative(path: &Path) -> std::path::PathBuf {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    Path::new("crates").join(path.strip_prefix(crates).unwrap_or(path))
+}
+
+
 #[test]
 fn no_crate_source_installs_a_log_bridge() -> Result<(), Box<dyn Error>> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -88,7 +142,7 @@ fn no_crate_source_installs_a_log_bridge() -> Result<(), Box<dyn Error>> {
     let offenders = sources
         .iter()
         .filter_map(|entry| match bridge_in_file(entry.path(), read_text) {
-            Ok(true) if read_text(entry.path()).is_ok_and(|text| is_filtered_bridge(entry.path(), &text)) => None,
+            Ok(true) if read_text(entry.path()).is_ok_and(|text| is_filtered_bridge(&workspace_relative(entry.path()), &text)) => None,
             Ok(true) => Some(Ok(entry.path().display().to_string())),
             Ok(false) => None,
             Err(message) => Some(Err(message)),
