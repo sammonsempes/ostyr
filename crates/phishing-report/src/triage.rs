@@ -2,9 +2,10 @@ use crate::auth::{oversized_untrusted, verdicts_with_from, PASS};
 use crate::claim::{claim_scan, domain_set};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
-use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit, UrlIndex};
+use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Shapes, Triage, UrlHit, UrlIndex};
 use crate::policy::{check_policy, is_internal, is_strict_domain};
 use crate::scan::{scan, Scan};
+use crate::shapes::has_reference;
 use crate::text::{clean, clean_address, is_refused_address};
 use crate::types::RawReadFn;
 use crate::urls::{collect_indexed, html_text, index_from, URL_RULE};
@@ -81,6 +82,7 @@ struct Context<'a> {
     domains: &'a HashSet<String>,
     read: RawReadFn,
     has_attached: bool,
+    scan_refused: bool,
 }
 
 
@@ -157,6 +159,7 @@ fn parse_and_extract(
     note_scan(&mut counts, &scanned);
     let chain = open_chain(root, limits, &mut counts);
     let domains = domain_set(reporters);
+    let scan_refused = counts.nested_refused > 0 || counts.scan_lost_bytes > 0;
     let context = Context {
         trusted,
         limits,
@@ -165,6 +168,7 @@ fn parse_and_extract(
         domains: &domains,
         read,
         has_attached: chain.len() > 1,
+        scan_refused,
     };
     let start = Triage { counts, ..Triage::default() };
     Ok(chain
@@ -596,7 +600,22 @@ const URL_HOST_UNREAD: &str = "url_host_unread";
 const URL_USERINFO_SPLIT: &str = "url_userinfo_split";
 
 
+const URL_HOST_AMBIGUOUS: &str = "url_host_ambiguous";
+
+
 const URL_CAP_REACHED: &str = "url_cap_reached";
+
+
+const SCAN_REFUSED: &str = "scan_refused";
+
+
+const PARTS_SKIPPED: &str = "parts_skipped";
+
+
+const NESTING_CUT: &str = "nesting_cut";
+
+
+const MESSAGES_UNOPENED: &str = "messages_unopened";
 
 
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
@@ -630,10 +649,19 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     record.refused_hosts = urls_index.hosts;
     let unread = record.counts.url_host_unread > 0;
     let split = record.counts.url_userinfo_split > 0;
+    let ambiguous = record.counts.url_host_ambiguous > 0;
     let capped = record.counts.url_cap_reached > 0;
     mark_once(&mut record, unread, URL_HOST_UNREAD);
     mark_once(&mut record, split, URL_USERINFO_SPLIT);
+    mark_once(&mut record, ambiguous, URL_HOST_AMBIGUOUS);
     mark_once(&mut record, capped, URL_CAP_REACHED);
+    mark_once(&mut record, context.scan_refused, SCAN_REFUSED);
+    let skipped = record.counts.parts_skipped > 0;
+    mark_once(&mut record, skipped, PARTS_SKIPPED);
+    let cut = record.counts.nesting_cut > 0;
+    let unopened = record.counts.messages_unopened > 0;
+    mark_once(&mut record, cut, NESTING_CUT);
+    mark_once(&mut record, unopened, MESSAGES_UNOPENED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -658,10 +686,17 @@ fn collect_urls(
                 counts.parts_skipped += 1;
                 urls
             }
-            PartType::Text(text) => collect_indexed(context.rule, text, level, limits, urls, urls_index, counts),
-            PartType::Html(html) => {
-                let decoded = html_text(html, counts);
-                collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts)
+            PartType::Text(markup) | PartType::Html(markup) => {
+                let referenced = has_reference(markup);
+                urls_index.shapes = if referenced { Shapes::Refuse } else { Shapes::Markup };
+                let decoded = html_text(markup, counts);
+                let listed = collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts);
+                urls_index.shapes = Shapes::Refuse;
+                if referenced {
+                    collect_indexed(context.rule, markup, level, limits, listed, urls_index, counts)
+                } else {
+                    listed
+                }
             }
             _ => urls,
         }

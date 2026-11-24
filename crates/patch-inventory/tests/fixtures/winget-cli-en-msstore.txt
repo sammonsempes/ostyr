@@ -1,0 +1,3 @@
+   -                                                                                                                         Failed when opening source(s); try the 'source reset' command if the problem persists.
+An unexpected error occurred while executing the command: 
+SSL Error: WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED failed to check revocation status.

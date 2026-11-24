@@ -124,6 +124,8 @@ pub enum NatsError {
     Timeout(#[source] tokio::time::error::Elapsed),
     #[error("the NATS server accepts payloads of {server} bytes, above the {cap} byte batch cap")]
     PayloadLimit { server: usize, cap: usize },
+    #[error("the NATS durable consumer is not the pre-created one: `{field}` differs")]
+    ConsumerConfig { field: &'static str },
     #[error("no NATS session is open")]
     NotConnected,
     #[error("the acknowledgement token is unknown to the NATS session")]

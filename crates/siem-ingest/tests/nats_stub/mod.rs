@@ -42,10 +42,10 @@ pub const DEFAULT_MAX_PAYLOAD: usize = 1_048_576;
 pub const WAIT_SECONDS: u64 = 20;
 
 
-pub const CREATE_MARKER: &str = ".CREATE.";
+pub const INFO_MARKER: &str = ".INFO.";
 
 
-pub const PULL_PREFIX: &str = "$JS.API.CONSUMER.MSG.NEXT.";
+pub const PULL_PREFIX: &str = "JS.EVENTS.API.CONSUMER.MSG.NEXT.";
 
 
 pub const ACK_PREFIX: &str = "$JS.ACK.";
@@ -57,7 +57,16 @@ pub const DEAD_SUBJECT: &str = "dead.events";
 pub const EVENTS_PREFIX: &str = "events.";
 
 
-pub const API_PREFIX: &str = "$JS.API.CONSUMER.";
+pub const API_PREFIX: &str = "JS.EVENTS.API.CONSUMER.";
+
+
+pub const ACK_WAIT_NANOS: u64 = 30_000_000_000;
+
+
+pub const MAX_ACK_PENDING: u64 = 1000;
+
+
+pub const MAX_WAITING: u64 = 512;
 
 
 pub struct Queued {
@@ -88,13 +97,15 @@ pub struct Outgoing {
 pub struct StubState {
     pub acks: Vec<String>,
     pub published: Vec<Published>,
-    pub creates: Vec<Value>,
+    pub infos: Vec<String>,
+    pub config_patch: Option<Value>,
     pub pulls: Vec<Value>,
     pub queue: VecDeque<Queued>,
     pub connects: Vec<Value>,
+    pub subscribed: Vec<String>,
     pub connections: usize,
     pub sockets: Vec<TcpStream>,
-    pub fail_create: bool,
+    pub fail_info: bool,
     pub silent_pull: bool,
     pub pull_status: Option<String>,
     pub fail_publish: bool,
@@ -237,6 +248,7 @@ pub fn step<Stream: Read + Write>(reader: &mut BufReader<Stream>, hub: &Hub, sub
         }
         "PING" => write_all(reader, b"PONG\r\n"),
         "SUB" => {
+            lock(hub).subscribed.push(part(&parts, 1)?.to_owned());
             subscriptions.push((part(&parts, 1)?.to_owned(), part(&parts, parts.len() - 1)?.to_owned()));
             Ok(())
         }
@@ -308,25 +320,31 @@ pub fn plain_reply(reply: Option<&str>, payload: Value) -> Vec<Outgoing> {
 }
 
 
-pub fn create_reply(state: &mut StubState, subject: &str, reply: Option<&str>, payload: &[u8]) -> io::Result<Vec<Outgoing>> {
-    let request: Value = serde_json::from_slice(payload).map_err(io::Error::other)?;
-    state.creates.push(json!({"subject": subject, "request": request}));
-    let config = request.get("config").cloned().unwrap_or(Value::Null);
-    let name = config.get("durable_name").cloned().unwrap_or(Value::Null);
-    let stream = request.get("stream_name").cloned().unwrap_or(Value::Null);
+pub fn info_reply(state: &mut StubState, subject: &str, reply: Option<&str>) -> Vec<Outgoing> {
+    state.infos.push(subject.to_owned());
+    let mut tokens = subject.rsplit('.');
+    let name = tokens.next().unwrap_or("").to_owned();
+    let stream = tokens.next().unwrap_or("").to_owned();
+    let mut config = json!({
+        "durable_name": name, "ack_policy": "explicit", "filter_subject": "events.>", "ack_wait": ACK_WAIT_NANOS,
+        "deliver_policy": "all", "replay_policy": "instant", "max_deliver": -1, "max_ack_pending": MAX_ACK_PENDING, "max_waiting": MAX_WAITING,
+    });
+    if let (Some(Value::Object(patch)), Some(target)) = (state.config_patch.clone(), config.as_object_mut()) {
+        target.extend(patch);
+    }
     let sequences = json!({"consumer_seq": 0, "stream_seq": 0});
-    Ok(plain_reply(
+    plain_reply(
         reply,
-        if state.fail_create {
+        if state.fail_info {
             json!({"error": {"code": API_ERROR_CODE, "err_code": API_ERROR_ID, "description": "stub refuses"}})
         } else {
             json!({
-                "type": "io.nats.jetstream.api.v1.consumer_create_response", "stream_name": stream, "name": name,
+                "type": "io.nats.jetstream.api.v1.consumer_info_response", "stream_name": stream, "name": name,
                 "created": "2026-01-01T00:00:00Z", "config": config, "delivered": sequences, "ack_floor": sequences,
                 "num_ack_pending": 0, "num_redelivered": 0, "num_waiting": 0, "num_pending": 0,
             })
         },
-    ))
+    )
 }
 
 
@@ -378,8 +396,8 @@ pub fn status_message(inbox: &str, code: &str) -> Outgoing {
 
 
 pub fn route(state: &mut StubState, subject: &str, reply: Option<&str>, headers: &str, payload: &[u8]) -> io::Result<Vec<Outgoing>> {
-    if subject.starts_with(API_PREFIX) && subject.contains(CREATE_MARKER) {
-        create_reply(state, subject, reply, payload)
+    if subject.starts_with(API_PREFIX) && subject.contains(INFO_MARKER) {
+        Ok(info_reply(state, subject, reply))
     } else if subject.starts_with(PULL_PREFIX) {
         pull_reply(state, reply, payload)
     } else if subject.starts_with(ACK_PREFIX) {

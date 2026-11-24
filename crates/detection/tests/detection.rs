@@ -923,7 +923,10 @@ fn rig(rules: &[&str]) -> Result<Rig, Box<dyn Error + Send + Sync>> {
 
 
 fn rig_with(rules: &[&str], extra: &str) -> Result<Rig, Box<dyn Error + Send + Sync>> {
-    let stub = start_stub(None, |_| ())?;
+    let short_wait = extra.contains(SHORT_WAIT_SETTING);
+    let stub = start_stub(None, |state| {
+        state.config_patch = short_wait.then(|| serde_json::json!({"ack_wait": SHORT_WAIT_NANOS}))
+    })?;
     let (dir, path) = write_bench(rules, stub.port, extra)?;
     let audit = Shared::default();
     let rules_engine = Arc::new(open_rules_engine(path.clone(), fixed_of(&path)?, audit_fn(&audit), context(&path))?);
@@ -1170,6 +1173,12 @@ const MANY_IDS: usize = 300;
 
 
 const STORE_LIMIT: usize = 4096;
+
+
+const SHORT_WAIT_SETTING: &str = "nats_ack_wait_ms: 2000";
+
+
+const SHORT_WAIT_NANOS: u64 = 2_000_000_000;
 
 
 const ACK_WAIT_SHORT: &str = "  max_batch_age_seconds: 1\n  nats_ack_wait_ms: 2000\n  backoff_initial_ms: 500\n  backoff_max_ms: 500\n";

@@ -16,6 +16,7 @@ use rustls::crypto::ring::default_provider;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use serde_json::json;
 use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_text, NatsError, PeerFailure, TlsClass};
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
@@ -75,7 +76,7 @@ const MANY_HEADERS: usize = 20;
 const BATCH_BYTES: u64 = 4_194_304;
 
 
-const ACK_WAIT_NS: u64 = 30_000_000_000;
+const WRONG_ACK_WAIT_NANOS: u64 = 1_000_000_000;
 
 
 const HUGE_PAYLOAD: usize = 8_388_608;
@@ -218,13 +219,7 @@ fn a_batch_is_fetched_acknowledged_and_dead_lettered() -> Result<(), Box<dyn Err
     assert_eq!(published.payload, b"bad");
     assert!(published.headers.contains("Ostyr-Tenant: tenant-a"));
     assert!(published.headers.contains("Ostyr-Reason: unparsable at line 1"));
-    let create = state.creates.first().ok_or("no consumer create")?;
-    let config = create.pointer("/request/config").ok_or("no config")?;
-    assert_eq!(config.get("durable_name").and_then(|value| value.as_str()), Some("siem-ingest"));
-    assert_eq!(config.get("ack_policy").and_then(|value| value.as_str()), Some("explicit"));
-    assert_eq!(config.get("filter_subject").and_then(|value| value.as_str()), Some("events.>"));
-    assert_eq!(config.get("ack_wait").and_then(|value| value.as_u64()), Some(ACK_WAIT_NS));
-    assert_eq!(create.pointer("/request/stream_name").and_then(|value| value.as_str()), Some("events"));
+    assert_eq!(state.infos, ["JS.EVENTS.API.CONSUMER.INFO.events.siem-ingest"]);
     let pull = state.pulls.first().ok_or("no pull")?;
     assert_eq!(pull.get("batch").and_then(|value| value.as_u64()), Some(FETCH_MAX as u64));
     assert_eq!(pull.get("max_bytes").and_then(|value| value.as_u64()), Some(BATCH_BYTES));
@@ -284,7 +279,7 @@ fn a_silent_server_fails_the_fetch_and_the_next_one_reconnects() -> Result<(), B
         state.queue.push_back(queued("events.tenant-a", "one"));
     }
     eventually(|| fetch_batch(&rig.link, FETCH_MAX).is_ok_and(|batch| batch.len() == 1))?;
-    assert!(lock(&rig.stub.hub).creates.len() >= PAIR);
+    assert!(lock(&rig.stub.hub).infos.len() >= PAIR);
     Ok(())
 }
 
@@ -301,9 +296,11 @@ fn a_lost_connection_rebuilds_the_session_from_the_current_settings() -> Result<
     let deliveries = fetch_batch(&rig.link, FETCH_MAX)?;
     assert_eq!(deliveries.len(), 1);
     let state = lock(&rig.stub.hub);
-    let last = state.creates.last().ok_or("no second create")?;
-    assert_eq!(last.pointer("/request/stream_name").and_then(|value| value.as_str()), Some("other"));
-    assert_eq!(state.creates.len(), PAIR);
+    assert_eq!(
+        state.infos.last().map(String::as_str),
+        Some("JS.EVENTS.API.CONSUMER.INFO.other.siem-ingest")
+    );
+    assert_eq!(state.infos.len(), PAIR);
     Ok(())
 }
 
@@ -319,9 +316,28 @@ fn a_pull_error_status_is_reported() -> Result<(), Box<dyn Error + Send + Sync>>
 
 #[test]
 fn a_refused_consumer_is_reported() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let rig = rig(NORMAL_MS, "", |state| state.fail_create = true)?;
+    let rig = rig(NORMAL_MS, "", |state| state.fail_info = true)?;
     assert!(fetch_batch(&rig.link, FETCH_MAX).is_err());
     Ok(())
+}
+
+
+#[test]
+fn a_durable_that_is_not_the_pre_created_one_is_refused_by_field() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let wrong = [
+        ("ack_policy", json!({"ack_policy": "none"})),
+        ("filter_subject", json!({"filter_subject": "events.a"})),
+        ("filter_subject", json!({"filter_subject": "events.>", "filter_subjects": ["events.b"]})),
+        ("ack_wait", json!({"ack_wait": WRONG_ACK_WAIT_NANOS})),
+    ];
+    wrong
+        .into_iter()
+        .try_for_each(|(field, patch)| -> Result<(), Box<dyn Error + Send + Sync>> {
+            let rig = rig(NORMAL_MS, "", |state| state.config_patch = Some(patch))?;
+            let failure = fetch_batch(&rig.link, FETCH_MAX).err().ok_or("a wrong durable was accepted")?;
+            assert!(failure.to_string().contains(&format!("`{field}` differs")), "{failure}");
+            Ok(())
+        })
 }
 
 
@@ -333,7 +349,7 @@ fn a_server_payload_limit_above_the_batch_cap_is_refused() -> Result<(), Box<dyn
         .ok_or("a payload limit above the batch cap was accepted")?;
     assert!(failure.to_string().contains("accepts payloads of 8388608 bytes"));
     assert!(check_payload_limit(1, 1).is_ok());
-    assert!(lock(&rig.stub.hub).creates.is_empty());
+    assert!(lock(&rig.stub.hub).infos.is_empty());
     Ok(())
 }
 
@@ -556,6 +572,19 @@ fn a_user_and_a_password_file_authenticate_the_connection() -> Result<(), Box<dy
     let connect = state.connects.first().ok_or("no CONNECT")?;
     assert_eq!(connect.get("user").and_then(|value| value.as_str()), Some("ops"));
     assert_eq!(connect.get("pass").and_then(|value| value.as_str()), Some("s3cret"));
+    assert!(!state.subscribed.is_empty());
+    assert!(state.subscribed.iter().all(|subject| subject.starts_with("_INBOX_ops.")));
+    Ok(())
+}
+
+
+#[test]
+fn a_connection_without_a_user_keeps_the_default_inbox() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    let state = lock(&rig.stub.hub);
+    assert!(!state.subscribed.is_empty());
+    assert!(state.subscribed.iter().all(|subject| subject.starts_with("_INBOX.")));
     Ok(())
 }
 
@@ -608,12 +637,8 @@ fn a_reload_of_the_connection_settings_replaces_the_session_and_releases_what_it
     wait_until(&rig.stub, |state| state.acks.iter().any(|ack| ack.starts_with("-NAK")))?;
     let state = lock(&rig.stub.hub);
     assert_eq!(state.connections, PAIR);
-    assert_eq!(state.creates.len(), PAIR);
-    let last = state.creates.last().ok_or("no second create")?;
-    assert!(last
-        .pointer("/subject")
-        .and_then(|value| value.as_str())
-        .is_some_and(|subject| subject.contains("other")));
+    assert_eq!(state.infos.len(), PAIR);
+    assert_eq!(state.infos.last().map(String::as_str), Some("JS.EVENTS.API.CONSUMER.INFO.events.other"));
     drop(state);
     assert!(acknowledge(&rig.link, old_token, AckAction::Ack).is_err());
     assert!(acknowledge(&rig.link, new_token, AckAction::Ack).is_ok());
@@ -630,7 +655,7 @@ fn a_reload_that_leaves_the_connection_settings_keeps_the_session() -> Result<()
     assert!(fetch_batch(&rig.link, FETCH_MAX)?.is_empty());
     let state = lock(&rig.stub.hub);
     assert_eq!(state.connections, 1);
-    assert_eq!(state.creates.len(), 1);
+    assert_eq!(state.infos.len(), 1);
     Ok(())
 }
 

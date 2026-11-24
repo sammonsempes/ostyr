@@ -1,7 +1,8 @@
 use ebpf_probes::btf::{
-    find_task_offsets, read_task_offsets, read_task_offsets_from, TaskOffsets, Unsupported, MAX_BTF_BYTES, MAX_BTF_TYPES, MAX_TYPE_CHAIN,
-    REASON_BITFIELD, REASON_MEMBER_TYPE, REASON_MISSING, REASON_NOT_BTF, REASON_NO_REAL_PARENT, REASON_NO_TASK_STRUCT, REASON_NO_TGID,
-    REASON_OUT_OF_STRUCT, REASON_OVERSIZED, REASON_TOO_MANY_TYPES, REASON_TRUNCATED, REASON_TYPE_CHAIN, REASON_UNKNOWN_KIND, REASON_UNREADABLE,
+    find_task_offsets, read_task_offsets, read_task_offsets_from, require_64_bit, TaskOffsets, Unsupported, MAX_BTF_BYTES, MAX_BTF_TYPES,
+    MAX_TYPE_CHAIN, REASON_BITFIELD, REASON_MEMBER_TYPE, REASON_MISSING, REASON_NOT_64_BIT, REASON_NOT_BTF, REASON_NO_REAL_PARENT,
+    REASON_NO_TASK_STRUCT, REASON_NO_TGID, REASON_OUT_OF_STRUCT, REASON_OVERSIZED, REASON_TOO_MANY_TYPES, REASON_TRUNCATED, REASON_TYPE_CHAIN,
+    REASON_UNKNOWN_KIND, REASON_UNREADABLE,
 };
 use ebpf_probes::types::ExtraType;
 use std::error::Error;
@@ -731,5 +732,17 @@ fn a_valid_task_struct_followed_by_types_past_the_cap_is_refused() -> Result<(),
     let mut sample = valid_sample();
     (0..=MAX_BTF_TYPES).for_each(|_| add_type(&mut sample, "", (KIND_PTR, 0, false, 1), &[]));
     assert_eq!(failure(find_task_offsets(&finish(&sample)))?, REASON_TOO_MANY_TYPES);
+    Ok(())
+}
+
+
+const NARROW_POINTER_BITS: u32 = 32;
+
+
+#[test]
+fn only_a_64_bit_host_is_accepted() -> Result<(), Box<dyn Error>> {
+    require_64_bit(usize::BITS)?;
+    assert_eq!(require_64_bit(NARROW_POINTER_BITS), Err(Unsupported(REASON_NOT_64_BIT)));
+    assert_eq!(require_64_bit(0), Err(Unsupported(REASON_NOT_64_BIT)));
     Ok(())
 }

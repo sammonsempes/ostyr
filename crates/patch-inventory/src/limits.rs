@@ -37,3 +37,15 @@ pub const MAX_WINGET_ID_BYTES: usize = 128;
 
 
 pub const MAX_WINGET_VERSION_BYTES: usize = 128;
+
+
+pub const MIN_SEPARATOR_DASHES: usize = 20;
+
+
+pub const MAX_WINGET_TABLES: usize = 2;
+
+
+pub const SOURCE_OPEN_FAILED_EXIT: i32 = -1_978_335_157;
+
+
+pub const ROW_CELL_COUNT: usize = 3;

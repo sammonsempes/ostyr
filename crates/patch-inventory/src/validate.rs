@@ -58,23 +58,19 @@ pub fn is_valid_rpm(update: &Update) -> bool {
 }
 
 
+pub fn is_winget_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '~' | '-')
+}
+
+
 pub fn is_winget_package_id(text: &str) -> bool {
-    text.len() <= MAX_WINGET_ID_BYTES
-        && text.starts_with(|first: char| first.is_ascii_alphanumeric())
-        && text
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'))
+    text.len() <= MAX_WINGET_ID_BYTES && text.starts_with(|first: char| first.is_ascii_alphanumeric()) && text.chars().all(is_winget_token_character)
 }
 
 
 pub fn is_winget_version(text: &str) -> bool {
-    text.len() <= MAX_WINGET_VERSION_BYTES && is_plain_text(text)
-}
-
-
-pub fn is_spaced_version(text: &str) -> bool {
     text.len() <= MAX_WINGET_VERSION_BYTES
-        && text.contains(' ')
-        && !text.starts_with(['-', ' '])
-        && text.chars().all(|character| character.is_ascii_graphic() || character == ' ')
+        && !text.starts_with('-')
+        && text.chars().all(is_winget_token_character)
+        && text.chars().any(|character| character.is_ascii_digit())
 }

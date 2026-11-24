@@ -15,6 +15,9 @@ const SPLIT: &str = "url_userinfo_split";
 const UNREAD: &str = "url_host_unread";
 
 
+const AMBIGUOUS: &str = "url_host_ambiguous";
+
+
 const DECOYS: usize = 500;
 
 
@@ -135,7 +138,8 @@ fn a_data_url_and_a_url_at_the_end_of_the_text_are_not_split() -> Result<(), Box
 fn a_quote_followed_by_text_without_an_at_sign_is_not_split() -> Result<(), Box<dyn std::error::Error>> {
     let record = message("text/plain", "\"https://good.test\" and more", &Limits::default())?;
     assert_eq!(record.counts.url_userinfo_split, 0);
-    assert!(!record.original_uncertain);
+    assert!(record.counts.url_host_ambiguous >= 1);
+    assert_eq!(reasons(&record, AMBIGUOUS), 1);
     Ok(())
 }
 
@@ -283,7 +287,7 @@ fn a_quote_inside_the_host_lists_the_host_and_is_flagged() -> Result<(), Box<dyn
             "{body}: {:?}",
             domains(&record)
         );
-        assert_eq!(reasons(&record, SPLIT), 1, "{body}");
+        assert_eq!(reasons(&record, AMBIGUOUS), 1, "{body}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
@@ -294,7 +298,8 @@ fn ordinary_quoting_is_not_a_quote_inside_the_host() -> Result<(), Box<dyn std::
     let body = "<a href=\"https://x.test\">x</a> <b>https://y.test<br/></b> https://z.test<i>q</i>\r\n\"https://a.test\",\"https://b.test\"\r\n'https://c.test'.";
     let record = message("text/html", body, &Limits::default())?;
     assert_eq!(record.counts.url_userinfo_split, 0);
-    assert!(!record.original_uncertain);
+    assert!(record.counts.url_host_ambiguous > 0);
+    assert_eq!(reasons(&record, AMBIGUOUS), 1);
     Ok(())
 }
 
