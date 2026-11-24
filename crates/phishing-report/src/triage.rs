@@ -2,7 +2,7 @@ use crate::auth::{oversized_untrusted, verdicts_with_from, PASS};
 use crate::claim::{claim_scan, domain_set};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
-use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Shapes, Triage, UrlHit, UrlIndex};
+use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, Reading, ReporterPolicy, Shapes, Triage, UrlHit, UrlIndex};
 use crate::policy::{check_policy, is_internal, is_strict_domain};
 use crate::scan::{scan, Scan};
 use crate::shapes::has_reference;
@@ -626,6 +626,21 @@ const UTF8_LABELS: [&str; 6] = ["utf8", "utf_8", "unicode11utf8", "unicode20utf8
 const CHARSET_UNDECODED: &str = "charset_undecoded";
 
 
+const CHARSET_MISMATCH: &str = "charset_mismatch";
+
+
+const RAW_HEAD: &str = "Content-Type: application/octet-stream\r\nContent-Transfer-Encoding: ";
+
+
+const RAW_HEAD_END: &str = "\r\n\r\n";
+
+
+const IDENTITY_TRANSFER: &str = "7bit";
+
+
+const BYTE_ORDER_MARK: char = '\u{FEFF}';
+
+
 const ESCAPE_CHARACTER: char = '\u{1B}';
 
 
@@ -699,6 +714,8 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     mark_once(&mut record, unopened, MESSAGES_UNOPENED);
     let undecoded = record.counts.charset_undecoded > 0;
     mark_once(&mut record, undecoded, CHARSET_UNDECODED);
+    let mismatched = record.counts.charset_mismatch > 0;
+    mark_once(&mut record, mismatched, CHARSET_MISMATCH);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -729,7 +746,11 @@ fn is_iso_2022_jp(label: &str) -> bool {
 
 fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bool {
     let label = charset_label(part);
-    let unknown_label = label.is_some_and(|name| (charset_decoder(name.as_bytes()).is_none() && !is_utf8_label(name)) || is_replacement_label(name));
+    let unknown_label = label.is_some_and(|name| {
+        (charset_decoder(name.as_bytes()).is_none() && !is_utf8_label(name))
+            || is_replacement_label(name)
+            || Encoding::for_label(name.trim().as_bytes()).is_none()
+    });
     let escape_allowed = label.is_some_and(is_iso_2022_jp);
     let unlabelled_meta = label.is_none() && has_foreign_meta_charset(text);
     unknown_label || has_lost_bytes(text, escape_allowed) || has_duplicate_charset(part) || unlabelled_meta || has_orphan_continuation(message, part)
@@ -800,6 +821,60 @@ fn has_orphan_continuation(message: &Message<'_>, part: &MessagePart<'_>) -> boo
 }
 
 
+fn scan_text(context: &Context<'_>, markup: &str, level: usize, urls: Vec<UrlHit>, urls_index: &mut UrlIndex, counts: &mut Counts) -> Vec<UrlHit> {
+    let limits = context.limits;
+    let referenced = has_reference(markup);
+    urls_index.shapes = if referenced { Shapes::Refuse } else { Shapes::Markup };
+    let decoded = html_text(markup, counts);
+    let listed = collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts);
+    urls_index.shapes = Shapes::Refuse;
+    if referenced {
+        collect_indexed(context.rule, markup, level, limits, listed, urls_index, counts)
+    } else {
+        listed
+    }
+}
+
+
+fn part_bytes(message: &Message<'_>, part: &MessagePart<'_>) -> Option<Vec<u8>> {
+    let base = message.parts.first().map_or(0, |root| root.offset_header) as usize;
+    let start = (part.raw_body_offset() as usize).checked_sub(base)?;
+    let end = (part.raw_end_offset() as usize).checked_sub(base)?;
+    let body = message.raw_message().get(start..end)?;
+    let transfer = part.content_transfer_encoding().unwrap_or(IDENTITY_TRANSFER).trim().to_owned();
+    let valid = transfer.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let mut synthetic = format!("{RAW_HEAD}{transfer}{RAW_HEAD_END}").into_bytes();
+    synthetic.extend_from_slice(body);
+    let parsed = valid.then(|| MessageParser::default().parse(&synthetic)).flatten()?;
+    parsed.parts.first().map(|root| root.contents().to_vec())
+}
+
+
+fn same_text(whatwg: &str, markup: &str) -> bool {
+    let left = whatwg.strip_prefix(BYTE_ORDER_MARK).unwrap_or(whatwg).trim_end();
+    let right = markup.strip_prefix(BYTE_ORDER_MARK).unwrap_or(markup).trim_end();
+    left == right
+}
+
+
+fn whatwg_reading(message: &Message<'_>, part: &MessagePart<'_>, markup: &str, limits: &Limits) -> Reading {
+    charset_label(part)
+        .and_then(|label| Encoding::for_label(label.trim().as_bytes()))
+        .map_or(Reading::Same, |encoding| {
+            part_bytes(message, part)
+                .filter(|bytes| bytes.len() <= limits.part_bytes)
+                .map_or(Reading::Unreadable, |bytes| {
+                    let (text, _, _) = encoding.decode(&bytes);
+                    if same_text(&text, markup) {
+                        Reading::Same
+                    } else {
+                        Reading::Differs(text.into_owned())
+                    }
+                })
+        })
+}
+
+
 fn collect_urls(
     message: &Message<'_>,
     level: usize,
@@ -818,15 +893,17 @@ fn collect_urls(
             }
             PartType::Text(markup) | PartType::Html(markup) => {
                 counts.charset_undecoded += usize::from(is_undecoded(message, part, markup));
-                let referenced = has_reference(markup);
-                urls_index.shapes = if referenced { Shapes::Refuse } else { Shapes::Markup };
-                let decoded = html_text(markup, counts);
-                let listed = collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts);
-                urls_index.shapes = Shapes::Refuse;
-                if referenced {
-                    collect_indexed(context.rule, markup, level, limits, listed, urls_index, counts)
-                } else {
-                    listed
+                let first = scan_text(context, markup, level, urls, urls_index, counts);
+                match whatwg_reading(message, part, markup, limits) {
+                    Reading::Same => first,
+                    Reading::Differs(text) => {
+                        counts.charset_mismatch += 1;
+                        scan_text(context, &text, level, first, urls_index, counts)
+                    }
+                    Reading::Unreadable => {
+                        counts.charset_mismatch += 1;
+                        first
+                    }
                 }
             }
             _ => urls,

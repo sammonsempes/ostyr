@@ -16,6 +16,7 @@ pub struct Counts {
     pub headers_skipped: usize,
     pub parts_skipped: usize,
     pub charset_undecoded: usize,
+    pub charset_mismatch: usize,
     pub attachments_skipped: usize,
     pub urls_refused: usize,
     pub urls_dropped: usize,
@@ -85,6 +86,14 @@ pub struct AttachmentInfo {
 pub struct UrlHit {
     pub level: usize,
     pub url: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reading {
+    Same,
+    Differs(String),
+    Unreadable,
 }
 
 
