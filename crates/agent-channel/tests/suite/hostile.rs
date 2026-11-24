@@ -9,7 +9,7 @@ use crate::types::TestResult;
 use agent_channel::client::{connect_channel, deliver_events, heartbeat, read_acks, send_pending};
 use agent_channel::error::ChannelError;
 use agent_channel::model::{
-    Identity, PendingHandshake, ATTEMPT_TIMEOUT_SECONDS, IPV6_HOST_BITS, MAX_ACK_READS, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS,
+    Identity, ListenerKind, PendingHandshake, ATTEMPT_TIMEOUT_SECONDS, IPV6_HOST_BITS, MAX_ACK_READS, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS,
 };
 use agent_channel::proto::{EventAck, EventBatch};
 use agent_channel::server::{busiest_oldest, peer_source, register_handshake, source_of};
@@ -20,7 +20,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -86,7 +86,14 @@ fn soon() -> Instant {
 
 fn handshake(source: IpAddr) -> (PendingHandshake, oneshot::Receiver<()>) {
     let (stop, receiver) = oneshot::channel();
-    (PendingHandshake { source, stop }, receiver)
+    (
+        PendingHandshake {
+            kind: ListenerKind::Direct,
+            source,
+            stop,
+        },
+        receiver,
+    )
 }
 
 
@@ -279,32 +286,32 @@ fn a_source_at_its_cap_is_refused_and_the_global_eviction_hits_the_busiest_sourc
         envelope_source(Vec::new()),
         discarding_audit(),
     );
-    let mut waiting = Vec::new();
+    let waiting = Mutex::new(Vec::new());
     let busy = host(1);
     let quiet = host(SECOND_SOURCE_BYTE);
-    let first = register_handshake(&mut waiting, busy, &state).ok_or("first refused")?;
-    let second = register_handshake(&mut waiting, busy, &state).ok_or("second refused")?;
-    assert!(register_handshake(&mut waiting, busy, &state).is_none());
+    let first = register_handshake(&waiting, ListenerKind::Direct, busy, &state).ok_or("first refused")?;
+    let second = register_handshake(&waiting, ListenerKind::Direct, busy, &state).ok_or("second refused")?;
+    assert!(register_handshake(&waiting, ListenerKind::Direct, busy, &state).is_none());
     assert_eq!(counter(&state.counters.handshakes_refused), 1);
-    let quiet_first = register_handshake(&mut waiting, quiet, &state).ok_or("quiet refused")?;
-    let mut quiet_second = register_handshake(&mut waiting, quiet, &state).ok_or("quiet refused")?;
+    let quiet_first = register_handshake(&waiting, ListenerKind::Direct, quiet, &state).ok_or("quiet refused")?;
+    let mut quiet_second = register_handshake(&waiting, ListenerKind::Direct, quiet, &state).ok_or("quiet refused")?;
     assert_eq!(counter(&state.counters.handshakes_evicted), 1);
     assert!(first.blocking_recv().is_ok());
     drop(second);
     drop(quiet_first);
     assert!(quiet_second.try_recv().is_err());
-    assert_eq!(waiting.len(), GLOBAL_CAP);
+    assert_eq!(waiting.lock().map_err(|_| "poisoned")?.len(), GLOBAL_CAP);
     Ok(())
 }
 
 
 #[test]
 fn the_busiest_source_gives_its_oldest_handshake() -> TestResult {
-    assert_eq!(busiest_oldest(&[]), None);
+    assert_eq!(busiest_oldest(&[], ListenerKind::Direct), None);
     let (quiet, _quiet_receiver) = handshake(host(SECOND_SOURCE_BYTE));
     let (busy_first, _first) = handshake(host(1));
     let (busy_second, _second) = handshake(host(1));
-    assert_eq!(busiest_oldest(&[quiet, busy_first, busy_second]), Some(1));
+    assert_eq!(busiest_oldest(&[quiet, busy_first, busy_second], ListenerKind::Direct), Some(1));
     Ok(())
 }
 

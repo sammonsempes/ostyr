@@ -1,7 +1,11 @@
 use crate::error::ChannelError;
 use crate::proto::{EventBatch, ShellCloseReason, ShellFrame};
-use crate::types::{AuditSink, ClockFn, CommandSource, EventSink, NowFn, SharedSettings, ShellSink, ShellSource};
+use crate::types::{
+    AuditSink, ClockFn, CommandSource, EventSink, IncomingConnections, NowFn, PendingRegistry, RevocationWatch, SharedSettings, SharedState,
+    ShellSink, ShellSource,
+};
 use agent_command::model::Command;
+use axum::Router;
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -11,6 +15,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio_rustls::TlsAcceptor;
 use tonic::Status;
 
 
@@ -210,6 +215,70 @@ pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 256;
 pub const DEFAULT_MAX_PENDING_HANDSHAKES_PER_SOURCE: usize = 16;
 
 
+/// Relayed connections still in their TLS handshake: beyond this the oldest of the busiest relayed source is dropped.
+pub const DEFAULT_MAX_PENDING_RELAY_HANDSHAKES: usize = 256;
+
+
+/// Addresses `relay_sources` may list.
+pub const MAX_RELAY_SOURCES: usize = 4;
+
+
+/// One deadline for the whole PROXY header, under `DEFAULT_HANDSHAKE_TIMEOUT_SECONDS`.
+pub const PROXY_HEADER_SECONDS: u64 = 5;
+
+
+/// Relayed connections in their header phase, all relays together: the size of `DEFAULT_MAX_PENDING_HANDSHAKES`.
+pub const MAX_PROXY_HEADER_PENDING: usize = 256;
+
+
+/// Relayed connections in their header phase for one relay address.
+pub const MAX_PROXY_HEADER_PENDING_PER_RELAY: usize = 128;
+
+
+/// Bytes 0 to 11 of a PROXY protocol v2 header.
+pub const PROXY_SIGNATURE: [u8; 12] = [0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A];
+
+
+/// The fixed prefix: signature, version and command, family and protocol, length.
+pub const PROXY_PREFIX_BYTES: usize = 16;
+
+
+/// Version 2 and the `PROXY` command; `LOCAL` is `0x20`.
+pub const PROXY_COMMAND_BYTE: u8 = 0x21;
+
+
+/// `AF_INET` over `STREAM`.
+pub const PROXY_TCP4_BYTE: u8 = 0x11;
+
+
+/// `AF_INET6` over `STREAM`.
+pub const PROXY_TCP6_BYTE: u8 = 0x21;
+
+
+/// Source address, destination address and the two ports of the IPv4 block.
+pub const PROXY_TCP4_LENGTH: usize = 12;
+
+
+/// Source address, destination address and the two ports of the IPv6 block.
+pub const PROXY_TCP6_LENGTH: usize = 36;
+
+
+/// Bytes of an IPv4 source address.
+pub const PROXY_TCP4_SOURCE_BYTES: usize = 4;
+
+
+/// Bytes of an IPv6 source address.
+pub const PROXY_TCP6_SOURCE_BYTES: usize = 16;
+
+
+/// Destination address and the two ports that follow the source in the IPv4 block.
+pub const PROXY_TCP4_TAIL_BYTES: usize = 8;
+
+
+/// Destination address and the two ports that follow the source in the IPv6 block.
+pub const PROXY_TCP6_TAIL_BYTES: usize = 20;
+
+
 /// An IPv6 source is folded to its /64: the host bits are cleared.
 pub const IPV6_HOST_BITS: u32 = 64;
 
@@ -391,6 +460,8 @@ pub struct ChannelSettings {
     pub max_total_connections: usize,
     pub max_pending_handshakes: usize,
     pub max_pending_handshakes_per_source: usize,
+    pub max_pending_relay_handshakes: usize,
+    pub relay_sources: Vec<IpAddr>,
     pub silence_threshold_seconds: u64,
     pub silence_check_interval_seconds: u64,
 }
@@ -413,6 +484,8 @@ impl Default for ChannelSettings {
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_pending_handshakes_per_source: DEFAULT_MAX_PENDING_HANDSHAKES_PER_SOURCE,
+            max_pending_relay_handshakes: DEFAULT_MAX_PENDING_RELAY_HANDSHAKES,
+            relay_sources: Vec::new(),
             silence_threshold_seconds: DEFAULT_SILENCE_THRESHOLD_SECONDS,
             silence_check_interval_seconds: DEFAULT_SILENCE_CHECK_INTERVAL_SECONDS,
         }
@@ -438,6 +511,15 @@ pub struct Counters {
     pub first_request_timeouts: AtomicU64,
     pub handshakes_evicted: AtomicU64,
     pub handshakes_refused: AtomicU64,
+    pub proxy_bad_signature: AtomicU64,
+    pub proxy_bad_command: AtomicU64,
+    pub proxy_bad_family: AtomicU64,
+    pub proxy_bad_length: AtomicU64,
+    pub proxy_bad_source: AtomicU64,
+    pub proxy_header_io: AtomicU64,
+    pub proxy_header_timeout: AtomicU64,
+    pub proxy_header_refused: AtomicU64,
+    pub relay_peer_unknown: AtomicU64,
     pub shell_unexpected: AtomicU64,
     pub shell_limited: AtomicU64,
     pub shell_open_timeouts: AtomicU64,
@@ -530,9 +612,76 @@ pub struct Admission {
 }
 
 
+/// The listener a connection came in on: the direct one, or the relay one whose source is named by a PROXY header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ListenerKind {
+    Direct,
+    Relay,
+}
+
+
+/// Why a relayed connection was refused before its TLS handshake; each variant has its own counter and fixed text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyRefusal {
+    Signature,
+    Command,
+    Family,
+    Length,
+    Source,
+    Io,
+    Timeout,
+}
+
+
+/// The address family of an accepted PROXY block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyFamily {
+    Tcp4,
+    Tcp6,
+}
+
+
+/// Relayed connections in their header phase: all together and per relay address.
+#[derive(Debug, Default)]
+pub struct HeaderPhase {
+    pub total: usize,
+    pub per_relay: HashMap<IpAddr, usize>,
+}
+
+
+/// One place in the header phase; dropping it gives the place back.
+#[derive(Debug)]
+pub struct HeaderPermit {
+    pub phase: Arc<Mutex<HeaderPhase>>,
+    pub relay: IpAddr,
+}
+
+
+/// The relay listener of the server: its connections and the one deadline of the PROXY header.
+pub struct RelayListener {
+    pub incoming: IncomingConnections,
+    pub header_limit: Duration,
+}
+
+
+/// What every accepted connection needs, cloned into its task.
+#[derive(Clone)]
+pub struct Serving {
+    pub acceptor: TlsAcceptor,
+    pub router: Router,
+    pub state: SharedState,
+    pub revocations: RevocationWatch,
+    pub connections: Arc<Semaphore>,
+    pub registry: PendingRegistry,
+    pub phase: Arc<Mutex<HeaderPhase>>,
+    pub header_limit: Duration,
+}
+
+
 /// A connection still in its TLS handshake: the source it came from and the signal that drops it.
 #[derive(Debug)]
 pub struct PendingHandshake {
+    pub kind: ListenerKind,
     pub source: IpAddr,
     pub stop: oneshot::Sender<()>,
 }
