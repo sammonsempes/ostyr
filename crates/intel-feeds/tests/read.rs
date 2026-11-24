@@ -602,6 +602,7 @@ fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
     });
     let mut out = Vec::new();
     let failed = read_iocs(&rig.config, NOW, &mut out);
+    drop(TcpStream::connect(rig.listener.local_addr()?)?);
     release.send(())?;
     assert!(matches!(failed, Err(ReadError::Refused(InsertClass::Timeout))), "{failed:?}");
     assert!(out.is_empty());
