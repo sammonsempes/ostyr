@@ -5,6 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 
 
 pub type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
@@ -29,3 +30,6 @@ pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 
 pub type SharedStop = Shared<ShutdownSignal>;
+
+
+pub type NodelayFn = fn(&TcpStream) -> io::Result<()>;

@@ -1,9 +1,12 @@
 use crate::support::{rig, TestResult, BASE_YAML, HUGE_SOFT};
 use core_audit::log::open_file_log;
 use core_config::reload::current_config;
-use relay::app::{exit_code, main_exit, open_runtime, parse_args, refuse_root, run_from_args, run_main, run_runtime, stop_signals};
+use relay::app::{
+    exit_code, main_exit, open_runtime, open_runtime_with, parse_args, refuse_root, run_from_args, run_main, run_runtime, same_inode, stop_signals,
+};
 use relay::audit::{append_entry, lifecycle_entry, START_ACTION};
 use relay::error::RelayError;
+use relay::header::proxy_header;
 use relay::model::{Options, Paths};
 use rustix::process::{getpid, kill_process, Signal};
 use std::io;
@@ -14,6 +17,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+
+
+const IPV4_HEADER_BYTES: usize = 28;
+
+
+const PROXY_SIGNATURE_BYTES: usize = 12;
+
+
+const EXPECTED_AUDIT_LINES: usize = 2;
+
+
+const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 
 
 const NON_ROOT: u32 = 1000;
@@ -54,6 +69,9 @@ async fn echo_server() -> io::Result<std::net::SocketAddr> {
         let served = listener.accept().await;
         if let Ok((mut stream, _peer)) = served {
             let (mut reader, mut writer) = stream.split();
+            let mut header = [u8::MIN; IPV4_HEADER_BYTES];
+            let read_header = reader.read_exact(&mut header).await;
+            drop(read_header);
             let copied = tokio::io::copy(&mut reader, &mut writer).await;
             let closed = writer.shutdown().await;
             drop((copied, closed));
@@ -296,5 +314,162 @@ fn lifecycle_records_keep_only_declared_parameters() -> TestResult {
 fn the_rig_builds() -> TestResult {
     let built = rig(BASE_YAML)?;
     assert!(built.dir.path().exists());
+    Ok(())
+}
+
+
+async fn header_server() -> io::Result<(std::net::SocketAddr, tokio::task::JoinHandle<io::Result<Vec<u8>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let reading = tokio::spawn(async move {
+        let (mut stream, _peer) = listener.accept().await?;
+        let mut header = [u8::MIN; IPV4_HEADER_BYTES];
+        stream.read_exact(&mut header).await?;
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).await?;
+        Ok([header.to_vec(), rest].concat())
+    });
+    Ok((address, reading))
+}
+
+
+#[tokio::test]
+async fn the_first_upstream_bytes_are_the_proxy_header_of_the_accepted_socket() -> TestResult {
+    let (upstream, reading) = header_server().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let relay_address = listener.local_addr()?;
+    let dir = tempfile::tempdir()?;
+    let settings = dir.path().join("relay.yaml");
+    std::fs::write(&settings, settings_text("127.0.0.1:443", &upstream.to_string()))?;
+    let runtime = open_runtime(
+        &Paths {
+            settings,
+            audit: dir.path().join("audit.log"),
+        },
+        HUGE_SOFT,
+    )?;
+    let (stop, signal) = stop_pair();
+    let running = tokio::spawn(run_runtime(runtime, listener, signal, real_options()));
+    let mut client = connect_when_listening(relay_address).await?;
+    let client_address = client.local_addr()?;
+    client.write_all(b"after").await?;
+    client.shutdown().await?;
+    let received = timeout(SIGNAL_WAIT, reading).await???;
+    let expected = [proxy_header(client_address, relay_address), b"after".to_vec()].concat();
+    assert_eq!(received, expected);
+    stop.send(()).map_err(|()| "stop dropped")?;
+    timeout(SIGNAL_WAIT, running).await???;
+    Ok(())
+}
+
+
+fn paths_in(dir: &Path) -> Result<Paths, io::Error> {
+    let settings = dir.join("relay.yaml");
+    std::fs::write(&settings, settings_text("127.0.0.1:443", "127.0.0.1:8443"))?;
+    Ok(Paths {
+        settings,
+        audit: dir.join("audit.log"),
+    })
+}
+
+
+fn audit_lines(path: &Path) -> Result<usize, io::Error> {
+    Ok(std::fs::read_to_string(path)?.lines().count())
+}
+
+
+#[test]
+fn a_relay_that_opened_the_log_before_the_other_stopped_continues_from_the_current_head() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(dir.path())?;
+    let first = std::cell::RefCell::new(Some(open_runtime(&paths, HUGE_SOFT)?));
+    let stopped = |_opened: &std::fs::File| {
+        if let Some(runtime) = first.borrow_mut().take() {
+            let entry = lifecycle_entry(Path::new("relay.yaml"), "relay.stop", &[]);
+            drop(append_entry(&runtime.log, entry));
+        }
+    };
+    let second = open_runtime_with(&paths, HUGE_SOFT, &stopped)?;
+    append_entry(&second.log, lifecycle_entry(Path::new("relay.yaml"), START_ACTION, &[]))?;
+    drop(second);
+    assert!(first.borrow().is_none());
+    assert_eq!(audit_lines(&paths.audit)?, EXPECTED_AUDIT_LINES);
+    open_file_log(&paths.audit)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_relay_that_opened_the_log_while_the_other_still_runs_is_refused_locked() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(dir.path())?;
+    let first = open_runtime(&paths, HUGE_SOFT)?;
+    let refused = open_runtime_with(&paths, HUGE_SOFT, &|_opened| ())
+        .err()
+        .ok_or("the second start was accepted")?;
+    assert!(matches!(refused, RelayError::AuditLocked(_)));
+    assert!(refused.to_string().contains("held by another relay"));
+    drop(first);
+    Ok(())
+}
+
+
+#[test]
+fn a_log_replaced_between_the_open_and_the_lock_is_refused_by_name() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(dir.path())?;
+    let audit = paths.audit.clone();
+    let moved = dir.path().join("moved.log");
+    let replaced = |_opened: &std::fs::File| {
+        drop(std::fs::rename(&audit, &moved));
+        drop(std::fs::write(&audit, b""));
+    };
+    let refused = open_runtime_with(&paths, HUGE_SOFT, &replaced)
+        .err()
+        .ok_or("the replaced log was accepted")?;
+    assert!(matches!(refused, RelayError::AuditReplaced));
+    assert!(refused.to_string().contains("replaced"));
+    Ok(())
+}
+
+
+#[test]
+fn a_log_whose_name_is_gone_after_the_lock_is_an_io_error() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let file = std::fs::File::create(dir.path().join("held.log"))?;
+    let missing = same_inode(&file, &dir.path().join("absent.log"));
+    assert!(matches!(missing, Err(RelayError::Io(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_client_sent_proxy_header_lands_after_the_relay_header_and_never_names_the_source() -> TestResult {
+    let upstream = TcpListener::bind("127.0.0.1:0").await?;
+    let upstream_address = upstream.local_addr()?;
+    let listener_task = tokio::spawn(async move {
+        let (mut stream, _peer) = upstream.accept().await?;
+        let source = agent_channel::proxy::read_header(&mut stream).await;
+        let mut next = [u8::MIN; PROXY_SIGNATURE_BYTES];
+        stream.read_exact(&mut next).await?;
+        Ok::<_, io::Error>((source, next))
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let relay_address = listener.local_addr()?;
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(dir.path())?;
+    std::fs::write(&paths.settings, settings_text("127.0.0.1:443", &upstream_address.to_string()))?;
+    let runtime = open_runtime(&paths, HUGE_SOFT)?;
+    let (stop, signal) = stop_pair();
+    let running = tokio::spawn(run_runtime(runtime, listener, signal, real_options()));
+    let mut client = connect_when_listening(relay_address).await?;
+    let claimed = proxy_header("10.9.9.9:1234".parse()?, "10.9.9.10:443".parse()?);
+    client.write_all(&claimed).await?;
+    let (source, next) = timeout(SIGNAL_WAIT, listener_task).await???;
+    assert_eq!(source.ok(), Some(client.local_addr()?.ip()));
+    assert_eq!(next, agent_channel::model::PROXY_SIGNATURE);
+    assert_ne!(next.first(), Some(&TLS_HANDSHAKE_RECORD));
+    stop.send(()).map_err(|()| "stop dropped")?;
+    timeout(SIGNAL_WAIT, running).await???;
     Ok(())
 }

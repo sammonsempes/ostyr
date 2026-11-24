@@ -29,6 +29,10 @@ pub enum RelayError {
     Audit(#[from] AuditError),
     #[error("watch: {0}")]
     Watch(#[from] WatchError),
+    #[error("the audit file is held by another relay: {0}")]
+    AuditLocked(#[source] io::Error),
+    #[error("the audit file was replaced while the relay was starting")]
+    AuditReplaced,
     #[error("io: {0}")]
     Io(#[from] io::Error),
 }

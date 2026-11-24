@@ -29,6 +29,30 @@ pub const DEFAULT_IDLE_SECONDS: u64 = 120;
 pub const DEFAULT_MAX_LIFETIME_SECONDS: u64 = 3600;
 
 
+/// The 12-byte signature that opens every PROXY protocol v2 header.
+pub const PROXY_V2_SIGNATURE: [u8; 12] = [0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A];
+
+
+/// Version 2 in the high nibble, command PROXY in the low one.
+pub const PROXY_V2_VERSION_COMMAND: u8 = 0x21;
+
+
+/// Address family IPv4 in the high nibble, transport stream in the low one.
+pub const PROXY_V2_TCP4: u8 = 0x11;
+
+
+/// Address family IPv6 in the high nibble, transport stream in the low one.
+pub const PROXY_V2_TCP6: u8 = 0x21;
+
+
+/// Two IPv4 addresses and two ports.
+pub const PROXY_V2_TCP4_LENGTH: u16 = 12;
+
+
+/// Two IPv6 addresses and two ports.
+pub const PROXY_V2_TCP6_LENGTH: u16 = 36;
+
+
 /// Keeps `Instant + Duration` far from overflow.
 pub const MAX_SECONDS_LIMIT: u64 = 604_800;
 
@@ -171,6 +195,7 @@ pub struct Halves {
 pub struct Accepted {
     pub halves: Halves,
     pub peer: io::Result<SocketAddr>,
+    pub local: io::Result<SocketAddr>,
 }
 
 
@@ -191,6 +216,7 @@ pub enum End {
     Cut,
     ConnectFailed,
     ConnectTimeout,
+    HeaderFailed,
 }
 
 
@@ -231,6 +257,7 @@ pub struct Counters {
     pub refused_source: AtomicU64,
     pub connect_failed: AtomicU64,
     pub connect_timeout: AtomicU64,
+    pub header_failed: AtomicU64,
     pub idle_end: AtomicU64,
     pub lifetime_end: AtomicU64,
     pub copy_error: AtomicU64,
@@ -248,6 +275,7 @@ pub struct Summary {
     pub refused_source: u64,
     pub connect_failed: u64,
     pub connect_timeout: u64,
+    pub header_failed: u64,
     pub idle_end: u64,
     pub lifetime_end: u64,
     pub copy_error: u64,
@@ -299,5 +327,6 @@ pub struct Paths {
 pub struct Runtime {
     pub log: Arc<core_audit::log::AuditLog<std::fs::File>>,
     pub engine: Arc<core_config::reload::ReloadEngine<RelaySettings>>,
+    pub audit_lock: std::fs::File,
     pub settings_path: std::path::PathBuf,
 }
