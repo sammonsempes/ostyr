@@ -12,14 +12,15 @@ use core_audit::error::AuditError;
 use core_audit::log::open_file_log;
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use core_pg::connect::connect;
+use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
 use oncall::alert_source::{Round, TenantCounts};
-use oncall::error::SourceError;
+use oncall::error::{SourceError, StoreError};
 use oncall::serve::{
-    audit_purge, boxed_reload_audit, finish_code, interrupt_wait, load_service, open_service_settings, pause, purge_entry, purge_rows, refresh,
-    report, round_summary, service_state, start, start_only_changed, validate_service, wait_for_signals, Finish, PurgeDeadlines, FAILURE_EXIT_CODE,
-    ROUND_CAP_EXIT_CODE,
+    audit_purge, boxed_reload_audit, finish_code, interrupt_wait, is_deadline, load_service, note_deadline, open_service_settings, open_session,
+    pause, poll_round, purge_entry, purge_rows, refresh, report, round_summary, service_state, start, start_only_changed, store_deadline,
+    validate_service, wait_for_signals, watched_rows, Finish, PurgeDeadlines, FAILURE_EXIT_CODE, ROUND_CAP_EXIT_CODE,
 };
 use oncall::types::{InterruptWait, PurgedCounts};
 use pg_fake::certs::{loopback, make_pki};
@@ -33,6 +34,7 @@ use std::future::{pending, ready};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -361,6 +363,8 @@ async fn the_binary_audits_the_purge_into_its_file_and_exits_zero_on_sigint() ->
     let (audit, rest) = serve_one_round_then("-INT").await?;
     assert!(audit.contains("oncall.outbox.purge"), "{audit} / {rest}");
     assert!(audit.contains("beta=3"), "{audit}");
+    assert!(audit.lines().all(|line| line.contains("\"tenant\":\"all\"")), "{audit}");
+    assert!(!audit.contains("acme"), "{audit}");
     assert_eq!(audit.lines().count(), ONE_ROUND);
     assert!(rest.contains("leased=true"), "{rest}");
     Ok(())
@@ -489,7 +493,7 @@ fn a_reload_applies_a_source_change_and_keeps_the_old_settings_on_a_bad_file() -
     let dir = tempdir()?;
     let settings_file = write_site(dir.path(), CLOSED_PORT, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
-    let engine = open_service_settings(&settings_file, boxed_reload_audit(&log))?;
+    let engine = open_service_settings(&settings_file, load_service(&settings_file)?, boxed_reload_audit(&log))?;
     assert_eq!(current_config(&engine).source.interval_seconds, 1);
     fs::write(&settings_file, settings_text(dir.path(), "poller-a", SLOWER))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
@@ -500,21 +504,72 @@ fn a_reload_applies_a_source_change_and_keeps_the_old_settings_on_a_bad_file() -
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).source.interval_seconds, SLOWER);
     assert_eq!(current_config(&engine).label, "poller-a");
-    assert_eq!(fs::read_to_string(dir.path().join("audit.log"))?.lines().count(), THREE);
+    let audit = fs::read_to_string(dir.path().join("audit.log"))?;
+    assert_eq!(audit.lines().count(), THREE);
+    assert!(audit.lines().all(|line| line.contains("\"tenant\":\"all\"")), "{audit}");
+    Ok(())
+}
+
+
+#[test]
+fn a_file_swapped_between_the_start_reads_is_refused_by_name() -> TestResult {
+    let dir = tempdir()?;
+    let settings_file = write_site(dir.path(), CLOSED_PORT, "")?;
+    let first = load_service(&settings_file)?;
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    fs::write(
+        &settings_file,
+        settings_text(dir.path(), "poller-b", 1).replace("audit.log", "elsewhere.log"),
+    )?;
+    let refusal = open_service_settings(&settings_file, first, boxed_reload_audit(&log))
+        .err()
+        .ok_or("the swap was accepted")?;
+    assert!(refusal.to_string().contains("start-only"), "{refusal}");
+    Ok(())
+}
+
+
+#[test]
+fn only_a_deadline_marks_the_session_as_stuck() -> TestResult {
+    assert!(is_deadline(&PgError::ClientDeadline { seconds: 1 }));
+    assert!(is_deadline(&PgError::StatementTimeout { seconds: 1 }));
+    assert!(!is_deadline(&PgError::DeadlineOverflow));
+    assert!(store_deadline(&StoreError::Pg(PgError::ClientDeadline { seconds: 1 })));
+    assert!(!store_deadline(&StoreError::Pg(PgError::DeadlineOverflow)));
+    assert!(!store_deadline(&StoreError::NotFound));
+    let stuck = AtomicBool::new(false);
+    note_deadline(&stuck, false);
+    assert!(!stuck.load(Ordering::Relaxed));
+    note_deadline(&stuck, true);
+    assert!(stuck.load(Ordering::Relaxed));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_row_future_is_passed_through_and_a_deadline_is_noted() -> TestResult {
+    let stuck = AtomicBool::new(false);
+    let rows = watched_rows(Box::pin(ready(Ok(vec![vec!["x".to_owned()]]))), &stuck).await?;
+    assert_eq!(rows.len(), 1);
+    assert!(!stuck.load(Ordering::Relaxed));
+    assert!(watched_rows(Box::pin(ready(Err(PgError::ClientDeadline { seconds: 1 }))), &stuck)
+        .await
+        .is_err());
+    assert!(stuck.load(Ordering::Relaxed));
     Ok(())
 }
 
 
 #[test]
 fn the_purge_entry_names_the_tenants_the_rows_and_a_bounded_detail() -> TestResult {
-    let entry = purge_entry("acme", &counts());
+    let entry = purge_entry(&counts());
     assert_eq!(entry.action, "oncall.outbox.purge");
-    assert_eq!(entry.tenant, "acme");
+    assert_eq!(entry.tenant, "all");
     assert_eq!(entry.parameters.get("rows").map(String::as_str), Some("7"));
     assert_eq!(entry.parameters.get("tenants").map(String::as_str), Some("2"));
     assert_eq!(entry.parameters.get("detail").map(String::as_str), Some("beta=3,gamma=4"));
     let many: PurgedCounts = (0..MANY_TENANTS).map(|index| (format!("tenant-{index}"), 1)).collect();
-    let detail = purge_entry("acme", &many).parameters.get("detail").cloned().ok_or("no detail")?;
+    let detail = purge_entry(&many).parameters.get("detail").cloned().ok_or("no detail")?;
     assert!(detail.contains("truncated"), "{detail}");
     Ok(())
 }
@@ -528,7 +583,6 @@ fn a_failing_purge_audit_is_attempted_once_and_does_not_panic() -> TestResult {
             calls.set(calls.get() + 1);
             Err(AuditError::Usage)
         },
-        "acme",
         &counts(),
     );
     assert_eq!(calls.get(), 1);
@@ -697,7 +751,7 @@ async fn a_purge_past_its_deadline_is_rolled_back_and_reported() -> TestResult {
         .ok_or("expected a timeout")?;
     assert!(error.to_string().contains("deadline") || error.to_string().contains("timeout"), "{error}");
     let statements: Vec<String> = std::iter::from_fn(|| fake.statements.try_recv().ok()).take(MAX_STATEMENTS).collect();
-    assert!(statements.iter().any(|sql| sql == "ROLLBACK") || client.is_closed());
+    assert!(statements.iter().any(|sql| sql == "ROLLBACK"), "{statements:?}");
     Ok(())
 }
 
@@ -738,23 +792,76 @@ fn dropping() -> Handler {
 }
 
 
+async fn session_of(pg: &PgSettings) -> Result<oncall::serve::Session, Box<dyn std::error::Error>> {
+    Ok(open_session(pg).await?)
+}
+
+
+fn hung_purge() -> Handler {
+    let inner = serving(true);
+    Arc::new(move |sql| if sql.contains("WITH RECURSIVE held") { Reply::Hang } else { inner(sql) })
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_hit_a_deadline_is_replaced_after_the_round() -> TestResult {
+    let (_fake, pg, client, dir) = connected(hung_purge()).await?;
+    drop(client);
+    let settings_file = dir.path().join("oncall.yaml");
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    let engine = open_service_settings(&settings_file, load_service(&settings_file)?, boxed_reload_audit(&log))?;
+    let mut session = session_of(&pg).await?;
+    let before = session.driver.id();
+    poll_round(
+        &mut session,
+        &pg,
+        &engine,
+        "holder-a",
+        deadlines(Duration::ZERO, HUNG_ROLLBACK),
+        &|_counts| (),
+    )
+    .await;
+    assert_ne!(session.driver.id(), before, "the stuck session was kept");
+    let answered = tokio::time::timeout(GENEROUS, session.client.simple_query("SELECT 1")).await;
+    assert!(answered.is_ok_and(|result| result.is_ok()));
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_without_a_deadline_keeps_its_session() -> TestResult {
+    let (_fake, pg, client, dir) = connected(serving(true)).await?;
+    drop(client);
+    let settings_file = dir.path().join("oncall.yaml");
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    let engine = open_service_settings(&settings_file, load_service(&settings_file)?, boxed_reload_audit(&log))?;
+    let mut session = session_of(&pg).await?;
+    let before = session.driver.id();
+    poll_round(&mut session, &pg, &engine, "holder-a", deadlines(GENEROUS, GENEROUS), &|_counts| ()).await;
+    assert_eq!(session.driver.id(), before);
+    Ok(())
+}
+
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_session_is_replaced_once_and_a_failed_replacement_is_retried_later() -> TestResult {
-    let (_fake, pg, mut client, dir) = connected(dropping()).await?;
-    assert!(client.simple_query("SELECT drop_me").await.is_err());
-    wait_closed(&client).await?;
-    refresh(&mut client, &pg).await;
-    assert!(!client.is_closed());
-    refresh(&mut client, &pg).await;
-    assert!(client.simple_query("SELECT 1").await.is_ok());
-    assert!(client.simple_query("SELECT drop_me").await.is_err());
-    wait_closed(&client).await?;
+    let (_fake, pg, client, dir) = connected(dropping()).await?;
+    drop(client);
+    let mut session = session_of(&pg).await?;
+    assert!(session.client.simple_query("SELECT drop_me").await.is_err());
+    wait_closed(&session.client).await?;
+    refresh(&mut session, &pg).await;
+    assert!(!session.client.is_closed());
+    refresh(&mut session, &pg).await;
+    assert!(session.client.simple_query("SELECT 1").await.is_ok());
+    assert!(session.client.simple_query("SELECT drop_me").await.is_err());
+    wait_closed(&session.client).await?;
     fs::write(
         dir.path().join("pg-down.yaml"),
         fs::read_to_string(dir.path().join("pg.yaml"))?.replace(&format!("port: {}", pg.port), &format!("port: {CLOSED_PORT}")),
     )?;
     let down = load_pg_settings(&dir.path().join("pg-down.yaml"))?;
-    refresh(&mut client, &down).await;
-    assert!(client.is_closed());
+    refresh(&mut session, &down).await;
+    assert!(session.client.is_closed());
     Ok(())
 }

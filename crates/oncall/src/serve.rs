@@ -3,11 +3,12 @@
 use crate::alert::Statement;
 use crate::alert_source::{purge_statements, run_rounds, validate_source_settings, Round, RoundHooks, SourceSettings, PURGE_SQL};
 use crate::backend::execute;
+use crate::error::StoreError;
 use crate::holder::{process_holder, validate_holder};
 use crate::limits::PURGE_CLIENT_DEADLINE_MILLIS;
 use crate::link::os_random;
 use crate::store::{MIGRATIONS, MIGRATION_NAMESPACE};
-use crate::types::{AppendFn, InterruptWait, PurgedCounts};
+use crate::types::{AppendFn, InterruptWait, PurgedCounts, Row};
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use alerts::types::RowFuture;
@@ -21,7 +22,7 @@ use core_config::load::load_file;
 use core_config::reload::{bounded_value, current_config, open_engine, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use core_config::watch::watch_files;
-use core_pg::connect::connect;
+use core_pg::connect::connect_with_driver;
 use core_pg::error::{reduce, PgError};
 use core_pg::migrate::migrate;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -33,9 +34,11 @@ use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio::task::JoinHandle;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 use tracing::{error, info, warn};
@@ -57,6 +60,9 @@ pub const PURGE_REQUEST: &str = "purge";
 
 
 pub const SETTINGS_REQUEST: &str = "settings";
+
+
+pub const AUDIT_TENANT: &str = "all";
 
 
 pub const PURGE_KEYS: [&str; 3] = ["rows", "tenants", "detail"];
@@ -173,24 +179,20 @@ pub fn service_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn<
 }
 
 
-/// The first read is the baseline; a later reload may change only `source`, any other change is refused and audited `denied`.
-pub fn open_service_settings(file: &Path, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
-    let baseline = load_service(file)?;
-    let tenant = carrier_tenant(&baseline.source);
+/// `baseline` is the one start read: the engine's own first load must equal it on every start-only field or the start is refused; a reload may change only `source`.
+pub fn open_service_settings(
+    file: &Path,
+    baseline: ServiceSettings,
+    audit: Box<SharedAuditFn>,
+) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant,
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: file.display().to_string(),
         request_id: SETTINGS_REQUEST.to_owned(),
     };
     open_engine(service_loader(file.to_path_buf(), baseline), service_state, Vec::new(), audit, context)
-}
-
-
-/// The first configured tenant (the load checks that there is one), the tenant of the service's own audit records.
-pub fn carrier_tenant(source: &SourceSettings) -> String {
-    source.tenants.iter().take(1).cloned().collect::<Vec<String>>().join("")
 }
 
 
@@ -200,7 +202,7 @@ pub fn boxed_reload_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 }
 
 
-pub fn purge_entry(tenant: &str, counts: &PurgedCounts) -> NewEntry {
+pub fn purge_entry(counts: &PurgedCounts) -> NewEntry {
     let rows: usize = counts.values().sum();
     let detail: Vec<String> = counts.iter().map(|(name, dropped)| format!("{name}={dropped}")).collect();
     let parameters: ParameterMap = [
@@ -217,7 +219,7 @@ pub fn purge_entry(tenant: &str, counts: &PurgedCounts) -> NewEntry {
             kind: ActorKind::System,
             id: MODULE.to_owned(),
         },
-        tenant: tenant.to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         action: PURGE_ACTION.to_owned(),
         target: PURGE_TARGET.to_owned(),
@@ -230,8 +232,8 @@ pub fn purge_entry(tenant: &str, counts: &PurgedCounts) -> NewEntry {
 
 
 /// A failing append is named in the log and never stops the rounds.
-pub fn audit_purge(append: AppendFn<'_>, tenant: &str, counts: &PurgedCounts) {
-    if let Err(failure) = append(purge_entry(tenant, counts)) {
+pub fn audit_purge(append: AppendFn<'_>, counts: &PurgedCounts) {
+    if let Err(failure) = append(purge_entry(counts)) {
         error!(%failure, "the outbox purge audit could not be written");
     }
 }
@@ -310,60 +312,155 @@ pub async fn purge_rows(client: &Client, deadlines: PurgeDeadlines, scope: Tenan
 }
 
 
+pub fn is_deadline(failure: &PgError) -> bool {
+    matches!(failure, PgError::ClientDeadline { .. } | PgError::StatementTimeout { .. })
+}
+
+
+pub fn store_deadline(failure: &StoreError) -> bool {
+    matches!(failure, StoreError::Pg(inner) if is_deadline(inner))
+}
+
+
+/// A deadline of any statement marks the session as suspect: the round ends and the session is replaced.
+pub fn note_deadline(stuck: &AtomicBool, deadline_hit: bool) {
+    if deadline_hit {
+        stuck.store(true, Ordering::Relaxed);
+    }
+}
+
+
+pub async fn watched_rows(pending: RowFuture<'_>, stuck: &AtomicBool) -> Result<Vec<Vec<String>>, PgError> {
+    let result = pending.await;
+    note_deadline(stuck, result.as_ref().err().is_some_and(is_deadline));
+    result
+}
+
+
+pub async fn watched_execute(
+    client: &Client,
+    deadline: Duration,
+    scope: TenantScope,
+    statement: Statement,
+    stuck: &AtomicBool,
+) -> Result<Vec<Row>, StoreError> {
+    let result = execute(client, deadline, scope, statement).await;
+    note_deadline(stuck, result.as_ref().err().is_some_and(store_deadline));
+    result
+}
+
+
 pub fn alerts_executor<'a>(
     client: &'a Client,
     deadline: Duration,
     purge_deadlines: PurgeDeadlines,
+    stuck: &'a AtomicBool,
 ) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + 'a {
     let plain = pg_executor(client, deadline);
     move |scope, sql, params| -> RowFuture<'a> {
         if sql == PURGE_SQL {
-            Box::pin(purge_rows(client, purge_deadlines, scope, params))
+            Box::pin(watched_rows(Box::pin(purge_rows(client, purge_deadlines, scope, params)), stuck))
         } else {
-            plain(scope, sql, params)
+            Box::pin(watched_rows(plain(scope, sql, params), stuck))
         }
+    }
+}
+
+
+/// The poller's session: the client and its connection task, which is aborted on drop so a stuck peer's socket is closed.
+pub struct Session {
+    pub client: Client,
+    pub driver: JoinHandle<()>,
+}
+
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
+}
+
+
+pub async fn open_session(pg: &PgSettings) -> Result<Session, PgError> {
+    connect_with_driver(pg).await.map(|(client, driver)| Session { client, driver })
+}
+
+
+/// One reconnect attempt; the old session is dropped (task aborted, socket closed) only when the new one is up.
+pub async fn replace_session(session: &mut Session, pg: &PgSettings) {
+    match open_session(pg).await {
+        Ok(fresh) => *session = fresh,
+        Err(failure) => warn!("reconnect failed, retrying next round: {failure}"),
     }
 }
 
 
 /// A closed session (idle-in-transaction timeout, server restart) is replaced once per round; a failed attempt is retried next round.
-pub async fn refresh(client: &mut Client, pg: &PgSettings) {
-    if client.is_closed() {
-        match connect(pg).await {
-            Ok(fresh) => *client = fresh,
-            Err(failure) => warn!("reconnect failed, retrying next round: {failure}"),
-        }
+pub async fn refresh(session: &mut Session, pg: &PgSettings) {
+    if session.client.is_closed() {
+        replace_session(session, pg).await;
     }
 }
 
 
-/// Each round re-reads the live snapshot; the wait between rounds is the interval, so a dead database never gives a busy loop.
-pub async fn poll_rounds(
-    client: &mut Client,
+/// One round on `client`; true when a statement hit a deadline.
+pub async fn one_round(
+    client: &Client,
     pg: &PgSettings,
     engine: &ReloadEngine<ServiceSettings>,
     holder: &str,
-    rounds: usize,
+    purge_deadlines: PurgeDeadlines,
     audit: &dyn Fn(&PurgedCounts),
-) -> Finish {
+) -> bool {
     let deadline = Duration::from_secs(pg.statement_timeout_secs);
-    let purge_deadline = Duration::from_millis(PURGE_CLIENT_DEADLINE_MILLIS);
-    let purge_deadlines = PurgeDeadlines {
-        purge: purge_deadline,
-        rollback: purge_deadline,
-    };
     let hooks = RoundHooks {
         now: Utc::now,
         wait: pause,
         report,
         audit_purge: audit,
     };
+    let stuck = AtomicBool::new(false);
+    let alerts_exec = alerts_executor(client, deadline, purge_deadlines, &stuck);
+    let mut exec = |scope: &TenantScope, statement: Statement| watched_execute(client, deadline, scope.clone(), statement, &stuck);
+    let live = || current_config(engine).source.clone();
+    run_rounds(1, &alerts_exec, &mut exec, holder, &hooks, &live).await;
+    stuck.load(Ordering::Relaxed)
+}
+
+
+/// A session that hit a deadline is replaced after its round (a hung but open session would otherwise cost the full cut every round).
+pub async fn poll_round(
+    session: &mut Session,
+    pg: &PgSettings,
+    engine: &ReloadEngine<ServiceSettings>,
+    holder: &str,
+    purge_deadlines: PurgeDeadlines,
+    audit: &dyn Fn(&PurgedCounts),
+) {
+    refresh(session, pg).await;
+    if one_round(&session.client, pg, engine, holder, purge_deadlines, audit).await {
+        warn!("a statement hit its deadline, replacing the session");
+        replace_session(session, pg).await;
+    }
+}
+
+
+/// Each round re-reads the live snapshot; the wait between rounds is the interval, so a dead database never gives a busy loop.
+pub async fn poll_rounds(
+    session: &mut Session,
+    pg: &PgSettings,
+    engine: &ReloadEngine<ServiceSettings>,
+    holder: &str,
+    rounds: usize,
+    audit: &dyn Fn(&PurgedCounts),
+) -> Finish {
+    let purge_deadline = Duration::from_millis(PURGE_CLIENT_DEADLINE_MILLIS);
+    let purge_deadlines = PurgeDeadlines {
+        purge: purge_deadline,
+        rollback: purge_deadline,
+    };
     for _round in 0..rounds {
-        refresh(client, pg).await;
-        let alerts_exec = alerts_executor(client, deadline, purge_deadlines);
-        let mut exec = |scope: &TenantScope, statement: Statement| execute(client, deadline, scope.clone(), statement);
-        let live = || current_config(engine).source.clone();
-        run_rounds(1, &alerts_exec, &mut exec, holder, &hooks, &live).await;
+        poll_round(session, pg, engine, holder, purge_deadlines, audit).await;
     }
     warn!("the round cap was reached, exiting so the supervisor restarts the poller");
     Finish::RoundCap
@@ -419,25 +516,25 @@ pub async fn run_service(arguments: &[String], interrupt: InterruptWait) -> Resu
         [file] => Ok(file),
         _ => Err(USAGE),
     }?;
-    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(std::io::stderr).finish())?;
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(std::io::stderr).with_ansi(false).finish())?;
     start(Path::new(settings_file), MAX_ROUNDS, interrupt).await
 }
 
 
 pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<Finish, Box<dyn Error>> {
-    let log = Arc::new(open_file_log(&load_service(settings_file)?.audit_file)?);
-    let engine = Arc::new(open_service_settings(settings_file, boxed_reload_audit(&log))?);
+    let baseline = load_service(settings_file)?;
+    let log = Arc::new(open_file_log(&baseline.audit_file)?);
+    let engine = Arc::new(open_service_settings(settings_file, baseline, boxed_reload_audit(&log))?);
     let _watch = watch_files(Arc::clone(&engine), &[settings_file.to_path_buf()], DEBOUNCE)?;
     let _signals = keep_signals(&engine)?;
     let begin = current_config(&engine);
     let pg = load_pg_settings(&begin.pg_settings)?;
-    let mut client = connect(&pg).await?;
+    let mut session = open_session(&pg).await?;
     let deadline = Duration::from_secs(pg.statement_timeout_secs);
-    migrate(&client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, deadline).await?;
-    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, deadline).await?;
+    migrate(&session.client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, deadline).await?;
+    migrate(&session.client, MIGRATION_NAMESPACE, &MIGRATIONS, deadline).await?;
     let holder = process_holder(Some(&begin.label), "", std::process::id(), os_random)?;
-    let tenant = carrier_tenant(&begin.source);
-    let audit = |counts: &PurgedCounts| audit_purge(&|entry| append_to(&log, entry), &tenant, counts);
+    let audit = |counts: &PurgedCounts| audit_purge(&|entry| append_to(&log, entry), counts);
     info!(holder, "serving");
     tokio::select! {
         biased;
@@ -445,7 +542,7 @@ pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait
             waited?;
             Ok(Finish::Interrupted)
         },
-        finish = poll_rounds(&mut client, &pg, &engine, &holder, rounds, &audit) => Ok(finish),
+        finish = poll_rounds(&mut session, &pg, &engine, &holder, rounds, &audit) => Ok(finish),
     }
 }
 
