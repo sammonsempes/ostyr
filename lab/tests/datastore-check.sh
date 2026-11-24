@@ -11,6 +11,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 readonly CONNECT_TIMEOUT=3
 readonly MARKER_BYTES=8
 readonly LAB_PORTS=(8443 9440 4222 5432 3910)
+readonly LOOPBACK_PORTS=(8443 9440)
 readonly PLAINTEXT_PORTS=(8123 9000 9004 9005 9009)
 
 task_id="${1:?usage: datastore-check.sh <task-id>}"
@@ -127,11 +128,14 @@ printf 'ok only the TLS ports answer on the lab address\n'
 listeners="$(ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "ss -Hltn")"
 for port in "${LAB_PORTS[@]}"; do
     awk -v port="$port" '$4 ~ ":" port "$" {print $4}' <<<"$listeners" | grep -qx "$datastore_address:$port" || die "port $port is not bound to $datastore_address"
-    if awk -v port="$port" -v address="$datastore_address" '$4 ~ ":" port "$" && $4 != address ":" port' <<<"$listeners" | grep -q .; then
-        die "port $port is bound to another address than $datastore_address"
+    loopback_allowed=""
+    if [[ " ${LOOPBACK_PORTS[*]} " == *" $port "* ]]; then loopback_allowed="127.0.0.1:$port"; fi
+    if awk -v port="$port" -v address="$datastore_address" -v loopback="$loopback_allowed" \
+        '$4 ~ ":" port "$" && $4 != address ":" port && $4 != loopback' <<<"$listeners" | grep -q .; then
+        die "port $port is bound to another address than $datastore_address (or 127.0.0.1 for ports ${LOOPBACK_PORTS[*]})"
     fi
 done
-printf 'ok every datastore port is bound to the lab address only\n'
+printf 'ok every datastore port is bound to the lab address, plus 127.0.0.1 for the loopback ports\n'
 
 reaches_out="$(ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "if timeout $CONNECT_TIMEOUT bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then echo yes; else echo no; fi")"
 [[ "$reaches_out" == "no" ]] || die "the datastore VM reaches 1.1.1.1"
