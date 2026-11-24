@@ -5609,6 +5609,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relay"
+version = "0.0.0"
+dependencies = [
+ "agent-channel",
+ "core-audit",
+ "core-config",
+ "futures-util",
+ "rustix 1.1.6",
+ "serde",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "remote-desktop"
 version = "0.0.0"
 dependencies = [
