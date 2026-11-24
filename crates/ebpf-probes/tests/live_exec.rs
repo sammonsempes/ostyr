@@ -10,6 +10,7 @@ use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 
 const UNPRIVILEGED_UID: u32 = 65534;
@@ -25,6 +26,12 @@ const HALVES: usize = 2;
 
 
 const MARKER: &str = "MARKER-7f3a9c";
+
+
+const UNLOAD_POLL_ATTEMPTS: u32 = 200;
+
+
+const UNLOAD_POLL_MILLIS: u64 = 50;
 
 
 fn load() -> Result<Probe, Box<dyn Error>> {
@@ -47,6 +54,19 @@ fn run_true_as_nobody() -> Result<u32, Box<dyn Error>> {
 fn program_ids() -> Result<Vec<u32>, Box<dyn Error>> {
     let infos = loaded_programs().collect::<Result<Vec<_>, _>>()?;
     Ok(infos.iter().map(|info| info.id()).collect())
+}
+
+
+fn wait_until_unloaded(held: u32) -> Result<bool, Box<dyn Error>> {
+    let gone = (0..UNLOAD_POLL_ATTEMPTS).find_map(|_| match program_ids() {
+        Ok(ids) if !ids.contains(&held) => Some(Ok(())),
+        Ok(_) => {
+            std::thread::sleep(Duration::from_millis(UNLOAD_POLL_MILLIS));
+            None
+        }
+        Err(error) => Some(Err(error)),
+    });
+    Ok(gone.transpose()?.is_some())
 }
 
 
@@ -97,7 +117,7 @@ fn dropping_the_probe_unloads_the_program() -> Result<(), Box<dyn Error>> {
     let held = probe.ebpf.program(PROGRAM_NAME).ok_or("program is missing")?.info()?.id();
     assert!(program_ids()?.contains(&held));
     drop(probe);
-    assert!(!program_ids()?.contains(&held), "program {held} is still loaded after the drop");
+    assert!(wait_until_unloaded(held)?, "program {held} is still loaded after the drop");
     Ok(())
 }
 
