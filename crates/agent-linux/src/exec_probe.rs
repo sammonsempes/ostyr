@@ -1,3 +1,5 @@
+use crate::error::SourceError;
+use crate::exec_events::{deliver_or_stop, Delivery, ExecSink};
 use crate::types::{ProbeFn, ProbeJob, ProbeResult, SharedExecProbe, SpawnFn};
 use agent_channel::types::PauseFn;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
@@ -6,6 +8,7 @@ use ebpf_probes::drain::Drained;
 use ebpf_probes::error::{load_error_name, LoadError};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -22,6 +25,9 @@ pub const EXEC_PROBE_TICK_SECONDS: u64 = 1;
 
 
 pub const EXEC_PROBE_MAX_POLLS: u32 = u32::MAX;
+
+
+pub const EXEC_PROBE_MAX_TICKS: u64 = 1 << 40;
 
 
 pub const AUDIT_MODULE: &str = "agent_linux_exec_probe";
@@ -87,6 +93,7 @@ pub struct ProbeRun {
     pub guard: ProbeGuard,
     pub loaded: Arc<AtomicBool>,
     pub records: Arc<AtomicUsize>,
+    pub failures: Receiver<io::Error>,
     pub started: u64,
     pub loaded_reported: bool,
     pub timeout_reported: bool,
@@ -99,6 +106,7 @@ pub struct Controller {
     pub run: Option<ProbeRun>,
     pub last_start: Option<u64>,
     pub last_cause: Option<String>,
+    pub spool_error: Option<io::Error>,
 }
 
 
@@ -108,11 +116,12 @@ pub struct ProbeEnv {
     pub tenant: String,
     pub probe: ProbeFn,
     pub spawn: SpawnFn,
+    pub sink: ExecSink,
 }
 
 
 /// The probe of an agent built without the `ebpf` feature: a named failure, never a crash.
-pub fn not_built(_stop: &AtomicBool, _max_polls: u32, _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+pub fn not_built(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
     Err(LoadError::NotBuilt)
 }
 
@@ -168,12 +177,21 @@ pub fn start(env: &ProbeEnv, now: u64) -> io::Result<ProbeRun> {
     let stop = Arc::new(AtomicBool::new(false));
     let loaded = Arc::new(AtomicBool::new(false));
     let records = Arc::new(AtomicUsize::new(0));
-    let (job_stop, job_loaded, job_records, probe) = (Arc::clone(&stop), Arc::clone(&loaded), Arc::clone(&records), env.probe);
+    let (failure_sender, failures) = channel();
+    let (job_stop, job_loaded, attached_loaded, job_records) = (Arc::clone(&stop), Arc::clone(&loaded), Arc::clone(&loaded), Arc::clone(&records));
+    let (probe, sink) = (env.probe, env.sink.clone());
     let job: ProbeJob = Box::new(move || {
-        probe(&job_stop, EXEC_PROBE_MAX_POLLS, &mut |drained| {
-            job_loaded.store(true, Ordering::Relaxed);
-            job_records.fetch_add(drained.records.len(), Ordering::Relaxed);
-        })
+        let mut state = Delivery::default();
+        probe(
+            &job_stop,
+            EXEC_PROBE_MAX_POLLS,
+            &mut || attached_loaded.store(true, Ordering::Relaxed),
+            &mut |drained| {
+                job_loaded.store(true, Ordering::Relaxed);
+                job_records.fetch_add(drained.records.len(), Ordering::Relaxed);
+                state = deliver_or_stop(&sink, std::mem::take(&mut state), &drained, &job_stop, &failure_sender);
+            },
+        )
     });
     let handle = (env.spawn)(job)?;
     Ok(ProbeRun {
@@ -181,6 +199,7 @@ pub fn start(env: &ProbeEnv, now: u64) -> io::Result<ProbeRun> {
         guard: ProbeGuard { stop },
         loaded,
         records,
+        failures,
         started: now,
         loaded_reported: false,
         timeout_reported: false,
@@ -295,6 +314,7 @@ pub fn start_if_due(controller: Controller, enabled: bool, now: u64, env: &Probe
 
 /// One controller tick on the monotonic second `now`, from one snapshot of the setting.
 pub fn tick(controller: Controller, enabled: bool, now: u64, env: &ProbeEnv, audit: &SharedAuditFn) -> Controller {
+    let spool_error = controller.run.as_ref().and_then(|run| run.failures.try_iter().next());
     let settled = match controller.run {
         Some(run) if run.handle.is_finished() => finish(Controller { run: None, ..controller }, run, env, audit),
         Some(run) => observe(Controller { run: None, ..controller }, run, enabled, now, env, audit),
@@ -302,13 +322,14 @@ pub fn tick(controller: Controller, enabled: bool, now: u64, env: &ProbeEnv, aud
     };
     let remembered = Controller {
         last_cause: settled.last_cause.filter(|_| enabled),
+        spool_error: spool_error.or(settled.spool_error),
         ..settled
     };
     start_if_due(remembered, enabled, now, env, audit)
 }
 
 
-/// Runs `max_ticks` ticks one `EXEC_PROBE_TICK_SECONDS` apart, reading the setting snapshot once per tick; the reload only stores the setting, this loop applies it. Dropping the returned controller stops the probe.
+/// Runs `max_ticks` ticks one `EXEC_PROBE_TICK_SECONDS` apart, reading the setting snapshot once per tick; the reload only stores the setting, this loop applies it. A failing spool write of the probe thread ends the loop with that error. Dropping the returned controller stops the probe.
 pub async fn run_exec_controller(
     shared: &SharedExecProbe,
     env: &ProbeEnv,
@@ -316,12 +337,26 @@ pub async fn run_exec_controller(
     max_ticks: u64,
     pause: &PauseFn,
     monotonic: &(dyn Fn() -> u64 + Sync),
-) -> Controller {
+) -> io::Result<Controller> {
     let mut controller = Controller::default();
-    for _ in 0..max_ticks {
+    let mut ticks = 0;
+    while controller.spool_error.is_none() && ticks < max_ticks.min(EXEC_PROBE_MAX_TICKS) {
         let enabled = shared.load().enabled;
         controller = tick(controller, enabled, monotonic(), env, audit);
         pause(Duration::from_secs(EXEC_PROBE_TICK_SECONDS)).await;
+        ticks += 1;
     }
-    controller
+    match controller.spool_error.take() {
+        Some(error) => Err(error),
+        None => Ok(controller),
+    }
+}
+
+
+/// The agent's view of the controller's end: a failing spool write of the probe thread is logged and ends the agent, a normal end is fine.
+pub fn end_on_spool_error(ended: io::Result<Controller>) -> Result<(), SourceError> {
+    ended
+        .map(|_| ())
+        .inspect_err(|error| tracing::error!(%error, "exec probe spool failed, the agent stops"))
+        .map_err(SourceError::from)
 }

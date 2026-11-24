@@ -116,11 +116,12 @@ pub fn poll_exec(probe: &mut Probe, stop: &AtomicBool, max_polls: u32, max_recor
 
 
 /// The whole life of one probe on the calling thread: load from `EXEC_OBJECT_PATH` without attaching, check `stop`, attach, poll (its first step reads `stop` again) until `stop` is set or `max_polls` is reached; dropping it at the end unloads the program.
-pub fn run_exec_probe(stop: &AtomicBool, max_polls: u32, deliver: &mut dyn FnMut(Drained)) -> Result<u32, LoadError> {
+pub fn run_exec_probe(stop: &AtomicBool, max_polls: u32, on_attached: &mut dyn FnMut(), deliver: &mut dyn FnMut(Drained)) -> Result<u32, LoadError> {
     let bytes = read_object(Path::new(EXEC_OBJECT_PATH))?;
     let mut probe = prepare_exec_probe_from_bytes(&bytes)?;
     let polls = if may_proceed(stop) {
         attach_exec_probe(&mut probe)?;
+        on_attached();
         poll_exec(&mut probe, stop, max_polls, MAX_DRAIN_PER_POLL, deliver)
     } else {
         0

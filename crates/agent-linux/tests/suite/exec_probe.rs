@@ -2,14 +2,16 @@ use crate::support::scoped_logging;
 use crate::types::TestResult;
 use agent_channel::app::{reload_context, shared_log_audit};
 use agent_channel::types::PauseFuture;
+use agent_linux::error::SourceError;
+use agent_linux::exec_events::ExecSink;
 use agent_linux::exec_probe::{
-    finish, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start, start_if_due, tick, Controller,
-    ProbeEnv, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_LOAD_DEADLINE_SECONDS, EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED,
+    end_on_spool_error, finish, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start, start_if_due, tick,
+    Controller, ProbeEnv, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_LOAD_DEADLINE_SECONDS, EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED,
     RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED,
 };
-use agent_linux::model::ExecProbeSettings;
+use agent_linux::model::{ExecProbeSettings, SourceSettings};
 use agent_linux::settings::{open_settings_engine, settings_state};
-use agent_linux::types::{ProbeFn, ProbeJob, ProbeResult};
+use agent_linux::types::{ProbeFn, ProbeJob, ProbeResult, SpoolLock};
 use arc_swap::ArcSwap;
 use core_audit::log::open_file_log;
 use core_audit::model::Outcome;
@@ -45,6 +47,9 @@ const EPERM: i32 = 1;
 const TICKS: u64 = 2;
 
 
+const FIXED_OFFSET_NANOS: i128 = 1_700_000_000_000_000_000;
+
+
 const HUNG_TICK_SECONDS: u64 = 10;
 
 
@@ -74,7 +79,7 @@ fn spin_until_stop(stop: &AtomicBool) {
 }
 
 
-fn probe_loaded(stop: &AtomicBool, _max_polls: u32, deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+fn probe_loaded(stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
     [FIRST_DELIVERY, SECOND_DELIVERY]
         .into_iter()
         .filter_map(|count| drained(count).ok())
@@ -84,18 +89,25 @@ fn probe_loaded(stop: &AtomicBool, _max_polls: u32, deliver: &mut dyn FnMut(Drai
 }
 
 
-fn probe_slow(stop: &AtomicBool, _max_polls: u32, _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+fn probe_attached_only(stop: &AtomicBool, _max_polls: u32, attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    attached();
     spin_until_stop(stop);
     Ok(0)
 }
 
 
-fn probe_failing(_stop: &AtomicBool, _max_polls: u32, _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+fn probe_slow(stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    spin_until_stop(stop);
+    Ok(0)
+}
+
+
+fn probe_failing(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
     Err(LoadError::ProgramLoad { errno: Some(EPERM) })
 }
 
 
-fn probe_panicking(_stop: &AtomicBool, _max_polls: u32, _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+fn probe_panicking(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
     std::panic::resume_unwind(Box::new(EPERM))
 }
 
@@ -105,11 +117,30 @@ fn refuse_spawn(_job: ProbeJob) -> io::Result<JoinHandle<ProbeResult>> {
 }
 
 
+fn fixed_offset() -> i128 {
+    FIXED_OFFSET_NANOS
+}
+
+
+fn fixed_clock() -> u64 {
+    0
+}
+
+
 fn environment(probe: ProbeFn) -> ProbeEnv {
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("exec-probe-sink-{}", std::process::id()));
     ProbeEnv {
         tenant: "tenant".to_owned(),
         probe,
         spawn: spawn_thread,
+        sink: ExecSink {
+            spool: base.with_extension("spool"),
+            sending: base.with_extension("sending"),
+            lock: SpoolLock::default(),
+            settings: Arc::new(ArcSwap::from_pointee(SourceSettings::default())),
+            offset: fixed_offset,
+            monotonic: fixed_clock,
+        },
     }
 }
 
@@ -362,9 +393,10 @@ fn an_audit_record_holds_fixed_words_only_and_a_failing_audit_is_logged() -> Tes
 fn an_agent_built_without_the_loader_names_the_failure() -> TestResult {
     let stop = AtomicBool::new(false);
     let mut sink = |_: Drained| {};
-    assert_eq!(not_built(&stop, 1, &mut sink), Err(LoadError::NotBuilt));
+    let mut attached = || {};
+    assert_eq!(not_built(&stop, 1, &mut attached, &mut sink), Err(LoadError::NotBuilt));
     let production: ProbeFn = PRODUCTION_PROBE;
-    assert_eq!(production(&stop, 1, &mut sink), Err(LoadError::NotBuilt));
+    assert_eq!(production(&stop, 1, &mut attached, &mut sink), Err(LoadError::NotBuilt));
     Ok(())
 }
 
@@ -382,7 +414,7 @@ async fn the_controller_applies_the_setting_one_snapshot_per_tick() -> TestResul
         Box::pin(async {})
     };
     let clock = || 0;
-    let controller = run_exec_controller(&shared, &env, sink.audit.as_ref(), TICKS, &pause, &clock).await;
+    let controller = run_exec_controller(&shared, &env, sink.audit.as_ref(), TICKS, &pause, &clock).await?;
     assert_eq!(calls.load(Ordering::SeqCst), TICKS);
     let run = controller.run.as_ref().ok_or("the probe should still be winding down")?;
     assert!(run.guard.stop.load(Ordering::Relaxed));
@@ -489,5 +521,53 @@ fn the_same_failure_after_a_disable_and_a_re_enable_is_audited_again() -> TestRe
         audited(&sink)?.matches(format!("exec-probe-{RESULT_FAILED}").as_str()).count(),
         TICKS as usize
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_probe_attached_then_stopped_with_no_delivery_is_audited_as_loaded_and_unloaded() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_attached_only);
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| loaded(&started))?;
+    let stopping = tick(started, false, 1, &env, sink.audit.as_ref());
+    wait_until(|| finished(&stopping))?;
+    tick(stopping, false, TICKS, &env, sink.audit.as_ref());
+    let text = audited(&sink)?;
+    assert!(text.contains(RESULT_LOADED) && text.contains(RESULT_UNLOADED), "{text}");
+    assert!(!text.contains(RESULT_ABANDONED), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failing_spool_write_of_the_probe_ends_the_controller_with_the_error() -> TestResult {
+    let sink = audit()?;
+    let blocked = tempdir()?;
+    let env = ProbeEnv {
+        sink: ExecSink {
+            spool: blocked.path().to_path_buf(),
+            ..environment(probe_loaded).sink
+        },
+        ..environment(probe_loaded)
+    };
+    let shared = Arc::new(ArcSwap::from_pointee(ExecProbeSettings { enabled: true }));
+    let pause = |_: Duration| -> PauseFuture {
+        std::thread::sleep(Duration::from_millis(1));
+        Box::pin(async {})
+    };
+    let clock = || 0;
+    let ended = run_exec_controller(&shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
+    assert!(ended.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_spool_error_of_the_controller_ends_the_agent_and_a_normal_end_does_not() -> TestResult {
+    assert!(end_on_spool_error(Ok(Controller::default())).is_ok());
+    let ended = end_on_spool_error(Err(io::Error::other("spool gone")));
+    assert!(matches!(ended, Err(SourceError::Io(_))));
     Ok(())
 }

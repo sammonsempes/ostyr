@@ -2,7 +2,8 @@ use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
 use crate::error::SourceError;
 #[cfg(target_os = "linux")]
-use crate::exec_probe::{run_exec_controller, spawn_thread, ProbeEnv, PRODUCTION_PROBE};
+use crate::exec_events::{system_offset, ExecSink};
+use crate::exec_probe::{end_on_spool_error, run_exec_controller, spawn_thread, ProbeEnv, PRODUCTION_PROBE};
 use crate::hostmetrics::statvfs_path;
 use crate::metrics::run_metrics;
 use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
@@ -168,12 +169,21 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
         tenant: agent.tenant.clone(),
         probe: PRODUCTION_PROBE,
         spawn: spawn_thread,
+        sink: ExecSink {
+            spool: paths.spool.clone(),
+            sending: paths.sending.clone(),
+            lock: Arc::clone(&paths.lock),
+            settings: Arc::clone(&shared),
+            offset: system_offset,
+            monotonic: monotonic_seconds,
+        },
     };
     #[cfg(target_os = "linux")]
     let exec_audit = shared_log_audit(&log);
     let exec_probe = async {
         #[cfg(target_os = "linux")]
-        run_exec_controller(&exec_probe_settings, &exec_env, exec_audit.as_ref(), max_polls, pause, &monotonic_seconds).await;
+        let ended = run_exec_controller(&exec_probe_settings, &exec_env, exec_audit.as_ref(), max_polls, pause, &monotonic_seconds).await;
+        end_on_spool_error(ended)?;
         Ok::<(), SourceError>(())
     };
     let (totals, runs, (), (), (), _handled, ()) = tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe)?;
