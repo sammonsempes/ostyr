@@ -65,7 +65,7 @@ fn a_reload_applies_to_the_shared_settings_and_an_invalid_one_is_refused() -> Te
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, shared, _sensor, _updates, _osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, shared, _sensor, _updates, _osquery, _metrics, _exec_probe) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(shared.load().poll_millis, DEFAULT_POLL_MILLIS);
     write_settings(&path, &format!("settings:\n  poll_millis: {RELOADED_MILLIS}\n"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
@@ -199,7 +199,8 @@ fn sensor_bounds_are_refused_at_zero_and_over_their_ceiling_and_a_reload_applies
     ));
     write_settings(&path, "")?;
     let context_again = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, sensor, _updates, _osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context_again)?;
+    let (engine, _shared, sensor, _updates, _osquery, _metrics, _exec_probe) =
+        open_settings_engine(path.clone(), shared_log_audit(&log), context_again)?;
     write_settings(&path, "sensor:\n  window_seconds: 7\n")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
     assert_eq!(sensor.load().window_seconds, RELOADED_MILLIS);
@@ -217,7 +218,7 @@ fn update_settings_are_validated_and_live_reloaded() -> TestResult {
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, _sensor, updates, _osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, _shared, _sensor, updates, _osquery, _metrics, _exec_probe) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(updates.load().manager, Manager::None);
     assert_eq!(updates.load().interval_seconds, DEFAULT_UPDATE_INTERVAL_SECONDS);
     write_settings(&path, "updates:\n  manager: dnf\n  interval_seconds: 300\n  deadline_seconds: 9\n")?;
@@ -262,7 +263,7 @@ fn metric_settings_are_validated_and_live_reloaded() -> TestResult {
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, _sensor, _updates, _osquery, metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, _shared, _sensor, _updates, _osquery, metrics, _exec_probe) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(metrics.load().interval_seconds, DEFAULT_METRICS_INTERVAL_SECONDS);
     assert_eq!(metrics.load().mounts, vec![PathBuf::from("/")]);
     write_settings(&path, "metrics:\n  interval_seconds: 20\n  mounts: [/, /var]\n")?;
@@ -289,7 +290,7 @@ fn osquery_settings_are_validated_and_live_reloaded() -> TestResult {
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, _sensor, _updates, osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, _shared, _sensor, _updates, osquery, _metrics, _exec_probe) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(osquery.load().as_ref(), &OsquerySettings::default());
     write_settings(&path, "osquery:\n  deadline_seconds: 9\n")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));

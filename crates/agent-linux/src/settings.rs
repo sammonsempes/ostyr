@@ -10,7 +10,7 @@ use crate::model::{
     TEMP_TOTAL_MEMORY_DIVISOR,
 };
 use crate::trusted::read_trusted_capped;
-use crate::types::{SettingsEngine, SharedMetrics, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
+use crate::types::{SettingsEngine, SharedExecProbe, SharedMetrics, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
 use arc_swap::ArcSwap;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
@@ -198,6 +198,7 @@ pub fn settings_state(file: &LinuxFile) -> ConfigState {
     ])
     .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value.to_string()))
     .chain([(format!("{SETTINGS_SECTION}.updates_manager"), format!("{:?}", file.updates.manager))])
+    .chain([(format!("{SETTINGS_SECTION}.exec_probe_enabled"), file.exec_probe.enabled.to_string())])
     .chain([(format!("{SETTINGS_SECTION}.metrics_mounts"), format!("{:?}", file.metrics.mounts))])
     .chain(fim_state(file))
     .collect()
@@ -232,6 +233,7 @@ pub fn settings_subscriber(
     updates: SharedUpdates,
     osquery: SharedOsquery,
     metrics: SharedMetrics,
+    exec_probe: SharedExecProbe,
 ) -> Subscriber<LinuxFile> {
     Subscriber {
         section: SETTINGS_SECTION.to_owned(),
@@ -242,6 +244,7 @@ pub fn settings_subscriber(
             updates.store(Arc::new(applied.updates.clone()));
             osquery.store(Arc::new(applied.osquery.clone()));
             metrics.store(Arc::new(applied.metrics.clone()));
+            exec_probe.store(Arc::new(applied.exec_probe));
         }),
     }
 }
@@ -257,6 +260,7 @@ pub fn open_settings_engine(path: PathBuf, audit: Box<SharedAuditFn>, context: R
     let updates: SharedUpdates = Arc::new(ArcSwap::from_pointee(first.updates.clone()));
     let osquery: SharedOsquery = Arc::new(ArcSwap::from_pointee(first.osquery.clone()));
     let metrics: SharedMetrics = Arc::new(ArcSwap::from_pointee(first.metrics.clone()));
+    let exec_probe: SharedExecProbe = Arc::new(ArcSwap::from_pointee(first.exec_probe));
     let subscribed = ReloadEngine {
         subscribers: vec![settings_subscriber(
             Arc::clone(&shared),
@@ -264,8 +268,9 @@ pub fn open_settings_engine(path: PathBuf, audit: Box<SharedAuditFn>, context: R
             Arc::clone(&updates),
             Arc::clone(&osquery),
             Arc::clone(&metrics),
+            Arc::clone(&exec_probe),
         )],
         ..engine
     };
-    Ok((subscribed, shared, sensor, updates, osquery, metrics))
+    Ok((subscribed, shared, sensor, updates, osquery, metrics, exec_probe))
 }

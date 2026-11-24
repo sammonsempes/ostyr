@@ -2,10 +2,10 @@
 //! The production loader: load the exec probe from checked bytes, attach it, drain its ring. Proved by the `ebpf` workflow and the lab only.
 
 use crate::btf::{read_task_offsets, require_64_bit, VMLINUX_BTF_PATH};
-use crate::drain::{decode_batch, finish_drain, poll_loop, Drained};
+use crate::drain::{decode_batch, finish_drain, poll_loop, sum_per_cpu, Drained, MAX_DRAIN_PER_POLL};
 use crate::error::{attach_error, ebpf_error, program_load_error, LoadError};
 use crate::limiter::Limiter;
-use crate::object::read_object;
+use crate::object::{read_object, EXEC_OBJECT_PATH};
 use crate::shape::{check_object_bytes, DROPS_NAME, PROGRAM_NAME, RING_NAME};
 use aya::maps::{MapData, MapError, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
@@ -73,7 +73,7 @@ pub fn load_exec_probe(path: &Path) -> Result<Probe, LoadError> {
 /// Sums the one-slot per-CPU drop counter over the CPUs.
 pub fn read_dropped(drops: &PerCpuArray<MapData, u64>) -> Result<u64, MapError> {
     let per_cpu = drops.get(&DROP_SLOT, 0)?;
-    Ok(per_cpu.iter().fold(0, |sum: u64, value| sum.saturating_add(*value)))
+    Ok(sum_per_cpu(&per_cpu))
 }
 
 
@@ -92,4 +92,11 @@ pub fn drain_exec(probe: &mut Probe, max_records: usize) -> Drained {
 /// Polls at the fixed interval of `drain::wait_after`; `more_pending` never causes an immediate second poll.
 pub fn poll_exec(probe: &mut Probe, stop: &AtomicBool, max_polls: u32, max_records: usize, deliver: &mut dyn FnMut(Drained)) -> u32 {
     poll_loop(stop, max_polls, &mut || drain_exec(probe, max_records), deliver, &mut std::thread::sleep)
+}
+
+
+/// The whole life of one probe on the calling thread: load from `EXEC_OBJECT_PATH`, then poll until `stop` is set or `max_polls` is reached; dropping it at the end unloads the program.
+pub fn run_exec_probe(stop: &AtomicBool, max_polls: u32, deliver: &mut dyn FnMut(Drained)) -> Result<u32, LoadError> {
+    let mut probe = load_exec_probe(Path::new(EXEC_OBJECT_PATH))?;
+    Ok(poll_exec(&mut probe, stop, max_polls, MAX_DRAIN_PER_POLL, deliver))
 }

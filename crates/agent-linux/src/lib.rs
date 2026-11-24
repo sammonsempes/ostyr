@@ -9,6 +9,8 @@ pub mod cursor;
 #[cfg(unix)]
 pub mod error;
 #[cfg(unix)]
+pub mod exec_probe;
+#[cfg(unix)]
 pub mod fim;
 #[cfg(unix)]
 pub mod follow;
