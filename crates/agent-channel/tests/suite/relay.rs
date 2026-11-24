@@ -5,18 +5,18 @@ use crate::harness::{
 };
 use crate::harness::{Platform, RunningServer};
 use crate::pki::{agent_spec, issue, make_authority, write_file, write_leaf, LeafSpec, AGENT_URI, PRIVATE_MODE, SERVER_NAME, WORLD_READABLE_MODE};
-use crate::services::{agent_verifier, signed_envelope};
-use crate::state::{make_state, new_stored, recording_sink};
+use crate::services::{agent_verifier, settings, signed_envelope};
+use crate::state::{envelope_source, make_state, new_stored, recording_sink};
 use crate::types::TestResult;
-use agent_channel::agent_app::{dialer, execute_fn, load_agent_file, note_run, run_agent, run_streams, AgentFile};
+use agent_channel::agent_app::{dialer, ended_on_rate, execute_fn, load_agent_file, note_run, run_agent, run_streams, AgentFile};
 use agent_channel::client::{run_commands_until, subscribe};
 use agent_channel::error::{AppError, ChannelError, EndpointFault};
 use agent_channel::model::{
     CommandRun, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
 };
 use agent_channel::relay::{
-    endpoint_addresses, hold_internal, is_held, kind_of, pinned_dialer, select_endpoint, selection_order, stop_at, tripped, EndpointKind, HoldDown,
-    Selected,
+    check_scope, endpoint_addresses, hold_internal, is_held, is_rate_refusal, kind_of, pinned_dialer, select_endpoint, selection_order, stop_at,
+    tripped, EndpointKind, HoldDown, Selected,
 };
 use agent_channel::server_app::{bind_server, file_events, run_server, ServerFile};
 use agent_channel::spool::{suffixed, SENDING_SUFFIX};
@@ -38,6 +38,12 @@ use tokio::time::Instant;
 
 
 const BACKLOG: u32 = 16;
+
+
+const RELAY_PORT: u16 = 443;
+
+
+const RATE_WINDOW_FOR_TEST: u64 = 3600;
 
 
 const MAX_FORWARDED: usize = 64;
@@ -226,6 +232,16 @@ async fn the_file_refuses_a_bad_endpoint_list_by_entry_index() -> TestResult {
         ("10.0.0.1:0", vec![], 0, EndpointFault::ZeroPort),
         ("10.0.0.1:443", vec!["10.0.0.2:0"], 1, EndpointFault::ZeroPort),
         ("10.0.0.1:443", vec!["10.0.0.2:443", "nowhere"], THIRD_INDEX, EndpointFault::Unparsable),
+        ("[fe80::1]:443", vec![], 0, EndpointFault::LinkLocal),
+        ("10.0.0.1:443", vec!["[febf::1]:443"], 1, EndpointFault::LinkLocal),
+        ("10.0.0.1:443", vec!["[::1%1]:443"], 1, EndpointFault::Scoped),
+        (
+            "10.0.0.1:443",
+            vec!["10.0.0.2:443", "[fe80::1%2]:443"],
+            THIRD_INDEX,
+            EndpointFault::Scoped,
+        ),
+        ("10.0.0.1:443", vec!["[::ffff:10.0.0.2%1]:443"], 1, EndpointFault::Scoped),
     ];
     for (server, relays, index, fault) in cases {
         let outcome = endpoint_addresses(&agent_with(&agent, server, &relays));
@@ -240,11 +256,30 @@ async fn the_file_refuses_a_bad_endpoint_list_by_entry_index() -> TestResult {
         EndpointFault::Unusable,
         EndpointFault::Duplicate,
         EndpointFault::ServerName,
+        EndpointFault::LinkLocal,
+        EndpointFault::Scoped,
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
     assert_eq!(texts.iter().collect::<std::collections::HashSet<_>>().len(), texts.len());
+    assert!(endpoint_addresses(&agent_with(&agent, "10.0.0.1:443", &["[fec0::1]:443", "[2001:db8::1]:443"])).is_ok());
+    let flow = SocketAddr::V6(std::net::SocketAddrV6::new(std::net::Ipv6Addr::LOCALHOST, RELAY_PORT, 1, 0));
+    assert!(matches!(
+        check_scope(1, flow),
+        Err(AppError::Endpoint {
+            index: 1,
+            reason: EndpointFault::Scoped
+        })
+    ));
+    let labelled = SocketAddr::V6(std::net::SocketAddrV6::new(std::net::Ipv6Addr::LOCALHOST, RELAY_PORT, 0, 1));
+    assert!(matches!(
+        check_scope(1, labelled),
+        Err(AppError::Endpoint {
+            reason: EndpointFault::Scoped,
+            ..
+        })
+    ));
     let five: Vec<String> = (1..=MAX_RELAYS + 1).map(|i| format!("10.0.1.{i}:443")).collect();
     let too_many = AgentFile {
         relays: five,
@@ -805,4 +840,53 @@ async fn every_endpoint_unreachable_exhausts_the_attempts_and_claims_nothing() -
     assert!(agent.spool_file.exists());
     assert!(!suffixed(&agent.spool_file, SENDING_SUFFIX).exists());
     Ok(())
+}
+
+
+#[tokio::test]
+async fn a_rate_refused_redial_does_not_trip_the_endpoint_or_hold_the_internal_one_down() -> TestResult {
+    let _logging = scoped_logging();
+    let rig = rig()?;
+    let directory = sub_directory(rig.dir.path(), "limited")?;
+    let state = make_state(
+        settings(|bounds| {
+            bounds.max_requests_per_window = 1;
+            bounds.rate_window_seconds = RATE_WINDOW_FOR_TEST;
+        }),
+        recording_sink(new_stored()),
+        envelope_source(Vec::new()),
+    );
+    let paths = server_paths(&directory, &rig.platform)?;
+    let server = start_server_state(&paths, empty_revocation(&paths)?, state).await?;
+    let (sender, receiver) = watch::channel(false);
+    let trip = Arc::new(sender);
+    let dial = pinned_dialer(server.address, Arc::clone(&rig.config), SERVER_NAME.to_owned(), Arc::clone(&trip));
+    bounded(dial()).await??;
+    let refused = bounded(dial()).await?.err().ok_or("the second heartbeat was not refused")?;
+    assert!(is_rate_refusal(&refused));
+    assert!(!is_rate_refusal(&ChannelError::Status(Box::new(tonic::Status::permission_denied("no")))));
+    assert!(!*receiver.borrow());
+    let exhausted = Err(AppError::AttemptsExhausted {
+        attempts: 1,
+        last: Some(Box::new(refused)),
+    });
+    assert!(ended_on_rate(&exhausted));
+    assert!(!ended_on_rate(&Err(AppError::AttemptsExhausted {
+        attempts: 1,
+        last: Some(Box::new(ChannelError::EndpointLost))
+    })));
+    assert!(!ended_on_rate(&Err(AppError::Channel(ChannelError::EndpointLost))));
+    assert!(!ended_on_rate(&Ok(CommandRun::default())));
+    let internal = Selected {
+        index: 0,
+        kind: EndpointKind::Internal,
+        address: server.address,
+        cut: None,
+    };
+    let hold = HoldDown::default();
+    note_run(&hold, &internal, &exhausted);
+    assert!(!is_held(&hold));
+    note_run(&hold, &internal, &Err(AppError::AttemptsExhausted { attempts: 1, last: None }));
+    assert!(is_held(&hold));
+    stop_server(server).await
 }

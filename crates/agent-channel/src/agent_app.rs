@@ -3,7 +3,9 @@ use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, r
 use crate::error::{AppError, ChannelError};
 use crate::model::{ClientTlsPaths, CommandRun, Delivered, ExecuteRefusal};
 use crate::proto::EventBatch;
-use crate::relay::{endpoint_addresses, hold_internal, pinned_dialer, select_endpoint, stop_at, tripped, EndpointKind, HoldDown, Selected};
+use crate::relay::{
+    endpoint_addresses, hold_internal, is_rate_refusal, pinned_dialer, select_endpoint, stop_at, tripped, EndpointKind, HoldDown, Selected,
+};
 use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, Spool, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
 use crate::spool_dirs::SpoolDirs;
 use crate::tls::client_config;
@@ -255,9 +257,15 @@ pub fn lost_streams() -> (Result<Delivered, ChannelError>, Result<CommandRun, Ap
 }
 
 
-/// An internal run that failed holds the internal endpoint down; a relay run that failed, or any run that ended well, does not.
+/// A run that ended because the server refused on rate: the server answered, so nothing is held down.
+pub fn ended_on_rate(run: &Result<CommandRun, AppError>) -> bool {
+    matches!(run, Err(AppError::AttemptsExhausted { last: Some(last), .. }) if is_rate_refusal(last))
+}
+
+
+/// An internal run that failed holds the internal endpoint down; a relay run that failed, a rate refusal, or any run that ended well, does not.
 pub fn note_run(hold: &HoldDown, selected: &Selected, run: &Result<CommandRun, AppError>) {
-    if selected.kind == EndpointKind::Internal && run.is_err() {
+    if selected.kind == EndpointKind::Internal && run.is_err() && !ended_on_rate(run) {
         hold_internal(hold);
     }
 }

@@ -14,9 +14,11 @@ use agent_channel::proxy::{
     count_refusal, exact_length, prefix_family, refusal_counter, refusal_reason, take_header_permit, usable_source, HeaderCaps,
 };
 use agent_channel::server::{register_handshake, relay_peer, serve_with_relay};
-use agent_channel::server_app::{bind_relay, check_listeners, load_server_file, relay_incoming, ServerFile};
+use agent_channel::server_app::{bind_relay, check_listeners, load_server_file, relay_incoming, same_listener, ServerFile};
 use agent_channel::services::channel_router;
-use agent_channel::settings::{check_operator_bytes, relay_sources_valid, settings_loader, settings_state, validate_settings};
+use agent_channel::settings::{
+    check_operator_bytes, relay_sources_valid, settings_loader, settings_state, validate_settings, warn_empty_relay_sources,
+};
 use agent_channel::tls::{client_config, server_config};
 use agent_channel::types::SharedState;
 use std::error::Error;
@@ -863,6 +865,32 @@ async fn relay_listen_is_optional_and_never_the_same_text_as_listen() -> TestRes
     assert!(load_server_file(&file).is_err());
     fs::write(&file, text.replace("relay_listen: 127.0.0.1:1", "relay_listen: 127.0.0.1:2"))?;
     assert!(load_server_file(&file)?.relay_listen.is_some());
+    Ok(())
+}
+
+
+#[test]
+fn listener_texts_naming_one_address_compare_equal() -> TestResult {
+    let dir = long_tempdir()?;
+    assert!(same_listener("127.0.0.1:443", "[::ffff:127.0.0.1]:443"));
+    assert!(same_listener("[::1]:443", "[0:0::1]:443"));
+    assert!(same_listener("localhost:443", "localhost:443"));
+    assert!(!same_listener("127.0.0.1:443", "127.0.0.1:444"));
+    assert!(!same_listener("127.0.0.1:443", "localhost:443"));
+    assert!(check_listeners(&server_file(dir.path(), "127.0.0.1:1", Some("[::ffff:127.0.0.1]:1"))).is_err());
+    assert!(check_listeners(&server_file(dir.path(), "127.0.0.1:1", Some("[::ffff:127.0.0.1]:2"))).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_relay_source_list_warns_at_a_reload_and_a_listed_one_does_not() -> TestResult {
+    let _logging = scoped_logging();
+    warn_empty_relay_sources(&ChannelSettings::default());
+    warn_empty_relay_sources(&ChannelSettings {
+        relay_sources: vec![host(RELAY_BYTE)],
+        ..ChannelSettings::default()
+    });
     Ok(())
 }
 

@@ -229,6 +229,8 @@ pub enum EndpointFault {
     Unusable,
     Duplicate,
     ServerName,
+    LinkLocal,
+    Scoped,
 }
 
 
@@ -240,6 +242,8 @@ impl std::fmt::Display for EndpointFault {
             Self::Unusable => "its address is unspecified, multicast or broadcast",
             Self::Duplicate => "it repeats an earlier endpoint",
             Self::ServerName => "the server name is empty or not a valid name",
+            Self::LinkLocal => "a link-local IPv6 address needs a scope the agent does not keep",
+            Self::Scoped => "an IPv6 scope id or flow label is not accepted",
         })
     }
 }

@@ -131,12 +131,23 @@ pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<ChannelSettings>> {
 }
 
 
+/// An applied reload with no listed relay: a relay listener then refuses every peer.
+pub fn warn_empty_relay_sources(settings: &ChannelSettings) {
+    if settings.relay_sources.is_empty() {
+        tracing::warn!("reloaded settings list no relay_sources, a relay listener refuses every peer");
+    }
+}
+
+
 /// Refuses an invalid candidate before the swap, then publishes each applied one to `shared`.
 pub fn settings_subscriber(shared: SharedSettings) -> Subscriber<ChannelSettings> {
     Subscriber {
         section: SETTINGS_SECTION.to_owned(),
         validate: Box::new(|candidate| validate_settings(candidate).map_err(BoxError::from)),
-        apply: Box::new(move |applied| shared.store(Arc::new(applied.clone()))),
+        apply: Box::new(move |applied| {
+            warn_empty_relay_sources(applied);
+            shared.store(Arc::new(applied.clone()));
+        }),
     }
 }
 

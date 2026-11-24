@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tonic::transport::Channel;
+use tonic::Code;
 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +75,8 @@ fn check_usable(index: usize, address: SocketAddr) -> Result<SocketAddr, AppErro
     let broadcast = matches!(address.ip(), IpAddr::V4(v4) if v4.is_broadcast());
     if address.port() == 0 {
         Err(refused(index, EndpointFault::ZeroPort))
+    } else if matches!(address.ip(), IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+        Err(refused(index, EndpointFault::LinkLocal))
     } else if address.ip().is_unspecified() || address.ip().is_multicast() || broadcast {
         Err(refused(index, EndpointFault::Unusable))
     } else {
@@ -82,10 +85,20 @@ fn check_usable(index: usize, address: SocketAddr) -> Result<SocketAddr, AppErro
 }
 
 
+/// An IPv6 endpoint carries no scope id and no flow label (checked before the IPv4-mapped fold drops them).
+pub fn check_scope(index: usize, parsed: SocketAddr) -> Result<SocketAddr, AppError> {
+    match parsed {
+        SocketAddr::V6(v6) if v6.scope_id() != 0 || v6.flowinfo() != 0 => Err(refused(index, EndpointFault::Scoped)),
+        other => Ok(other),
+    }
+}
+
+
 /// Parses one endpoint; an IPv4-mapped IPv6 address is folded to IPv4 so duplicates compare on the real value.
 pub fn parse_endpoint(index: usize, text: &str) -> Result<SocketAddr, AppError> {
     let parsed: SocketAddr = text.parse().map_err(|_error| refused(index, EndpointFault::Unparsable))?;
-    check_usable(index, SocketAddr::new(parsed.ip().to_canonical(), parsed.port()))
+    let unscoped = check_scope(index, parsed)?;
+    check_usable(index, SocketAddr::new(unscoped.ip().to_canonical(), unscoped.port()))
 }
 
 
@@ -192,6 +205,12 @@ pub async fn select_endpoint(
 }
 
 
+/// The server answered a rate or slot refusal: it is alive, so the endpoint is neither dropped nor held down.
+pub fn is_rate_refusal(error: &ChannelError) -> bool {
+    matches!(error, ChannelError::Status(status) if status.code() == Code::ResourceExhausted)
+}
+
+
 /// A dialer pinned to one address: a failed connect, handshake or first call trips `cancel`, which ends both streams at once.
 pub fn pinned_dialer(address: SocketAddr, config: SharedClientConfig, server_name: String, cancel: Arc<watch::Sender<bool>>) -> Box<DialFn> {
     Box::new(move || {
@@ -200,8 +219,12 @@ pub fn pinned_dialer(address: SocketAddr, config: SharedClientConfig, server_nam
         let tripwire = Arc::clone(&cancel);
         Box::pin(async move {
             open_checked(address, shared, &name).await.inspect_err(|error| {
-                tracing::warn!(%error, "pinned endpoint failed, the run ends");
-                tripwire.send_replace(true);
+                if is_rate_refusal(error) {
+                    tracing::warn!(%error, "pinned endpoint refused on rate, no hold-down");
+                } else {
+                    tracing::warn!(%error, "pinned endpoint failed, the run ends");
+                    tripwire.send_replace(true);
+                }
             })
         })
     })

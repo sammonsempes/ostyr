@@ -17,6 +17,7 @@ use core_config::load::load_file;
 use core_config::watch::watch_files;
 use futures_util::FutureExt;
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -48,9 +49,18 @@ pub struct ServerFile {
 }
 
 
-/// `relay_listen` is start-only and never the same text as `listen`.
+/// Two listener texts name one address: socket addresses compare parsed (IPv4-mapped folded), host names as text (a clash then fails the bind).
+pub fn same_listener(first: &str, second: &str) -> bool {
+    match (first.parse::<SocketAddr>(), second.parse::<SocketAddr>()) {
+        (Ok(one), Ok(other)) => (one.ip().to_canonical(), one.port()) == (other.ip().to_canonical(), other.port()),
+        _ => first == second,
+    }
+}
+
+
+/// `relay_listen` is start-only and never the same address as `listen`.
 pub fn check_listeners(file: &ServerFile) -> Result<(), AppError> {
-    if file.relay_listen.as_ref() == Some(&file.listen) {
+    if file.relay_listen.as_deref().is_some_and(|relay| same_listener(relay, &file.listen)) {
         Err(AppError::RelayListenEqualsListen)
     } else {
         Ok(())
