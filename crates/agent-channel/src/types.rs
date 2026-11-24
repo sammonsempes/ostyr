@@ -1,5 +1,5 @@
 use crate::error::ChannelError;
-use crate::model::{ChannelSettings, ExecuteRefusal, Identity, Revocations, ServerState, ShellInput, ShellSinkEvent, ShellState};
+use crate::model::{ChannelSettings, ExecuteRefusal, Identity, PendingHandshake, Revocations, ServerState, ShellInput, ShellSinkEvent, ShellState};
 use crate::proto::{CommandEnvelope, EventAck, EventBatch, ShellFrame};
 use agent_command::model::Command;
 use arc_swap::ArcSwap;
@@ -24,6 +24,10 @@ pub type EventWriter = Box<dyn Write + Send>;
 
 
 pub type SyncFn = Box<dyn Fn() -> io::Result<()> + Send>;
+
+
+/// Connections in their TLS handshake, locked only to register one or to evict one.
+pub type PendingRegistry = Arc<Mutex<Vec<PendingHandshake>>>;
 
 
 pub type SharedServerConfig = Arc<rustls::ServerConfig>;

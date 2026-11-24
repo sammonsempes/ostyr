@@ -3,15 +3,15 @@ use crate::app::{alerting_audit, debounce, keep_signals, reload_context, shared_
 use crate::commands::command_source;
 use crate::error::AppError;
 use crate::limits::system_now;
-use crate::model::{Counters, ServerState, ServerTlsPaths};
+use crate::model::{Counters, RelayListener, ServerState, ServerTlsPaths, PROXY_HEADER_SECONDS};
 use crate::presence::watch_silence;
 use crate::revocation::open_revocation_engine;
-use crate::server::serve;
+use crate::server::serve_with_relay;
 use crate::services::channel_router;
-use crate::settings::open_settings_engine;
+use crate::settings::{open_settings_engine, settings_of};
 use crate::sink::{file_sink, open_event_store};
 use crate::tls::server_config;
-use crate::types::{EventSink, NowFn, ShutdownSignal};
+use crate::types::{EventSink, IncomingConnections, NowFn, ShutdownSignal};
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
@@ -19,6 +19,7 @@ use futures_util::FutureExt;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -34,6 +35,8 @@ pub const SERVER_TENANT: &str = "platform";
 #[serde(deny_unknown_fields)]
 pub struct ServerFile {
     pub listen: String,
+    #[serde(default)]
+    pub relay_listen: Option<String>,
     pub certificate: PathBuf,
     pub key: PathBuf,
     pub agent_ca: PathBuf,
@@ -45,8 +48,20 @@ pub struct ServerFile {
 }
 
 
+/// `relay_listen` is start-only and never the same text as `listen`.
+pub fn check_listeners(file: &ServerFile) -> Result<(), AppError> {
+    if file.relay_listen.as_ref() == Some(&file.listen) {
+        Err(AppError::RelayListenEqualsListen)
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn load_server_file(path: &Path) -> Result<ServerFile, AppError> {
-    Ok(load_file::<ServerFile>(path)?)
+    let file = load_file::<ServerFile>(path)?;
+    check_listeners(&file)?;
+    Ok(file)
 }
 
 
@@ -55,9 +70,39 @@ pub async fn bind_server(file: &ServerFile) -> Result<TcpListener, AppError> {
 }
 
 
+/// The relay listener when `relay_listen` is set.
+pub async fn bind_relay(file: &ServerFile) -> Result<Option<TcpListener>, AppError> {
+    check_listeners(file)?;
+    match &file.relay_listen {
+        Some(address) => Ok(Some(TcpListener::bind(address).await?)),
+        None => Ok(None),
+    }
+}
+
+
 /// Serves until `shutdown` completes; settings and revocations reload on file change and on `SIGHUP`, every reload is audited.
-pub async fn run_server(file: ServerFile, listener: TcpListener, shutdown: ShutdownSignal, events: EventSink) -> Result<(), AppError> {
-    run_server_with_clock(file, listener, shutdown, events, Box::new(system_now)).await
+pub async fn run_server(
+    file: ServerFile,
+    listener: TcpListener,
+    relay: Option<TcpListener>,
+    shutdown: ShutdownSignal,
+    events: EventSink,
+) -> Result<(), AppError> {
+    run_server_with_clock(file, (listener, relay), shutdown, events, Box::new(system_now)).await
+}
+
+
+/// The relay connections: empty without a relay listener; an empty `relay_sources` is logged once, every peer is then refused.
+pub fn relay_incoming(relay: Option<TcpListener>, state: &ServerState) -> IncomingConnections {
+    match relay {
+        Some(listener) => {
+            if settings_of(state).relay_sources.is_empty() {
+                tracing::warn!("relay listener without relay_sources, every peer will be refused");
+            }
+            Box::pin(TcpListenerStream::new(listener))
+        }
+        None => Box::pin(tokio_stream::empty()),
+    }
 }
 
 
@@ -70,7 +115,7 @@ pub fn file_events(file: &ServerFile) -> Result<EventSink, AppError> {
 /// `run_server` with the limiter clock injected.
 pub async fn run_server_with_clock(
     file: ServerFile,
-    listener: TcpListener,
+    listeners: (TcpListener, Option<TcpListener>),
     shutdown: ShutdownSignal,
     events: EventSink,
     now: Box<NowFn>,
@@ -107,10 +152,16 @@ pub async fn run_server_with_clock(
         key: file.key,
         agent_ca: file.agent_ca,
     })?;
+    let (listener, relay) = listeners;
+    let relay_listener = RelayListener {
+        incoming: relay_incoming(relay, &state),
+        header_limit: Duration::from_secs(PROXY_HEADER_SECONDS),
+    };
     let stop = shutdown.shared();
     let silence = tokio::spawn(watch_silence(Arc::clone(&state), stop.clone()));
-    serve(
+    serve_with_relay(
         Box::pin(TcpListenerStream::new(listener)),
+        relay_listener,
         config,
         channel_router(Arc::clone(&state)),
         state,

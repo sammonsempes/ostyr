@@ -11,6 +11,7 @@ pub mod limits;
 pub mod model;
 pub mod presence;
 pub mod proto;
+pub mod proxy;
 pub mod relay;
 pub mod revocation;
 pub mod server;

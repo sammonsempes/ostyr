@@ -1,5 +1,5 @@
 //! Usage: `event_gateway <server.yaml> <gateway.yaml>`. The server file is the `channel_server` one (its `events_file` is not used here).
-use agent_channel::server_app::{bind_server, load_server_file};
+use agent_channel::server_app::{bind_relay, bind_server, load_server_file};
 use event_gateway::run::{load_gateway_file, run_gateway};
 use siem_ingest::logging::build_subscriber;
 use std::error::Error;
@@ -24,10 +24,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let server = load_server_file(Path::new(&server_path))?;
     let gateway = load_gateway_file(Path::new(&gateway_path))?;
     let listener = bind_server(&server).await?;
+    let relay = bind_relay(&server).await?;
     let shutdown = Box::pin(async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::warn!(%error, "cannot wait for the stop signal");
         }
     });
-    Ok(run_gateway(server, gateway, listener, shutdown).await?)
+    Ok(run_gateway(server, gateway, listener, relay, shutdown).await?)
 }
