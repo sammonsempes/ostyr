@@ -153,6 +153,8 @@ expect "init.sh refuses a secrets directory owned by uid 1000" absent remote "cd
 expect "a second concurrent init.sh is refused by the lock and the first finishes a full set" remote "sudo env INIT_LOCK_WAIT_SECONDS=$LOCK_PROOF_WAIT_SECONDS compose/tests/lock-proof.sh compose/init.sh"
 remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo chmod 0644 secrets/store.key"
 expect "init.sh refuses a secret with mode 0644 naming the file" remote "cd plant && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key must have mode 600'"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo chmod 0600 secrets/playbooks_pg_password && sudo sh -c 'head -c 33 /dev/zero | base64 -w 0 | head -c 44 >secrets/playbooks_pg_password' && sudo chmod 0400 secrets/playbooks_pg_password"
+expect "init.sh refuses a password copy with other bytes naming it" remote "cd plant && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'playbooks_pg_password differs from pg_service_password'"
 remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant"
 expect "init.sh refuses a world-writable parent of secrets" absent remote "cd plant && sudo ./init.sh plant.example"
 remote "sudo rm -rf plant && sudo mkdir -p plant/inner/compose && sudo cp compose/init.sh plant/inner/compose/ && sudo chown 1000 plant/inner"

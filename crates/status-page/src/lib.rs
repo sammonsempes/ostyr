@@ -16,6 +16,7 @@ pub mod publish;
 pub mod render;
 pub mod serve;
 pub mod server;
+pub mod service;
 pub mod settings;
 pub mod snapshot;
 pub mod store;

@@ -186,6 +186,7 @@ fn loop_wiring(calls: &Arc<AtomicUsize>, asked: &Arc<Mutex<Vec<usize>>>, redeliv
         ack: Box::new(|_, _| Ok(())),
         dead_letter: Box::new(|_, _, _| Ok(())),
         progress: Arc::new(|| Ok(())),
+        pulls: Default::default(),
     }
 }
 

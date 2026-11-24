@@ -197,3 +197,32 @@ pub fn deliver_or_stop(sink: &ExecSink, state: Delivery, drained: &Drained, stop
         state
     })
 }
+
+
+/// The delivery state of a probe thread; when the thread ends (disable, spool failure, panic) the drop writes the pending counts as one last status.
+#[derive(Debug)]
+pub struct ThreadDelivery {
+    pub sink: ExecSink,
+    pub state: Delivery,
+}
+
+
+impl Drop for ThreadDelivery {
+    fn drop(&mut self) {
+        final_status(&self.sink, &self.state.losses)
+            .inspect_err(|error| tracing::warn!(%error, "final exec status not written"))
+            .ok();
+    }
+}
+
+
+/// The pending counts as one status line within the whole `max_spool_bytes`, whatever the interval; `false` when nothing is pending or the bound refuses it.
+pub fn final_status(sink: &ExecSink, losses: &Losses) -> io::Result<bool> {
+    let bound = sink.settings.load().max_spool_bytes;
+    let status = [status_line(losses)];
+    if losses == &Losses::default() {
+        Ok(false)
+    } else {
+        append_within(&sink.lock, &sink.spool, &sink.sending, bound, &status)
+    }
+}

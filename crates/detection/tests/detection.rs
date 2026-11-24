@@ -1042,6 +1042,7 @@ fn a_failing_fetch_backs_off_and_the_loop_ends_with_a_checkpoint() -> TestResult
         ack: Box::new(|_, _| Ok(())),
         dead_letter: Box::new(|_, _, _| Ok(())),
         progress: Arc::new(|| Ok(())),
+        pulls: Default::default(),
     };
     let mut pipeline = detection_pipeline(ingest, Arc::clone(&detector), wiring, (fixed_clock, no_sleep));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1070,6 +1071,7 @@ fn the_loop_saves_the_windows_after_a_committed_batch_and_a_final_save_failure_i
         ack: Box::new(|_, _| Ok(())),
         dead_letter: Box::new(|_, _, _| Ok(())),
         progress: Arc::new(|| Ok(())),
+        pulls: Default::default(),
     };
     let mut pipeline = detection_pipeline(ingest, Arc::clone(&detector), wiring, (fixed_clock, no_sleep));
     let stop_after = Arc::new(AtomicUsize::new(0));

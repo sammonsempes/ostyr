@@ -130,6 +130,8 @@ pub enum NatsError {
     NotConnected,
     #[error("the acknowledgement token is unknown to the NATS session")]
     UnknownToken,
+    #[error("the NATS server would not deliver the head of the stream, which exceeds the pull's byte cap")]
+    HeadTooLarge,
 }
 
 

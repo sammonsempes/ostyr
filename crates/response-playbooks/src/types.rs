@@ -31,3 +31,9 @@ pub type LiveFn<'a> = &'a (dyn Fn() -> crate::service::Live + Sync);
 
 
 pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>>>>;
+
+
+pub type MigrationRun = Pin<Box<dyn Future<Output = Result<Vec<String>, core_pg::error::PgError>>>>;
+
+
+pub type MigrateFn = fn(std::sync::Arc<core_pg::settings::PgSettings>) -> MigrationRun;

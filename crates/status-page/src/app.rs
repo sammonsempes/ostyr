@@ -11,11 +11,14 @@ use crate::snapshot::{publish, snapshot_of};
 use crate::types::{IncidentReadFn, SharedState, ShutdownSignal};
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_config::reload::{ReloadContext, RELOAD_DECLARED_KEYS};
+#[cfg(unix)]
+use core_config::signal::reload_on_signals;
 use core_config::types::SharedAuditFn;
 use core_config::watch::watch_files;
 use core_pg::scope::tenant_scope;
 use serde::Deserialize;
 use std::fs::File;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +45,8 @@ pub struct AppFile {
     pub audit_file: PathBuf,
     #[serde(default)]
     pub pg_file: Option<PathBuf>,
+    #[serde(default)]
+    pub listen_address: Option<SocketAddr>,
 }
 
 
@@ -133,12 +138,15 @@ pub async fn run_app_with(
     }
     let config = Arc::new(load_config(&file.page_file, &DEFAULT_LIMITS)?);
     let log = Arc::new(open_file_log(&file.audit_file)?);
-    let (engine, settings) = open_settings_engine(file.settings_file.clone(), file_audit(&log), reload_context(&file, &config.tenant))?;
+    let (opened, settings) = open_settings_engine(file.settings_file.clone(), file_audit(&log), reload_context(&file, &config.tenant))?;
+    let engine = Arc::new(opened);
     let _watch = watch_files(
-        Arc::new(engine),
+        Arc::clone(&engine),
         std::slice::from_ref(&file.settings_file),
         Duration::from_millis(DEBOUNCE_MILLIS),
     )?;
+    #[cfg(unix)]
+    let _signals = reload_on_signals(Arc::clone(&engine), &[signal_hook::consts::SIGHUP])?;
     let state = Arc::new(new_state(config.tenant.clone(), settings, Box::new(system_millis)));
     let publishing = match read {
         Some(reader) => Some(start_publisher(Arc::clone(&config), Arc::clone(&state), reader).await?),

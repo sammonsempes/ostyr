@@ -190,6 +190,10 @@ make_copy_file() {
     local name="$1" source="$2" temporary
     if is_present "$SECRETS_DIR/$name"; then
         check_present "$name" "$BASE64_LENGTH"
+        if ! cmp -s "$SECRETS_DIR/$name" "$SECRETS_DIR/$source"; then
+            printf 'error: %s differs from %s, refused: delete %s and run init again\n' "$name" "$source" "$name" >&2
+            exit 1
+        fi
     else
         temporary="$(mktemp "$scratch/$name.XXXXXX")"
         cat "$SECRETS_DIR/$source" >"$temporary"

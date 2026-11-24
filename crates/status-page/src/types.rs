@@ -34,6 +34,12 @@ pub type NowFn = dyn Fn() -> u64 + Send + Sync;
 pub type IncomingConnections = Pin<Box<dyn Stream<Item = io::Result<TcpStream>> + Send>>;
 
 
+pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
+
+
+pub type SignalsFn = fn() -> io::Result<InterruptWait>;
+
+
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 

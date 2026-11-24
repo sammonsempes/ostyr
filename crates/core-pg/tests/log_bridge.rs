@@ -84,6 +84,16 @@ fn survivor_local_constant_is_refused() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
+fn the_allowed_list_is_exactly_the_two_services() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        FILTERED_BRIDGE_FILES,
+        ["crates/platform/src/serve.rs", "crates/response-playbooks/src/serve.rs"]
+    );
+    Ok(())
+}
+
+
+#[test]
 fn survivor_a_third_path_is_refused() -> Result<(), Box<dyn Error>> {
     let text = "LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
     assert!(!is_filtered_bridge(Path::new("crates/web-ui/src/serve.rs"), text));
