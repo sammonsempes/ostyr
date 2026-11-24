@@ -152,3 +152,48 @@ pub const FAILED_TEXT: &str = "accepts that failed";
 
 
 pub const COUNTER_CLASSES: usize = 3;
+
+
+pub const MIN_INTERVAL_SECONDS: u64 = 60;
+
+
+pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
+
+
+pub const MAX_ROUNDS: u64 = 1_000_000;
+
+
+pub const MAX_SERVICE_SETTINGS_BYTES: u64 = 4_096;
+
+
+pub const SERVICE_ALLOWED_PUNCTUATION: &[u8] = b" \n._:-/";
+
+
+pub const SERVICE_FILE_CLASS: &str = "service file";
+
+
+pub const SERVICE_SECTION: &str = "rpz-service";
+
+
+pub const SERVICE_UNBOUND_COMMAND: &str = "/usr/sbin/unbound-control";
+
+
+pub const ROUND_FAILED_AUDIT_ACTION: &str = "dns-rpz.round_failed";
+
+
+pub const SERVICE_ACTOR: &str = "ostyr-dns-rpz";
+
+
+pub const SERVICE_TENANT: &str = "system";
+
+
+pub const SERVICE_MODULE: &str = "dns-rpz";
+
+
+pub const ROUND_CAP_EXIT_CODE: u8 = 3;
+
+
+pub const DEBOUNCE_MILLIS: u64 = 300;
+
+
+pub const AUDIT_DECLARED_KEYS: [&str; 7] = ["result", "diff", "reason", "changed_settings", "changed_files", "diff_sha256", "stage"];

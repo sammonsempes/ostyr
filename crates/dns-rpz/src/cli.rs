@@ -1,5 +1,5 @@
 use crate::error::RpzError;
-use crate::model::{Reloader, RunSummary};
+use crate::model::{Reloader, RoundOutcome, RunSummary};
 use crate::policy::Policy;
 use crate::run::generate;
 use crate::types::{ClockFn, OpenFn};
@@ -27,6 +27,12 @@ pub struct Session<'a> {
 
 /// A failed run is reported and logged, it does not end the session.
 pub fn run_generation(session: &mut Session) -> io::Result<()> {
+    run_round(session).map(|_outcome| ())
+}
+
+
+/// One generation and zone reload, shared by the `run` command and the service loop; the outcome says which step failed.
+pub fn run_round(session: &mut Session) -> io::Result<RoundOutcome> {
     let policy = current_config(session.engine);
     let instant = (session.clock)();
     let result: Result<_, RpzError> = (session.open)(instant)
@@ -41,13 +47,13 @@ pub fn run_generation(session: &mut Session) -> io::Result<()> {
             serde_json::to_writer(&mut *session.report, &summary)?;
             writeln!(session.report)?;
             match reload_zone(&policy, session.reloader) {
-                Ok(()) => Ok(()),
-                Err(failure) => writeln!(session.report, "failed reload {failure}"),
+                Ok(()) => Ok(RoundOutcome::Published),
+                Err(failure) => writeln!(session.report, "failed reload {failure}").map(|()| RoundOutcome::ReloadFailed),
             }
         }
         Err(failure) => {
             error!(%failure, "zone generation failed");
-            writeln!(session.report, "failed {failure}")
+            writeln!(session.report, "failed {failure}").map(|()| RoundOutcome::GenerationFailed)
         }
     }
 }

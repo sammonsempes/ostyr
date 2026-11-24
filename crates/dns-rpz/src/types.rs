@@ -11,6 +11,9 @@ pub type OpenFn<'a> = dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>> + '
 pub type ClockFn<'a> = dyn Fn() -> OffsetDateTime + 'a;
 
 
+pub type WaitFn<'a> = dyn Fn(Duration) -> bool + 'a;
+
+
 pub type Counts = BTreeMap<&'static str, u64>;
 
 
