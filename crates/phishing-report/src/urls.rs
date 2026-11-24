@@ -1,5 +1,6 @@
 use crate::limits::Limits;
-use crate::model::{Counts, UrlHit, UrlIndex};
+use crate::model::{Counts, Shapes, UrlHit, UrlIndex};
+use crate::shapes::{edge, head, vouch, Vouched};
 use crate::text::{has_hostile, is_zero_width};
 use regex::{Match, Regex};
 use std::sync::LazyLock;
@@ -158,6 +159,7 @@ fn refused_host(stripped: &str, too_long: bool) -> Option<String> {
 /// The kept URLs and refused hosts as sets, so a candidate costs one hash of its own length whatever the number kept.
 pub fn index_from(urls: &[UrlHit], hosts: Vec<String>) -> UrlIndex {
     UrlIndex {
+        shapes: Shapes::Refuse,
         seen: urls.iter().map(|hit| hit.url.clone()).collect(),
         hosts_seen: hosts.iter().cloned().collect(),
         hosts,
@@ -221,6 +223,9 @@ fn add(mut urls: Vec<UrlHit>, candidate: &str, level: usize, limits: &Limits, in
 const WINDOW_BUDGET: usize = 8_388_608;
 
 
+const VOUCH_WINDOWS: usize = 2;
+
+
 /// What follows a match that ended on a delimiter: up to the end of the attribute value, or no end within the bound.
 pub enum Region<'text> {
     Closed(&'text str),
@@ -266,19 +271,63 @@ fn split_last(region: &str) -> Option<(&str, &str)> {
 }
 
 
-fn quote_host_cut(region: &str) -> Option<&str> {
+fn is_cut_end(found: char) -> bool {
+    found.is_whitespace() || matches!(found, '<' | '>')
+}
+
+
+fn is_ambiguous(region: &str) -> bool {
     region
         .strip_prefix(['"', '\''])
-        .filter(|rest| rest.starts_with(|first: char| first.is_ascii_alphanumeric()))
-        .map(|rest| {
-            let end = rest.find(is_url_delimiter).unwrap_or(rest.len());
-            region.split_at(1 + end).0
-        })
+        .is_some_and(|after| !after.is_empty() && !after.starts_with('\r'))
+}
+
+
+fn quote_cut(region: &str) -> Option<&str> {
+    region.strip_prefix(['"', '\'']).and_then(|after| {
+        let end = after.find(is_cut_end).unwrap_or(after.len());
+        (end > 0).then(|| region.split_at(1 + end).0)
+    })
 }
 
 
 fn is_bare_scheme(matched: &str) -> bool {
     matched.chars().rfind(|found| !is_url_noise(*found)) == Some(':')
+}
+
+
+/// One URL match: its text, the text before it, the text after it and the level it was read at.
+pub struct Site<'text> {
+    pub matched: &'text str,
+    pub before: &'text str,
+    pub tail: &'text str,
+    pub level: usize,
+}
+
+
+fn vouched(site: &Site<'_>, limits: &Limits) -> Vouched {
+    let bound = limits.url_bytes;
+    let plain = vouch(&edge(site.before, bound, false), &head(site.tail, bound, false), bound);
+    let stripped = vouch(&edge(site.before, bound, true), &head(site.tail, bound, true), bound);
+    Vouched {
+        ambiguity: plain.ambiguity && stripped.ambiguity,
+        userinfo: plain.userinfo && stripped.userinfo,
+    }
+}
+
+
+fn read_region(urls: Vec<UrlHit>, site: &Site<'_>, rest: &str, limits: &Limits, index: &mut UrlIndex, counts: &mut Counts) -> Vec<UrlHit> {
+    let first = at_cut(split_first, rest);
+    let ambiguous = is_ambiguous(rest);
+    let honoured = (ambiguous || first.is_some()) && index.shapes != Shapes::Refuse;
+    index.window_bytes += usize::from(honoured) * VOUCH_WINDOWS * site.tail.len().min(limits.url_bytes);
+    let vouch = if honoured { vouched(site, limits) } else { Vouched::default() };
+    counts.url_host_ambiguous += usize::from(ambiguous && !vouch.ambiguity);
+    counts.url_userinfo_split += usize::from(first.is_some() && !vouch.userinfo);
+    let last = at_cut(split_last, rest);
+    [first, quote_cut(rest), last].into_iter().flatten().fold(urls, |kept, part| {
+        add(kept, &format!("{}{}", site.matched, part), site.level, limits, index, counts)
+    })
 }
 
 
@@ -296,16 +345,19 @@ fn read_split(
     index.window_bytes += usize::from(opens) * tail.len().min(limits.url_bytes);
     let spent = index.window_bytes > WINDOW_BUDGET;
     let region = (opens && !spent).then(|| split_region(tail, limits.url_bytes));
-    counts.url_host_unread += usize::from(opens && (spent || matches!(region, Some(Region::Open))));
+    let unreadable = opens && (spent || matches!(region, Some(Region::Open)));
+    counts.url_host_unread += usize::from(unreadable);
+    counts.url_host_ambiguous += usize::from(unreadable);
     counts.url_userinfo_split += usize::from(opens && spent);
     match region {
         Some(Region::Closed(rest)) => {
-            let cut = at_cut(split_first, rest).or_else(|| quote_host_cut(rest));
-            counts.url_userinfo_split += usize::from(cut.is_some());
-            let last = at_cut(split_last, rest);
-            [cut, last].into_iter().flatten().fold(urls, |kept, part| {
-                add(kept, &format!("{}{}", found.as_str(), part), level, limits, index, counts)
-            })
+            let site = Site {
+                matched: found.as_str(),
+                before: text.split_at(found.start()).0,
+                tail,
+                level,
+            };
+            read_region(urls, &site, rest, limits, index, counts)
         }
         _ => urls,
     }

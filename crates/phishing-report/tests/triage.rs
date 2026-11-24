@@ -150,7 +150,8 @@ fn a_plain_message_gives_its_fields() -> Result<(), Box<dyn std::error::Error>> 
         [
             "http://xn--pypal-4ve.example/a?x=1&y=2",
             "http://softbreak.example/p",
-            "data:text/html;base64,AAAA"
+            "data:text/html;base64,AAAA",
+            "http://xn--pypal-4ve.example/a?x=1&amp;y=2"
         ]
     );
     assert!(record.urls.iter().all(|hit| hit.level == 0));
