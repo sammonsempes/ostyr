@@ -240,7 +240,16 @@ pub fn settings_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn
 
 /// The first read is the baseline; a later reload may change only the four live values, any other change is refused and audited `denied`.
 pub fn open_service_settings(file: &Path, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
-    let baseline = load_settings(file)?;
+    open_service_settings_from(file, load_settings(file)?, audit)
+}
+
+
+/// Same as `open_service_settings` over a baseline the caller already parsed, so one read of the file serves both.
+pub fn open_service_settings_from(
+    file: &Path,
+    baseline: ServiceSettings,
+    audit: Box<SharedAuditFn>,
+) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
         tenant: baseline.tenant.clone(),
