@@ -197,6 +197,8 @@ fn delivery(subject: &str, payload: &str, token: u64) -> Delivery {
         subject: subject.to_owned(),
         payload: payload.as_bytes().to_vec(),
         token,
+        message_ids: Vec::new(),
+        stored_nanos: None,
     }
 }
 

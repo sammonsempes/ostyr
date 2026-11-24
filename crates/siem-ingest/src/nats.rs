@@ -42,6 +42,9 @@ pub const TENANT_HEADER: &str = "Ostyr-Tenant";
 pub const REASON_HEADER: &str = "Ostyr-Reason";
 
 
+pub const MESSAGE_ID_HEADER: &str = "Nats-Msg-Id";
+
+
 pub const FIRST_TOKEN: AckToken = 1;
 
 
@@ -315,6 +318,26 @@ pub fn header_values(message: &jetstream::Message) -> usize {
 }
 
 
+/// Every `Nats-Msg-Id` value of a message; the cap on header values has already bounded their number.
+pub fn message_ids(message: &jetstream::Message) -> Vec<String> {
+    message
+        .headers
+        .iter()
+        .flat_map(|headers| headers.get_all(MESSAGE_ID_HEADER))
+        .map(|value| value.as_str().to_owned())
+        .collect()
+}
+
+
+/// The stream's stored time (the same on every redelivery) in unix nanoseconds; none when the reply carries no usable one.
+pub fn stored_nanos(message: &jetstream::Message) -> Option<u64> {
+    message
+        .info()
+        .ok()
+        .and_then(|info| u64::try_from(info.published.unix_timestamp_nanos()).ok())
+}
+
+
 /// A message with more headers than the cap is split off to be terminated, the rest become deliveries with a session token each.
 pub fn admit_messages(
     session: &mut Session,
@@ -331,6 +354,8 @@ pub fn admit_messages(
                 subject: message.subject.to_string(),
                 payload: message.payload.to_vec(),
                 token,
+                message_ids: message_ids(&message),
+                stored_nanos: stored_nanos(&message),
             };
             session.held.insert(token, message);
             delivery
@@ -395,10 +420,31 @@ pub fn lock_session(link: &Link) -> MutexGuard<'_, Option<Session>> {
 }
 
 
+/// The field a refused durable differs in, or none for any other outcome.
+pub fn refused_field(outcome: &Result<Vec<Delivery>, NatsError>) -> Option<&'static str> {
+    match outcome {
+        Err(NatsError::ConsumerConfig { field }) => Some(*field),
+        _ => None,
+    }
+}
+
+
+/// A refused durable stalls ingestion, so it is logged by name once per distinct field and logged again after a fetch that worked.
+pub fn log_refusal(link: &Link, outcome: &Result<Vec<Delivery>, NatsError>) {
+    let field = refused_field(outcome);
+    let mut logged = link.refused_field.lock().unwrap_or_else(PoisonError::into_inner);
+    if field.is_some() && *logged != field {
+        warn!(field, "the pre-created durable is refused, ingestion is stalled");
+    }
+    *logged = field;
+}
+
+
 pub fn fetch_batch(link: &Link, max: usize) -> Result<Vec<Delivery>, BoxError> {
     let mut slot = lock_session(link);
     let settings = current_config(&link.settings);
     let outcome = link.runtime.block_on(fetch_in(&mut slot, &link.next_token, &settings, max));
+    log_refusal(link, &outcome);
     outcome.map_err(BoxError::from)
 }
 
@@ -479,6 +525,7 @@ pub fn nats_wiring(settings: Arc<ReloadEngine<IngestSettings>>) -> Result<Wiring
         settings,
         session: Mutex::new(None),
         next_token: AtomicU64::new(FIRST_TOKEN),
+        refused_field: Mutex::new(None),
     });
     let fetch_link = Arc::clone(&link);
     let ack_link = Arc::clone(&link);

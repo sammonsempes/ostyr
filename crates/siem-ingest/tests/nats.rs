@@ -49,10 +49,13 @@ const POLLS: usize = 2000;
 const POLL_MS: u64 = 10;
 
 
-const NORMAL_MS: u64 = 120_000;
+const NORMAL_MS: u64 = 50_000;
 
 
 const SHORT_MS: u64 = 200;
+
+
+const PATIENT_FETCH_MS: u64 = 5_000;
 
 
 const PING_MS: u64 = 1000;
@@ -126,6 +129,7 @@ fn link_for(engine: &Arc<ReloadEngine<IngestSettings>>) -> Result<Arc<Link>, Box
         settings: Arc::clone(engine),
         session: Mutex::new(None),
         next_token: AtomicU64::new(1),
+        refused_field: Mutex::new(None),
     }))
 }
 
@@ -152,6 +156,7 @@ fn queued(subject: &str, payload: &str) -> Queued {
         payload: payload.as_bytes().to_vec(),
         extra_headers: 0,
         repeated_values: 0,
+        message_ids: Vec::new(),
     }
 }
 
@@ -362,6 +367,7 @@ fn a_message_with_too_many_headers_is_terminated_not_delivered() -> Result<(), B
             payload: b"crowded".to_vec(),
             extra_headers: MANY_HEADERS,
             repeated_values: 0,
+            message_ids: Vec::new(),
         });
         state.queue.push_back(queued("events.tenant-a", "fine"));
     })?;
@@ -597,6 +603,7 @@ fn repeated_values_of_one_header_name_count_against_the_cap() -> Result<(), Box<
             payload: b"crowded".to_vec(),
             extra_headers: 0,
             repeated_values: MANY_HEADERS,
+            message_ids: Vec::new(),
         });
     })?;
     assert!(fetch_batch(&rig.link, FETCH_MAX)?.is_empty());
@@ -665,7 +672,7 @@ fn releasing_a_session_logs_a_failing_nak_and_skips_a_dropped_one() -> Result<()
     let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
     let patient = yaml(rig.stub.port, NORMAL_MS, "").replace(
         &format!("nats_fetch_deadline_ms: {SHORT_MS}"),
-        &format!("nats_fetch_deadline_ms: {NORMAL_MS}"),
+        &format!("nats_fetch_deadline_ms: {PATIENT_FETCH_MS}"),
     );
     fs::write(&rig.path, patient)?;
     assert!(matches!(reload(&rig.engine), ReloadOutcome::Applied { .. }));
@@ -1125,5 +1132,85 @@ fn a_server_error_after_a_good_handshake_leaves_no_text_in_the_error_or_the_log(
     let port = speak_first(probe("-ERR"), Some(server_config))?;
     let (shown, logs) = hostile_attempt(port, HOST, &extra)?;
     assert_clean(&shown, &logs);
+    Ok(())
+}
+
+
+#[test]
+fn a_delivery_carries_every_message_id_and_the_stored_time() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| {
+        state.queue.push_back(Queued {
+            message_ids: vec!["a:b:1:0".to_owned(), "a:b:1:1".to_owned()],
+            ..queued("events.tenant-a", "one")
+        });
+        state.queue.push_back(queued("events.tenant-a", "two"));
+    })?;
+    let deliveries = fetch_batch(&rig.link, FETCH_MAX)?;
+    let first = deliveries.first().ok_or("no first delivery")?;
+    let second = deliveries.get(1).ok_or("no second delivery")?;
+    assert_eq!(first.message_ids, vec!["a:b:1:0".to_owned(), "a:b:1:1".to_owned()]);
+    assert!(second.message_ids.is_empty());
+    assert_eq!(first.stored_nanos, Some(nats_stub::STORED_NANOS));
+    assert_eq!(second.stored_nanos, Some(nats_stub::STORED_NANOS));
+    Ok(())
+}
+
+
+#[test]
+fn a_reply_without_a_stored_time_gives_none() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    let slot = rig.link.session.lock().map_err(|_| "poisoned")?;
+    let session = slot.as_ref().ok_or("no session")?;
+    let crafted = |reply: &str| jetstream::Message {
+        message: async_nats::Message {
+            subject: "events.tenant-a".into(),
+            reply: Some(reply.into()),
+            payload: "x".into(),
+            headers: None,
+            status: None,
+            description: None,
+            length: 1,
+        },
+        context: session.jetstream.clone(),
+    };
+    assert_eq!(siem_ingest::nats::stored_nanos(&crafted("bad reply subject")), None);
+    assert_eq!(siem_ingest::nats::stored_nanos(&crafted("$JS.ACK.events.d.1.1.1.0.0")), Some(0));
+    assert!(siem_ingest::nats::message_ids(&crafted("x")).is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_durable_is_logged_by_field_once_until_a_fetch_works() -> Result<(), Box<dyn Error + Send + Sync>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let rig = rig(NORMAL_MS, "", |state| {
+        state.config_patch = Some(json!({"ack_wait": WRONG_ACK_WAIT_NANOS}))
+    })?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let dispatch = tracing::Dispatch::new(siem_ingest::logging::build_subscriber(move || writer.clone(), None)?);
+    tracing::dispatcher::with_default(&dispatch, || {
+        assert!(fetch_batch(&rig.link, FETCH_MAX).is_err());
+        assert!(fetch_batch(&rig.link, FETCH_MAX).is_err());
+    });
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    assert_eq!(logs.matches("pre-created durable is refused").count(), 1, "{logs}");
+    assert!(logs.contains("ack_wait"), "{logs}");
+    assert_eq!(*rig.link.refused_field.lock().map_err(|_| "poisoned")?, Some("ack_wait"));
+    let worked: Result<Vec<_>, NatsError> = Ok(Vec::new());
+    siem_ingest::nats::log_refusal(&rig.link, &worked);
+    assert_eq!(*rig.link.refused_field.lock().map_err(|_| "poisoned")?, None);
+    Ok(())
+}
+
+
+#[test]
+fn a_fetch_window_that_reaches_the_response_threshold_is_refused_by_name() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = tempdir()?;
+    let last_accepted = siem_ingest::nats_settings::RESPONSE_THRESHOLD_MS - SHORT_MS - 1;
+    assert!(engine_for(&dir, &yaml(1, last_accepted, "")).is_ok());
+    let refused = engine_for(&dir, &yaml(1, last_accepted + 1, "")).err().ok_or("accepted")?;
+    assert!(refused.to_string().contains("nats_fetch_deadline_ms"), "{refused}");
     Ok(())
 }

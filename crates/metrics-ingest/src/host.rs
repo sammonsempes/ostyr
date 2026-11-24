@@ -330,9 +330,25 @@ pub fn parse_event(event: &[u8]) -> Result<(HostEvent, Keys), Refusal> {
 }
 
 
+pub fn has_host_dataset(event: &HostEvent) -> bool {
+    event.event.as_ref().and_then(|part| part.dataset.as_deref()) == Some(HOST_DATASET)
+}
+
+
+/// The dataset check alone, before any identity is known: an oversized or unreadable payload and any other dataset are refused by name.
+pub fn classify_event(event: &[u8]) -> Result<(), Refusal> {
+    parse_event(event).and_then(|(parsed, _)| {
+        if has_host_dataset(&parsed) {
+            Ok(())
+        } else {
+            Err(Refusal::NotHostMetrics)
+        }
+    })
+}
+
+
 pub fn identify(event: &HostEvent, agent_id: &str, limits: &Limits) -> Result<ResourceLabels, Refusal> {
-    let dataset = event.event.as_ref().and_then(|part| part.dataset.as_deref());
-    if dataset == Some(HOST_DATASET) {
+    if has_host_dataset(event) {
         let resource = resource_labels(&[string_pair(HOST_LABEL, agent_id)], limits);
         if resource.is_err() {
             Err(Refusal::BadHost)

@@ -70,11 +70,13 @@ pub struct FlushReport {
 }
 
 
-/// One bus message as the consumer hands it over: the subject carries the tenant. No `Debug`, so a log never prints event bytes.
+/// One bus message as handed over: the subject carries the tenant, `message_ids` every `Nats-Msg-Id` value, `stored_nanos` the stored time.
 pub struct Delivery {
     pub subject: String,
     pub payload: Vec<u8>,
     pub token: AckToken,
+    pub message_ids: Vec<String>,
+    pub stored_nanos: Option<u64>,
 }
 
 
@@ -146,4 +148,5 @@ pub struct Link {
     pub settings: Arc<ReloadEngine<IngestSettings>>,
     pub session: Mutex<Option<Session>>,
     pub next_token: AtomicU64,
+    pub refused_field: Mutex<Option<&'static str>>,
 }

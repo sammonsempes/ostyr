@@ -1,6 +1,8 @@
 use crate::cardinality::CardinalityState;
+use crate::insert::{Batch, InsertError};
 use crate::model::{DropReason, Limits, Outcome};
 use crate::run::{RunError, RunReport};
+use crate::settings::MetricsSettings;
 use prost::DecodeError;
 use serde::de::IgnoredAny;
 use serde_json::value::RawValue;
@@ -50,3 +52,14 @@ pub type RunFn<'a> = dyn Fn(&Path, &[u8], &str, &mut CardinalityState, u64, &Ela
 
 
 pub type KeySet = BTreeMap<String, IgnoredAny>;
+
+
+/// Counts by fixed name, never by payload text.
+pub type Tally = BTreeMap<String, u64>;
+
+
+/// Sends the batches for one cycle under one deadline and returns how many went out; a failure carries the count sent.
+pub type StoreFn = dyn Fn(&MetricsSettings, &[Batch]) -> Result<usize, InsertError>;
+
+
+pub type NowFn = dyn Fn() -> u64;
