@@ -53,7 +53,7 @@
         "ALL"
       ],
       "command": [
-        "/usr/local/bin/platform_api",
+        "/usr/local/bin/ostyr-platform",
         "/etc/ostyr/module.yaml"
       ],
       "depends_on": {

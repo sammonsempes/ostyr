@@ -5002,6 +5002,8 @@ dependencies = [
  "grc",
  "hunt-packs",
  "oncall",
+ "pg-fake",
+ "rcgen",
  "remote-shell",
  "risk-score",
  "serde_json",

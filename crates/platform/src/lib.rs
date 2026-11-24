@@ -4,4 +4,5 @@ pub mod error;
 pub mod merge;
 pub mod model;
 pub mod permits;
+pub mod serve;
 pub mod types;

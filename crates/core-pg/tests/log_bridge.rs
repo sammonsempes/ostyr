@@ -8,8 +8,32 @@ use walkdir::WalkDir;
 const BRIDGE_MARKERS: [&str; 6] = ["LogTracer", "tracing_log", "fmt::init(", ".init()", ".try_init()", ".set_default("];
 
 
+const FILTERED_BRIDGE_FILE: &str = "platform/src/serve.rs";
+
+
+const FILTER_MARKER: &str = "ignore_crate(LOG_IGNORED_CRATE)";
+
+
 pub fn installs_bridge(text: &str) -> bool {
     BRIDGE_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+
+pub fn is_filtered_bridge(path: &Path, text: &str) -> bool {
+    path.ends_with(FILTERED_BRIDGE_FILE) && text.contains(FILTER_MARKER)
+}
+
+
+#[test]
+fn only_the_platform_service_may_bridge_and_only_with_the_filter() -> Result<(), Box<dyn Error>> {
+    let bridge = "tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;";
+    assert!(is_filtered_bridge(Path::new("crates/platform/src/serve.rs"), bridge));
+    assert!(!is_filtered_bridge(
+        Path::new("crates/platform/src/serve.rs"),
+        "tracing_log::LogTracer::init()"
+    ));
+    assert!(!is_filtered_bridge(Path::new("crates/other/src/serve.rs"), bridge));
+    Ok(())
 }
 
 
@@ -64,6 +88,7 @@ fn no_crate_source_installs_a_log_bridge() -> Result<(), Box<dyn Error>> {
     let offenders = sources
         .iter()
         .filter_map(|entry| match bridge_in_file(entry.path(), read_text) {
+            Ok(true) if read_text(entry.path()).is_ok_and(|text| is_filtered_bridge(entry.path(), &text)) => None,
             Ok(true) => Some(Ok(entry.path().display().to_string())),
             Ok(false) => None,
             Err(message) => Some(Err(message)),
