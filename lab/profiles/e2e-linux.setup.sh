@@ -344,20 +344,17 @@ export NATS_PASSWORD
 nats() {
     /usr/local/share/ostyr-lab/client/nats --server "tls://$DATASTORE_DOMAIN:$NATS_PORT" --tlsfirst --tlsca "$DATASTORE_CA" --user "$NATS_USER" "$@"
 }
-DEAD_MAX_MSGS=10000
-DEAD_MAX_BYTES=104857600
-DEAD_MAX_AGE=24h
 add_stream() {
     nats stream info "$1" >/dev/null 2>&1 || nats stream add "$1" --subjects "$2" --storage file --retention limits --discard old \
-        --max-msgs="$3" --max-bytes="$4" --max-age="$5" --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
+        --max-msgs=-1 --max-bytes=-1 --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window "$duplicate_window" --replicas 1 \
         --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
 }
 add_durable() {
     nats consumer info events "$1" >/dev/null 2>&1 || nats consumer add events "$1" --pull --deliver all --ack explicit --filter 'events.>' --replay instant \
         --max-deliver=-1 --max-pending 1000 --no-headers-only --wait "$ACK_WAIT" --defaults >/dev/null
 }
-add_stream events 'events.>' -1 -1 -1
-add_stream dead 'dead.events' "$DEAD_MAX_MSGS" "$DEAD_MAX_BYTES" "$DEAD_MAX_AGE"
+add_stream events 'events.>'
+add_stream dead 'dead.events'
 for durable in siem-ingest detection metrics-ingest; do
     add_durable "$durable"
 done
