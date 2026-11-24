@@ -13,9 +13,14 @@ use sample::entry;
 use std::error::Error;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
+use std::time::Duration;
 use types::TestResult;
+
+
+const HANG_GUARD_SECONDS: u64 = 600;
 
 
 const EXTRA_QUEUED: usize = 3;
@@ -37,6 +42,17 @@ const YIELDS_WHILE_HELD: usize = 20_000;
 
 
 const QUEUE_WAIT_YIELDS: usize = 100_000_000;
+
+
+fn guarded(body: fn() -> TestResult) -> TestResult {
+    let (sender, receiver) = mpsc::channel();
+    let detached = thread::spawn(move || sender.send(body().map_err(|error| error.to_string())));
+    drop(detached);
+    receiver
+        .recv_timeout(Duration::from_secs(HANG_GUARD_SECONDS))
+        .map_err(|error| format!("hang guard expired: {error}"))??;
+    Ok(())
+}
 
 
 #[derive(Debug, Default)]
@@ -393,23 +409,25 @@ fn a_follower_parked_through_a_slow_sync_gets_ok_after_it_never_poisoned() -> Te
 
 #[test]
 fn a_leader_that_panics_in_the_writer_hands_the_lead_to_a_waiter_who_refuses_every_queued_entry() -> TestResult {
-    let (log, gate) = spawn_log(gated_sync, true)?;
-    let (first, second) = (entry(0)?, entry(1)?);
-    let (leader_panicked, follower_outcome) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
-        let leader = scope.spawn(|| append(&log, first));
-        await_latch(&gate.entered);
-        let follower = scope.spawn(|| append(&log, second));
-        assert!(wait_until_queued(&log, 1));
-        raise(&gate.release);
-        let leader_panicked = leader.join().is_err();
-        let follower_outcome = follower.join().map_err(|_| "follower panicked")?;
-        Ok((leader_panicked, follower_outcome))
-    })?;
-    assert!(leader_panicked);
-    assert!(matches!(follower_outcome, Err(AuditError::LogPoisoned)));
-    assert!(matches!(append(&log, entry(0)?), Err(AuditError::LogPoisoned)));
-    assert!(log.pending.lock().map_err(|error| error.to_string())?.entries.is_empty());
-    Ok(())
+    guarded(|| {
+        let (log, gate) = spawn_log(gated_sync, true)?;
+        let (first, second) = (entry(0)?, entry(1)?);
+        let (leader_panicked, follower_outcome) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+            let leader = scope.spawn(|| append(&log, first));
+            await_latch(&gate.entered);
+            let follower = scope.spawn(|| append(&log, second));
+            assert!(wait_until_queued(&log, 1));
+            raise(&gate.release);
+            let leader_panicked = leader.join().is_err();
+            let follower_outcome = follower.join().map_err(|_| "follower panicked")?;
+            Ok((leader_panicked, follower_outcome))
+        })?;
+        assert!(leader_panicked);
+        assert!(matches!(follower_outcome, Err(AuditError::LogPoisoned)));
+        assert!(matches!(append(&log, entry(0)?), Err(AuditError::LogPoisoned)));
+        assert!(log.pending.lock().map_err(|error| error.to_string())?.entries.is_empty());
+        Ok(())
+    })
 }
 
 
@@ -434,30 +452,32 @@ fn a_panicked_writer_lock_refuses_every_queued_entry() -> TestResult {
 
 #[test]
 fn an_append_queued_behind_a_leader_blocked_on_another_state_holder_is_answered_when_it_lets_go() -> TestResult {
-    let log = log_with(None, counting_sync);
-    let held = Gate::default();
-    let (leader_record, follower_record) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
-        let holder = scope.spawn(|| {
-            if let Ok(guard) = log.state.lock() {
-                raise(&held.entered);
-                await_latch(&held.release);
-                drop(guard);
-            }
-        });
-        await_latch(&held.entered);
-        let (first, second) = (entry(0)?, entry(1)?);
-        let leader = scope.spawn(|| append(&log, first));
-        assert!(wait_until_queued(&log, 1));
-        let follower = scope.spawn(|| append(&log, second));
-        assert!(wait_until_queued(&log, TWO_GROUPS));
-        raise(&held.release);
-        holder.join().map_err(|_| "holder panicked")?;
-        let leader_record = leader.join().map_err(|_| "leader panicked")??;
-        let follower_record = follower.join().map_err(|_| "follower panicked")??;
-        Ok((leader_record, follower_record))
-    })?;
-    assert_eq!(follower_record.previous_hash, leader_record.hash);
-    Ok(())
+    guarded(|| {
+        let log = log_with(None, counting_sync);
+        let held = Gate::default();
+        let (leader_record, follower_record) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+            let holder = scope.spawn(|| {
+                if let Ok(guard) = log.state.lock() {
+                    raise(&held.entered);
+                    await_latch(&held.release);
+                    drop(guard);
+                }
+            });
+            await_latch(&held.entered);
+            let (first, second) = (entry(0)?, entry(1)?);
+            let leader = scope.spawn(|| append(&log, first));
+            assert!(wait_until_queued(&log, 1));
+            let follower = scope.spawn(|| append(&log, second));
+            assert!(wait_until_queued(&log, TWO_GROUPS));
+            raise(&held.release);
+            holder.join().map_err(|_| "holder panicked")?;
+            let leader_record = leader.join().map_err(|_| "leader panicked")??;
+            let follower_record = follower.join().map_err(|_| "follower panicked")??;
+            Ok((leader_record, follower_record))
+        })?;
+        assert_eq!(follower_record.previous_hash, leader_record.hash);
+        Ok(())
+    })
 }
 
 
@@ -484,36 +504,38 @@ fn head_reads_beside_a_sequential_appender_never_strand_an_append() -> TestResul
 
 #[test]
 fn a_filled_caller_returns_while_another_thread_holds_the_writer_lock() -> TestResult {
-    let log = log_with(None, counting_sync);
-    let held = Gate::default();
-    let returned = AtomicBool::new(false);
-    let returned_before_release = AtomicBool::new(false);
-    let slot: Slot = Arc::new(SlotCell::default());
-    let record = append(&log, entry(0)?)?;
-    leave_outcome(&slot, Ok(record.clone()));
-    thread::scope(|scope| -> TestResult {
-        let holder = scope.spawn(|| {
-            if let Ok(guard) = log.state.lock() {
-                raise(&held.entered);
-                let seen = (0..QUEUE_WAIT_YIELDS).any(|_| {
-                    thread::yield_now();
-                    returned.load(Ordering::SeqCst)
-                });
-                returned_before_release.store(seen, Ordering::SeqCst);
-                drop(guard);
-            }
-        });
-        await_latch(&held.entered);
-        let mut queue = log.pending.lock().map_err(|error| error.to_string())?;
-        queue.leader_active = true;
-        let answer = await_answer(&log, queue, &slot);
-        returned.store(true, Ordering::SeqCst);
-        holder.join().map_err(|_| "holder panicked")?;
-        assert!(matches!(answer, Ok(ref taken) if taken.hash == record.hash));
+    guarded(|| {
+        let log = log_with(None, counting_sync);
+        let held = Gate::default();
+        let returned = AtomicBool::new(false);
+        let returned_before_release = AtomicBool::new(false);
+        let slot: Slot = Arc::new(SlotCell::default());
+        let record = append(&log, entry(0)?)?;
+        leave_outcome(&slot, Ok(record.clone()));
+        thread::scope(|scope| -> TestResult {
+            let holder = scope.spawn(|| {
+                if let Ok(guard) = log.state.lock() {
+                    raise(&held.entered);
+                    let seen = (0..QUEUE_WAIT_YIELDS).any(|_| {
+                        thread::yield_now();
+                        returned.load(Ordering::SeqCst)
+                    });
+                    returned_before_release.store(seen, Ordering::SeqCst);
+                    drop(guard);
+                }
+            });
+            await_latch(&held.entered);
+            let mut queue = log.pending.lock().map_err(|error| error.to_string())?;
+            queue.leader_active = true;
+            let answer = await_answer(&log, queue, &slot);
+            returned.store(true, Ordering::SeqCst);
+            holder.join().map_err(|_| "holder panicked")?;
+            assert!(matches!(answer, Ok(ref taken) if taken.hash == record.hash));
+            Ok(())
+        })?;
+        assert!(returned_before_release.load(Ordering::SeqCst));
         Ok(())
-    })?;
-    assert!(returned_before_release.load(Ordering::SeqCst));
-    Ok(())
+    })
 }
 
 

@@ -384,6 +384,7 @@ pub fn switch_audit(
     next.into_iter().for_each(|candidate| {
         let previous = std::mem::replace(&mut *current.lock().unwrap_or_else(PoisonError::into_inner), candidate.path);
         *state.audit.state.lock().unwrap_or_else(PoisonError::into_inner) = candidate.state;
+        state.audit.state.clear_poison();
         let moved = format!("audit_log moved from {} to {}", previous.display(), settings.config.audit_log.display());
         append_declared(
             &state.audit,

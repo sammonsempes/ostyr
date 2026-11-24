@@ -407,9 +407,6 @@ pub fn continue_log(file: File) -> Result<AuditLog<File>, AuditError> {
 pub const MAX_GROUP_RECORDS: usize = 256;
 
 
-pub const MAX_LEAD_ROUNDS: usize = 1_000_000;
-
-
 /// Queues the entry; one leader (elected under `pending`) seals, writes and syncs a group once. Returns only after the sync covering this record.
 pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
     let slot: Slot = Arc::new(SlotCell::default());
@@ -450,10 +447,11 @@ pub fn lead<Output: Write>(log: &AuditLog<Output>, own: &Slot) -> Result<Record,
     let mut leadership = Leadership { log, group: Vec::new() };
     match log.state.lock() {
         Ok(mut state) => {
-            (0..MAX_LEAD_ROUNDS).any(|_| {
+            std::iter::repeat_with(|| {
                 flush_group(&mut leadership, &mut state);
                 answered(own)
-            });
+            })
+            .any(|done| done);
         }
         Err(_) => fail_pending(log),
     }
