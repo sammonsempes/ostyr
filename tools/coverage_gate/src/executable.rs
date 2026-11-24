@@ -8,7 +8,7 @@ use syn::{Expr, ImplItem, Item, TraitItem};
 const WINDOWS_ONLY: &str = "windows";
 
 
-const LIVE_ONLY: &str = "feature = \"ebpf-live\"";
+const LIVE_ONLY: [&str; 2] = ["feature = \"ebpf-load\"", "feature = \"ebpf-live-test\""];
 
 
 pub fn is_code(item: &Item) -> bool {
@@ -40,11 +40,11 @@ pub fn is_windows_only(attribute: &syn::Attribute) -> bool {
 
 
 pub fn is_live_only(attribute: &syn::Attribute) -> bool {
-    matches!(&attribute.meta, syn::Meta::List(list) if list.path.is_ident("cfg") && list.tokens.to_string() == LIVE_ONLY)
+    matches!(&attribute.meta, syn::Meta::List(list) if list.path.is_ident("cfg") && LIVE_ONLY.contains(&list.tokens.to_string().as_str()))
 }
 
 
-/// `in_boundary` is true for a file of the eBPF boundary crate, the only place where a file gated on `ebpf-live` is not counted.
+/// `in_boundary` is true for a file of the eBPF boundary crate, the only place where a file gated on `ebpf-load` or `ebpf-live-test` is not counted.
 pub fn has_executable_code(text: &str, in_boundary: bool) -> Result<bool, syn::Error> {
     syn::parse_file(text).map(|file| executable_in(&file, in_boundary))
 }
