@@ -7,7 +7,9 @@ use agent_channel::types::ShutdownSignal;
 use siem_ingest::logging::build_subscriber;
 use std::error::Error;
 use std::io::stderr;
+use std::net::SocketAddr;
 use std::path::Path;
+use tokio::sync::oneshot;
 
 
 pub const USAGE: &str = "usage: ostyr-event-gateway <server.yaml> <gateway.yaml>";
@@ -41,6 +43,14 @@ pub fn stop_signal() -> std::io::Result<ShutdownSignal> {
 }
 
 
+/// Logs `serving` only when the gateway signals that every start file is open; a refused start drops the sender and logs nothing.
+pub async fn announce_serving(address: SocketAddr, started: oneshot::Receiver<()>) {
+    if started.await.is_ok() {
+        tracing::info!(%address, "serving");
+    }
+}
+
+
 /// `arguments` are the server file and the gateway file; any other count is the usage error.
 pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (server_path, gateway_path) = match arguments {
@@ -55,6 +65,9 @@ pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error + Send + Sync
     let relay = bind_relay(&server).await?;
     let address = listener.local_addr()?;
     let stop = stop_signal()?;
-    tracing::info!(%address, "serving");
-    Ok(run_gateway(server, gateway, listener, relay, stop).await?)
+    let (ready, started) = oneshot::channel();
+    let announce = tokio::spawn(announce_serving(address, started));
+    let outcome = run_gateway(server, gateway, listener, relay, stop, Some(ready)).await;
+    announce.await?;
+    Ok(outcome?)
 }

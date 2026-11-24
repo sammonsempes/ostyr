@@ -734,6 +734,7 @@ async fn start_farm(server: &ServerFile) -> Result<Farm, Box<dyn std::error::Err
             }
         }),
         file_events(server)?,
+        None,
     ));
     Ok(Farm {
         server: server.clone(),

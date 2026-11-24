@@ -5,7 +5,7 @@ use crate::session::new_gateway;
 use crate::settings::open_settings;
 use agent_channel::app::{alerting_audit, debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::server_app::{run_server, ServerFile};
-use agent_channel::types::ShutdownSignal;
+use agent_channel::types::{ReadySender, ShutdownSignal};
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
@@ -20,15 +20,19 @@ pub fn load_gateway_file(path: &Path) -> Result<GatewayFile, GatewayError> {
 }
 
 
-/// Serves the agent channel with the JetStream sink until `shutdown`; the gateway settings reload on file change and on `SIGHUP`, each audited.
+/// Serves the agent channel with the JetStream sink until `shutdown`; `ready` fires once every start file is open and the signal handlers are registered; the gateway settings reload on file change and on `SIGHUP`, each audited.
 pub async fn run_gateway(
     server: ServerFile,
     gateway: GatewayFile,
     listener: TcpListener,
     relay: Option<TcpListener>,
     shutdown: ShutdownSignal,
+    ready: Option<ReadySender>,
 ) -> Result<(), GatewayError> {
-    let log = Arc::new(open_file_log(&gateway.audit_file)?);
+    let log = Arc::new(open_file_log(&gateway.audit_file).map_err(|source| GatewayError::AuditFile {
+        path: gateway.audit_file.clone(),
+        source,
+    })?);
     let engine = Arc::new(open_settings(
         gateway.settings_file.clone(),
         alerting_audit(shared_log_audit(&log)),
@@ -39,5 +43,5 @@ pub async fn run_gateway(
     let shared = Arc::new(new_gateway(engine));
     let _summary = spawn_summary(Arc::clone(&shared.refusals), millis(SUMMARY_INTERVAL_MS));
     let sink = gateway_sink(shared);
-    Ok(run_server(server, listener, relay, shutdown, sink).await?)
+    Ok(run_server(server, listener, relay, shutdown, sink, ready).await?)
 }
