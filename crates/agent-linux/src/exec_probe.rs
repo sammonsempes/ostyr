@@ -1,5 +1,5 @@
 use crate::error::SourceError;
-use crate::exec_events::{deliver_or_stop, Delivery, ExecSink};
+use crate::exec_events::{deliver_or_stop, Delivery, ExecSink, ThreadDelivery};
 use crate::types::{ProbeFn, ProbeJob, ProbeResult, SharedExecProbe, SpawnFn};
 use agent_channel::types::PauseFn;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
@@ -22,6 +22,12 @@ pub const EXEC_PROBE_RETRY_SECONDS: u64 = 60;
 
 
 pub const EXEC_PROBE_TICK_SECONDS: u64 = 1;
+
+
+pub const EXEC_PROBE_JOIN_POLLS: u32 = 50;
+
+
+pub const EXEC_PROBE_JOIN_POLL_MILLIS: u64 = 100;
 
 
 pub const EXEC_PROBE_MAX_POLLS: u32 = u32::MAX;
@@ -58,6 +64,9 @@ pub const RESULT_UNLOADED: &str = "unloaded";
 
 
 pub const RESULT_ABANDONED: &str = "abandoned";
+
+
+pub const RESULT_UNLOAD_UNKNOWN: &str = "unload_unknown";
 
 
 pub const CAUSE_PANIC: &str = "Panic";
@@ -181,7 +190,10 @@ pub fn start(env: &ProbeEnv, now: u64) -> io::Result<ProbeRun> {
     let (job_stop, job_loaded, attached_loaded, job_records) = (Arc::clone(&stop), Arc::clone(&loaded), Arc::clone(&loaded), Arc::clone(&records));
     let (probe, sink) = (env.probe, env.sink.clone());
     let job: ProbeJob = Box::new(move || {
-        let mut state = Delivery::default();
+        let mut thread_state = ThreadDelivery {
+            sink: sink.clone(),
+            state: Delivery::default(),
+        };
         probe(
             &job_stop,
             EXEC_PROBE_MAX_POLLS,
@@ -189,7 +201,7 @@ pub fn start(env: &ProbeEnv, now: u64) -> io::Result<ProbeRun> {
             &mut |drained| {
                 job_loaded.store(true, Ordering::Relaxed);
                 job_records.fetch_add(drained.records.len(), Ordering::Relaxed);
-                state = deliver_or_stop(&sink, std::mem::take(&mut state), &drained, &job_stop, &failure_sender);
+                thread_state.state = deliver_or_stop(&sink, std::mem::take(&mut thread_state.state), &drained, &job_stop, &failure_sender);
             },
         )
     });
@@ -230,6 +242,19 @@ pub fn settle_ended(tenant: &str, audit: &SharedAuditFn, was_loaded: bool, load_
             record(audit, probe_entry(tenant, ACTION_LOAD, RESULT_LOADED, None, None));
         }
         record(audit, probe_entry(tenant, ACTION_UNLOAD, RESULT_UNLOADED, None, Some(records)));
+    }
+}
+
+
+/// A probe still running when the agent ends: `abandoned` when it never attached, else the `loaded` record when missing and one `unload_unknown` (the thread's unload is not seen).
+pub fn settle_unjoined(tenant: &str, audit: &SharedAuditFn, was_loaded: bool, load_reported: bool, records: usize) {
+    if !was_loaded {
+        record(audit, probe_entry(tenant, ACTION_LOAD, RESULT_ABANDONED, None, None));
+    } else {
+        if !load_reported {
+            record(audit, probe_entry(tenant, ACTION_LOAD, RESULT_LOADED, None, None));
+        }
+        record(audit, probe_entry(tenant, ACTION_UNLOAD, RESULT_UNLOAD_UNKNOWN, None, Some(records)));
     }
 }
 
@@ -325,7 +350,11 @@ pub fn tick(controller: Controller, enabled: bool, now: u64, env: &ProbeEnv, aud
         spool_error: spool_error.or(settled.spool_error),
         ..settled
     };
-    start_if_due(remembered, enabled, now, env, audit)
+    if remembered.spool_error.is_some() {
+        remembered
+    } else {
+        start_if_due(remembered, enabled, now, env, audit)
+    }
 }
 
 
@@ -346,9 +375,38 @@ pub async fn run_exec_controller(
         pause(Duration::from_secs(EXEC_PROBE_TICK_SECONDS)).await;
         ticks += 1;
     }
-    match controller.spool_error.take() {
+    let mut ended = if controller.spool_error.is_some() {
+        join_ended(controller, env, audit, pause).await
+    } else {
+        controller
+    };
+    match ended.spool_error.take() {
         Some(error) => Err(error),
-        None => Ok(controller),
+        None => Ok(ended),
+    }
+}
+
+
+/// The probe thread of an ended controller, joined under a deadline of `EXEC_PROBE_JOIN_POLLS` pauses so its unload is audited: `finish` when it ended, else `settle_unjoined`.
+pub async fn join_ended(controller: Controller, env: &ProbeEnv, audit: &SharedAuditFn, pause: &PauseFn) -> Controller {
+    let mut polls = 0;
+    while controller.run.as_ref().is_some_and(|run| !run.handle.is_finished()) && polls < EXEC_PROBE_JOIN_POLLS {
+        pause(Duration::from_millis(EXEC_PROBE_JOIN_POLL_MILLIS)).await;
+        polls += 1;
+    }
+    match controller.run {
+        Some(run) if run.handle.is_finished() => finish(Controller { run: None, ..controller }, run, env, audit),
+        Some(run) => {
+            settle_unjoined(
+                &env.tenant,
+                audit,
+                run.loaded.load(Ordering::Relaxed),
+                run.loaded_reported,
+                run.records.load(Ordering::Relaxed),
+            );
+            Controller { run: None, ..controller }
+        }
+        None => controller,
     }
 }
 
