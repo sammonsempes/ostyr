@@ -19,9 +19,14 @@ use std::fs;
 use std::io::{self, BufReader};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use types::TestResult;
+
+
+const HANG_GUARD_SECONDS: u64 = 600;
 
 
 const THREADS: usize = 8;
@@ -88,25 +93,41 @@ fn successful_sync_function_is_called() -> TestResult {
 }
 
 
+fn guarded(body: fn() -> TestResult) -> TestResult {
+    let (sender, receiver) = mpsc::channel();
+    let detached = thread::spawn(move || sender.send(body().map_err(|error| error.to_string())));
+    drop(detached);
+    receiver
+        .recv_timeout(Duration::from_secs(HANG_GUARD_SECONDS))
+        .map_err(|error| match error {
+            RecvTimeoutError::Timeout => "hang guard expired".to_owned(),
+            RecvTimeoutError::Disconnected => "guarded body panicked".to_owned(),
+        })??;
+    Ok(())
+}
+
+
 #[test]
 fn concurrent_appenders_produce_one_valid_chain() -> TestResult {
-    let log = Arc::new(genesis_log(Vec::new()));
-    thread::scope(|scope| {
-        (0..THREADS).for_each(|worker| {
-            let shared = Arc::clone(&log);
-            scope.spawn(move || {
-                (0..APPENDS_PER_THREAD).for_each(|index| {
-                    if let Ok(new) = entry(worker * APPENDS_PER_THREAD + index) {
-                        assert!(append(&shared, new).is_ok());
-                    }
+    guarded(|| {
+        let log = Arc::new(genesis_log(Vec::new()));
+        thread::scope(|scope| {
+            (0..THREADS).for_each(|worker| {
+                let shared = Arc::clone(&log);
+                scope.spawn(move || {
+                    (0..APPENDS_PER_THREAD).for_each(|index| {
+                        if let Ok(new) = entry(worker * APPENDS_PER_THREAD + index) {
+                            assert!(append(&shared, new).is_ok());
+                        }
+                    });
                 });
             });
         });
-    });
-    let state = Arc::try_unwrap(log).map_err(|_| "log still shared")?.state.into_inner()?;
-    let report = verify(state.writer.as_slice(), Some(&state.head))?;
-    assert_eq!(report.records, THREADS * APPENDS_PER_THREAD);
-    Ok(())
+        let state = Arc::try_unwrap(log).map_err(|_| "log still shared")?.state.into_inner()?;
+        let report = verify(state.writer.as_slice(), Some(&state.head))?;
+        assert_eq!(report.records, THREADS * APPENDS_PER_THREAD);
+        Ok(())
+    })
 }
 
 

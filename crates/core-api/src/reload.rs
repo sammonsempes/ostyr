@@ -383,7 +383,14 @@ pub fn switch_audit(
         .filter(|candidate| candidate.path == settings.config.audit_log);
     next.into_iter().for_each(|candidate| {
         let previous = std::mem::replace(&mut *current.lock().unwrap_or_else(PoisonError::into_inner), candidate.path);
-        *state.audit.state.lock().unwrap_or_else(PoisonError::into_inner) = candidate.state;
+        let mut held = state.audit.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let replaced_poisoned = state.audit.state.is_poisoned();
+        *held = candidate.state;
+        state.audit.state.clear_poison();
+        drop(held);
+        if replaced_poisoned {
+            tracing::warn!("the replaced audit log was poisoned, the new log starts clean");
+        }
         let moved = format!("audit_log moved from {} to {}", previous.display(), settings.config.audit_log.display());
         append_declared(
             &state.audit,
