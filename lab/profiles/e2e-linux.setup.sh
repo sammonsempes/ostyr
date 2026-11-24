@@ -366,22 +366,24 @@ dead_die() {
 ((DEAD_MAX_MSGS >= DEAD_MAX_MSGS_PER_TENANT * DEAD_TENANT_BUDGET)) || dead_die "DEAD_MAX_MSGS is below the per-tenant budget"
 dead_limits=(--subjects 'dead.events.*' --max-msgs="$DEAD_MAX_MSGS" --max-bytes="$DEAD_MAX_BYTES" --max-age=0 --max-msg-size="$DEAD_MAX_MSG_SIZE"
     --max-msgs-per-subject="$DEAD_MAX_MSGS_PER_TENANT")
+dead_settings=(--discard old --dupe-window "$duplicate_window" --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge)
 add_dead_stream() {
     if nats stream info dead >/dev/null 2>&1; then
-        nats stream edit dead --force "${dead_limits[@]}" >/dev/null
+        nats stream edit dead --force "${dead_limits[@]}" "${dead_settings[@]}" >/dev/null
     else
-        nats stream add dead "${dead_limits[@]}" --storage file --retention limits --discard old --dupe-window "$duplicate_window" --replicas 1 \
-            --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+        nats stream add dead "${dead_limits[@]}" "${dead_settings[@]}" --storage file --retention limits >/dev/null
     fi
     nats stream info dead --json | python3 -I -c '
 import json, sys
 config = json.load(sys.stdin)["config"]
 wanted = {"subjects": ["dead.events.*"], "max_msgs": int(sys.argv[1]), "max_bytes": int(sys.argv[2]), "max_age": 0,
-          "max_msg_size": int(sys.argv[3]), "max_msgs_per_subject": int(sys.argv[4]), "discard": "old"}
+          "max_msg_size": int(sys.argv[3]), "max_msgs_per_subject": int(sys.argv[4]), "discard": "old",
+          "allow_rollup_hdrs": False, "deny_delete": False, "deny_purge": False, "retention": "limits", "storage": "file", "num_replicas": 1,
+          "duplicate_window": int(sys.argv[5][:-1]) * 60 * 10**9}
 bad = [name for name, value in wanted.items() if config.get(name) != value]
 if bad:
     sys.exit("dead stream read back differs on " + " ".join(bad))
-' "$DEAD_MAX_MSGS" "$DEAD_MAX_BYTES" "$DEAD_MAX_MSG_SIZE" "$DEAD_MAX_MSGS_PER_TENANT" || dead_die "the stream read back differs from the limits"
+' "$DEAD_MAX_MSGS" "$DEAD_MAX_BYTES" "$DEAD_MAX_MSG_SIZE" "$DEAD_MAX_MSGS_PER_TENANT" "$duplicate_window" || dead_die "the stream read back differs from the limits"
 }
 add_dead_stream
 for durable in siem-ingest detection metrics-ingest; do

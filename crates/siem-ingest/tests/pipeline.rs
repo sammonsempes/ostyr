@@ -773,3 +773,23 @@ fn a_dead_letter_published_directly_is_recorded_for_its_tenant() -> Result<(), B
     );
     Ok(())
 }
+
+
+#[test]
+fn the_dead_letter_groups_are_logged_before_a_fetch_error_returns() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    let message = Message {
+        tenant: "tenant-a".to_owned(),
+        payload: b"x".to_vec(),
+        token: TOKEN_ONE,
+    };
+    rig.pipeline.pending.insert(TOKEN_ONE, message);
+    let mut report = CycleReport::default();
+    dead_letter(&mut rig.pipeline, TOKEN_ONE, "reason", &mut report);
+    rig.queue.items.lock().map_err(|_| "poisoned")?.push_back(Err("bus down".to_owned()));
+    let (outcome, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert!(matches!(outcome, Err(PipelineError::Fetch(_))));
+    assert!(logs.contains("dead letters of this cycle") && logs.contains("tenant-a/other=1"), "{logs}");
+    assert!(rig.pipeline.dead_groups.groups.is_empty());
+    Ok(())
+}

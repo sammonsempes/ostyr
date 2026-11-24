@@ -190,7 +190,9 @@ pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> 
     let mut report = CycleReport::default();
     let carried = std::mem::take(&mut pipeline.carry);
     carried.into_iter().for_each(|message| offer(pipeline, message, &mut report));
-    let deliveries = (pipeline.wiring.fetch)(settings.max_batch_messages).map_err(PipelineError::Fetch)?;
+    let fetched = (pipeline.wiring.fetch)(settings.max_batch_messages).map_err(PipelineError::Fetch);
+    log_dead_groups(&mut pipeline.dead_groups);
+    let deliveries = fetched?;
     report.fetched = deliveries.len();
     deliveries
         .into_iter()
