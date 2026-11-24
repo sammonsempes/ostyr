@@ -1,5 +1,4 @@
 use ebpf_probes::limiter::{admit, take_dropped, Limiter, MAX_EXEC_EVENTS_PER_SECOND, NANOS_PER_SECOND};
-use ebpf_probes::settings::ProbeSettings;
 use std::error::Error;
 
 
@@ -56,12 +55,5 @@ fn a_clock_step_backwards_never_refills() -> Result<(), Box<dyn Error>> {
 fn the_first_event_at_clock_zero_is_admitted() -> Result<(), Box<dyn Error>> {
     let mut limiter = Limiter::default();
     assert!(admit(&mut limiter, 0));
-    Ok(())
-}
-
-
-#[test]
-fn exec_events_are_off_by_default() -> Result<(), Box<dyn Error>> {
-    assert!(!ProbeSettings::default().exec_events);
     Ok(())
 }

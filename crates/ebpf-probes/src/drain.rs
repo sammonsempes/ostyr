@@ -59,6 +59,18 @@ pub struct DrainReport {
 }
 
 
+/// Sums the per-CPU values of the drop counter; a sum past `u64::MAX` stays there.
+pub fn sum_per_cpu(values: &[u64]) -> u64 {
+    values.iter().fold(0, |sum: u64, value| sum.saturating_add(*value))
+}
+
+
+/// Whether the probe may go on to attach: false once `stop` is set (a disable seen during a slow load).
+pub fn may_proceed(stop: &AtomicBool) -> bool {
+    !stop.load(Ordering::Relaxed)
+}
+
+
 /// Reads at most `max_records` raw records, decodes each (a refused one is counted with its length only) and rate limits by the record's own kernel time.
 pub fn decode_batch(raw: &mut dyn Iterator<Item = Vec<u8>>, limiter: &mut Limiter, max_records: usize) -> Batch {
     let mut batch = raw.take(max_records).fold(Batch::default(), |mut batch, bytes| {

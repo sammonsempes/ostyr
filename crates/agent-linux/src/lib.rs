@@ -8,6 +8,8 @@ pub mod capabilities;
 pub mod cursor;
 #[cfg(unix)]
 pub mod error;
+#[cfg(target_os = "linux")]
+pub mod exec_probe;
 #[cfg(unix)]
 pub mod fim;
 #[cfg(unix)]

@@ -73,7 +73,9 @@ const FILL_BYTE: u8 = 7;
 const READ_LIMIT: u64 = 4;
 
 
-const OPEN_COUNTER: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/object-open-counter-written-by-one-test-only");
+fn open_counter() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("object-open-counter-{}", std::process::id()))
+}
 
 
 fn file_meta() -> Meta {
@@ -112,7 +114,7 @@ fn count_file_open() -> Result<(), Errno> {
     OpenOptions::new()
         .append(true)
         .create(true)
-        .open(OPEN_COUNTER)
+        .open(open_counter())
         .and_then(|mut counter| counter.write_all(b"x"))
         .map_err(|_| Errno::IO)
 }
@@ -435,13 +437,14 @@ fn a_path_that_is_not_plain_never_opens_anything() -> Result<(), Box<dyn Error>>
 
 #[test]
 fn the_object_is_opened_exactly_once() -> Result<(), Box<dyn Error>> {
-    if Path::new(OPEN_COUNTER).exists() {
-        fs::remove_file(OPEN_COUNTER)?;
+    let counter = open_counter();
+    if counter.exists() {
+        fs::remove_file(&counter)?;
     }
     let bytes = read_object_with(Path::new("/a/b/exec.o"), counting_open, fake_stat)?;
     assert_eq!(bytes, fs::read(SYSTEM_FILE)?);
-    assert_eq!(fs::metadata(OPEN_COUNTER)?.len(), 1);
-    fs::remove_file(OPEN_COUNTER)?;
+    assert_eq!(fs::metadata(&counter)?.len(), 1);
+    fs::remove_file(&counter)?;
     Ok(())
 }
 

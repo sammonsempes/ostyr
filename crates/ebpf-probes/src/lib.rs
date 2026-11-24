@@ -9,7 +9,6 @@ pub mod loader;
 #[cfg(target_os = "linux")]
 pub mod object;
 pub mod record;
-pub mod settings;
 #[cfg(target_os = "linux")]
 pub mod shape;
 pub mod types;

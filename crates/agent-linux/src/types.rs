@@ -1,9 +1,15 @@
 use crate::error::CapabilityError;
 use crate::error::IsolationError;
 use crate::error::SensorError;
-use crate::model::{CommandSpec, Failure, LinuxFile, MetricsSettings, OsquerySettings, Paths, SensorSettings, SourceSettings, UpdateSettings};
+use crate::model::{
+    CommandSpec, ExecProbeSettings, Failure, LinuxFile, MetricsSettings, OsquerySettings, Paths, SensorSettings, SourceSettings, UpdateSettings,
+};
 use arc_swap::ArcSwap;
 use core_config::reload::ReloadEngine;
+#[cfg(target_os = "linux")]
+use ebpf_probes::drain::Drained;
+#[cfg(target_os = "linux")]
+use ebpf_probes::error::LoadError;
 use parking_lot::Mutex;
 use patch_inventory::model::Inventory;
 use std::collections::BTreeMap;
@@ -11,7 +17,9 @@ use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 
@@ -67,6 +75,28 @@ pub type SharedOsquery = Arc<ArcSwap<OsquerySettings>>;
 pub type SharedMetrics = Arc<ArcSwap<MetricsSettings>>;
 
 
+pub type SharedExecProbe = Arc<ArcSwap<ExecProbeSettings>>;
+
+
+/// What the probe thread returns: the polls it made, or the fixed reason it never ran.
+#[cfg(target_os = "linux")]
+pub type ProbeResult = Result<u32, LoadError>;
+
+
+/// Loads the probe and polls it until the flag is set (production: `ebpf_probes::loader::run_exec_probe` when built with `ebpf`, else `not_built`); a test double injects any outcome.
+#[cfg(target_os = "linux")]
+pub type ProbeFn = fn(&AtomicBool, u32, &mut dyn FnMut(Drained)) -> ProbeResult;
+
+
+#[cfg(target_os = "linux")]
+pub type ProbeJob = Box<dyn FnOnce() -> ProbeResult + Send>;
+
+
+/// Starts the probe thread (production: `exec_probe::spawn_thread`); a test double injects a refusal.
+#[cfg(target_os = "linux")]
+pub type SpawnFn = fn(ProbeJob) -> std::io::Result<JoinHandle<ProbeResult>>;
+
+
 /// A settings engine with the shared handles its subscriber keeps current.
 pub type SettingsEngine = (
     ReloadEngine<LinuxFile>,
@@ -75,6 +105,7 @@ pub type SettingsEngine = (
     SharedUpdates,
     SharedOsquery,
     SharedMetrics,
+    SharedExecProbe,
 );
 
 
