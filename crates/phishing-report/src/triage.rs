@@ -784,7 +784,7 @@ fn is_undecoded(message: &Message<'_>, part: &MessagePart<'_>, text: &str) -> bo
             || Encoding::for_label(name.trim().as_bytes()).is_none()
     });
     let escape_allowed = label.is_some_and(is_iso_2022_jp);
-    let unlabelled_meta = label.is_none() && has_foreign_meta_charset(text);
+    let unlabelled_meta = has_foreign_meta_charset(text);
     unknown_label
         || has_lost_bytes(text, escape_allowed)
         || has_duplicate_charset(part)
@@ -839,10 +839,9 @@ fn is_allowed_meta(window: &[u8]) -> bool {
 
 
 fn has_encoding_declaration(window: &[u8]) -> bool {
-    let declaration = find_bytes(window, XML_DECLARATION_END)
+    find_bytes(window, XML_DECLARATION_END)
         .and_then(|end| window.get(..end))
-        .unwrap_or(window);
-    find_bytes(declaration, ENCODING_WORD).is_some()
+        .is_none_or(|declaration| find_bytes(declaration, ENCODING_WORD).is_some())
 }
 
 

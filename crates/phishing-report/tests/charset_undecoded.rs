@@ -202,7 +202,7 @@ fn an_unlabelled_part_declaring_a_foreign_charset_in_a_meta_tag_is_flagged() -> 
         "text/html; charset=utf-8",
         b"<meta charset=\"shift_jis\">https://plain.evil.test/x",
     ))?;
-    assert!(labelled.uncertain_reasons.is_empty());
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
     let late = format!("{}<meta charset=\"shift_jis\">", "a".repeat(LONG_PADDING));
     assert_eq!(
         run(&mail_with_body("text/html", late.as_bytes()))?.uncertain_reasons,
@@ -507,7 +507,7 @@ fn a_meta_spelled_with_character_references_or_unlisted_is_flagged() -> Result<(
 
 
 #[test]
-fn a_meta_tag_without_a_close_inside_the_window_is_flagged_and_a_labelled_part_is_not() -> Result<(), Box<dyn std::error::Error>> {
+fn a_meta_tag_without_a_close_inside_the_window_is_flagged_labelled_or_not() -> Result<(), Box<dyn std::error::Error>> {
     let long = format!("<meta charset=utf-8{}>", " ".repeat(LONG_PADDING));
     assert_eq!(
         run(&mail_with_body("text/html", long.as_bytes()))?.uncertain_reasons,
@@ -519,7 +519,7 @@ fn a_meta_tag_without_a_close_inside_the_window_is_flagged_and_a_labelled_part_i
         ["charset_undecoded"]
     );
     let labelled = run(&mail_with_body("text/html; charset=utf-8", b"<meta name=viewport>"))?;
-    assert!(labelled.uncertain_reasons.is_empty());
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
     Ok(())
 }
 
@@ -547,7 +547,29 @@ fn an_xml_declaration_naming_an_encoding_is_flagged() -> Result<(), Box<dyn std:
             Ok::<(), Box<dyn std::error::Error>>(())
         })?;
     let labelled = run(&mail_with_body("text/html; charset=utf-8", b"<?xml encoding=shift_jis?>"))?;
-    assert!(labelled.uncertain_reasons.is_empty());
+    assert_eq!(labelled.uncertain_reasons, ["charset_undecoded"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_padded_xml_declaration_is_flagged() -> Result<(), Box<dyn std::error::Error>> {
+    let padded = format!("<?xml version=\"1.0\"{}encoding=\"shift_jis\"?><html></html>", " ".repeat(LONG_PADDING));
+    let unclosed = format!("<?xml version=\"1.0\"{}", " ".repeat(LONG_PADDING));
+    [padded, unclosed].iter().try_for_each(|body| {
+        let record = run(&mail_with_body("text/html", body.as_bytes()))?;
+        assert_eq!(record.uncertain_reasons, ["charset_undecoded"]);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_foreign_meta_in_a_labelled_part_is_flagged_and_an_allowlisted_one_is_not() -> Result<(), Box<dyn std::error::Error>> {
+    let flagged = run(&mail_with_body("text/html; charset=windows-1252", b"<html><meta charset=shift_jis>"))?;
+    assert_eq!(flagged.uncertain_reasons, ["charset_undecoded"]);
+    let clean = run(&mail_with_body("text/html; charset=utf-8", b"<meta charset=\"utf-8\">"))?;
+    assert!(clean.uncertain_reasons.is_empty());
     Ok(())
 }
 
