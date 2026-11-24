@@ -4,6 +4,7 @@ use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
 use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, Reading, ReporterPolicy, Shapes, Triage, UrlHit, UrlIndex};
 use crate::policy::{check_policy, is_internal, is_strict_domain};
+use crate::region::ambiguous_parts;
 use crate::scan::{scan, Scan};
 use crate::shapes::has_reference;
 use crate::text::{clean, clean_address, is_refused_address};
@@ -305,7 +306,7 @@ fn is_auth_header(header: &Header<'_>) -> bool {
 
 
 /// The raw header value bytes, never the decoded ones; `None` when the name is not found at the recorded offset.
-fn raw_bytes<'a>(message: &'a Message<'_>, header: &Header<'_>) -> Option<&'a [u8]> {
+pub(crate) fn raw_bytes<'a>(message: &'a Message<'_>, header: &Header<'_>) -> Option<&'a [u8]> {
     let base = message.parts.first().map_or(0, |root| root.offset_header) as usize;
     let raw = message.raw_message();
     let relative = |offset: u32| (offset as usize).checked_sub(base);
@@ -629,6 +630,9 @@ const CHARSET_UNDECODED: &str = "charset_undecoded";
 const CHARSET_MISMATCH: &str = "charset_mismatch";
 
 
+const HEADER_REGION_AMBIGUOUS: &str = "header_region_ambiguous";
+
+
 const RAW_HEAD: &str = "Content-Type: application/octet-stream\r\nContent-Transfer-Encoding: ";
 
 
@@ -748,6 +752,9 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     mark_once(&mut record, undecoded, CHARSET_UNDECODED);
     let mismatched = record.counts.charset_mismatch > 0;
     mark_once(&mut record, mismatched, CHARSET_MISMATCH);
+    record.counts.header_region_ambiguous += ambiguous_parts(message, context.limits);
+    let region_ambiguous = record.counts.header_region_ambiguous > 0;
+    mark_once(&mut record, region_ambiguous, HEADER_REGION_AMBIGUOUS);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -875,7 +882,7 @@ fn split_parameters(raw: &str) -> Vec<String> {
 }
 
 
-fn parameter_pairs(raw: &str) -> Vec<(String, String)> {
+pub(crate) fn parameter_pairs(raw: &str) -> Vec<(String, String)> {
     split_parameters(raw)
         .iter()
         .filter_map(|parameter| parameter.split_once('='))
@@ -889,7 +896,7 @@ fn parameter_pairs(raw: &str) -> Vec<(String, String)> {
 }
 
 
-fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) -> impl Iterator<Item = Option<&'a [u8]>> {
+pub(crate) fn content_type_raws<'a>(message: &'a Message<'_>, part: &'a MessagePart<'_>) -> impl Iterator<Item = Option<&'a [u8]>> {
     part.headers()
         .iter()
         .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))

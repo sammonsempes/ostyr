@@ -17,6 +17,7 @@ pub struct Counts {
     pub parts_skipped: usize,
     pub charset_undecoded: usize,
     pub charset_mismatch: usize,
+    pub header_region_ambiguous: usize,
     pub attachments_skipped: usize,
     pub urls_refused: usize,
     pub urls_dropped: usize,
