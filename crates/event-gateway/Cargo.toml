@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 thiserror = "2"
-tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time", "net", "io-util", "sync", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time", "net", "io-util", "sync", "macros", "signal"] }
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 
 [dev-dependencies]
