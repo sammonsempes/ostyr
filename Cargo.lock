@@ -4029,6 +4029,7 @@ dependencies = [
 name = "metrics-ingest"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
  "core-config",
  "core-pg",
  "log",

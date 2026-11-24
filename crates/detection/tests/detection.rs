@@ -913,6 +913,7 @@ fn queued(subject: &str, payload: &str) -> Queued {
         payload: payload.as_bytes().to_vec(),
         extra_headers: 0,
         repeated_values: 0,
+        message_ids: Vec::new(),
     }
 }
 

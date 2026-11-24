@@ -38,6 +38,8 @@ pub fn deliveries(events: &str, tenant: &str) -> Vec<Delivery> {
             subject: format!("{EVENTS_SUBJECT_PREFIX}.{tenant}"),
             payload: line.as_bytes().to_vec(),
             token: index as u64 + 1,
+            message_ids: Vec::new(),
+            stored_nanos: None,
         })
         .collect()
 }

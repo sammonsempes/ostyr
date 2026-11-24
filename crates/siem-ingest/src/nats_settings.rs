@@ -46,6 +46,9 @@ pub const LIMIT_NATS_SUBJECT_BYTES: usize = 128;
 pub const MS_PER_SECOND: u64 = 1000;
 
 
+pub const RESPONSE_THRESHOLD_MS: u64 = 60_000;
+
+
 pub const BATCH_AGE_FACTOR: u64 = 2;
 
 
@@ -124,6 +127,19 @@ pub fn check_auth(settings: &IngestSettings) -> Result<(), SettingsError> {
 }
 
 
+/// The export of MSG.NEXT answers a pull for at most `RESPONSE_THRESHOLD_MS`: a fetch deadline and request timeout that reach it would be cut by the server.
+pub fn check_response_window(settings: &IngestSettings) -> Result<(), SettingsError> {
+    if settings.nats_fetch_deadline_ms + settings.nats_request_timeout_ms < RESPONSE_THRESHOLD_MS {
+        Ok(())
+    } else {
+        Err(SettingsError::Invalid {
+            field: "nats_fetch_deadline_ms",
+            reason: "with nats_request_timeout_ms must stay below the 60 s response threshold of the MSG.NEXT export",
+        })
+    }
+}
+
+
 /// Every NATS value is bounded; the JetStream names and the dead-letter subject are literal tokens.
 pub fn validate_nats_settings(settings: &IngestSettings) -> Result<(), SettingsError> {
     check_nats_url(&settings.nats_url, settings.nats_tls_first)?;
@@ -133,6 +149,7 @@ pub fn validate_nats_settings(settings: &IngestSettings) -> Result<(), SettingsE
     check_range("nats_fetch_deadline_ms", settings.nats_fetch_deadline_ms, LIMIT_NATS_MS)?;
     check_range("nats_request_timeout_ms", settings.nats_request_timeout_ms, LIMIT_NATS_MS)?;
     check_range("nats_ack_wait_ms", settings.nats_ack_wait_ms, LIMIT_NATS_MS)?;
+    check_response_window(settings)?;
     check_order(
         (
             "max_batch_age_seconds x 2000 (ms)",

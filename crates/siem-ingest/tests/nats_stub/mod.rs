@@ -69,11 +69,15 @@ pub const MAX_ACK_PENDING: u64 = 1000;
 pub const MAX_WAITING: u64 = 512;
 
 
+pub const STORED_NANOS: u64 = 1_790_230_470_084_404_000;
+
+
 pub struct Queued {
     pub subject: String,
     pub payload: Vec<u8>,
     pub extra_headers: usize,
     pub repeated_values: usize,
+    pub message_ids: Vec<String>,
 }
 
 
@@ -352,11 +356,12 @@ pub fn queued_message(state: &mut StubState, queued: Queued, inbox: &str) -> Out
     state.delivered += 1;
     let distinct: String = (0..queued.extra_headers).map(|index| format!("X-{index}: v\r\n")).collect();
     let repeated: String = (0..queued.repeated_values).map(|index| format!("X-Same: v{index}\r\n")).collect();
-    let extra = format!("{distinct}{repeated}");
+    let identified: String = queued.message_ids.iter().map(|id| format!("Nats-Msg-Id: {id}\r\n")).collect();
+    let extra = format!("{distinct}{repeated}{identified}");
     Outgoing {
         target: inbox.to_owned(),
         subject: Some(queued.subject),
-        ack_reply: Some(format!("$JS.ACK.events.siem-ingest.1.{0}.{0}.0.0", state.delivered)),
+        ack_reply: Some(format!("$JS.ACK.events.siem-ingest.1.{0}.{0}.{STORED_NANOS}.0", state.delivered)),
         headers: (!extra.is_empty()).then(|| format!("NATS/1.0\r\n{extra}\r\n")),
         payload: queued.payload,
     }
