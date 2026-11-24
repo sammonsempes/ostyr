@@ -3,6 +3,8 @@ mod types;
 
 
 use core_config::parse::parse_document;
+use core_config::strict::{feature_reason, ANCHORS_REFUSED};
+use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
 use synthetic_checks::load::{load_checks, runner_location_ok};
 use synthetic_checks::model::{
@@ -310,5 +312,17 @@ fn a_runner_location_is_ascii_and_in_the_text_grammar() -> TestResult {
     assert!(!runner_location_ok("a\nb"));
     assert!(!runner_location_ok(&"x".repeat(MAX_LOCATION_LEN + 1)));
     assert!(runner_location_ok(&"x".repeat(MAX_LOCATION_LEN)));
+    Ok(())
+}
+
+
+#[test]
+fn an_alias_event_without_an_anchor_is_refused_by_the_shared_walk() -> TestResult {
+    let span = Span::default();
+    assert_eq!(feature_reason(&Event::Alias(1), &span, "", true), Some(ANCHORS_REFUSED));
+    assert_eq!(
+        feature_reason(&Event::UnresolvedAlias("a".into()), &span, "", true),
+        Some(ANCHORS_REFUSED)
+    );
     Ok(())
 }
