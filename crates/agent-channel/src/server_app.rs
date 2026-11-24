@@ -135,6 +135,7 @@ pub async fn run_server_with_clock(
         file.settings_file.clone(),
         shared_log_audit(&log),
         reload_context(&file.settings_file, SERVER_MODULE, SERVER_TENANT, "settings-reload"),
+        listeners.1.is_some(),
     )?;
     let (opened_revocations, revocations) = open_revocation_engine(
         file.revocation_file.clone(),

@@ -1,5 +1,6 @@
-use crate::harness::long_tempdir;
+use crate::harness::{init_logging, long_tempdir};
 use crate::services::agent_identity;
+use crate::spool_refused::captured_log;
 use crate::state::{envelope_source, make_audited_state, make_live_state, new_stored, recording_audit, recording_sink};
 use crate::types::TestResult;
 use agent_channel::error::SettingsError;
@@ -64,7 +65,7 @@ fn a_reload_changes_the_bound_for_new_connections_and_is_audited() -> TestResult
     let dir = long_tempdir()?;
     write_bound(dir.path(), FIRST_BOUND)?;
     let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
-    let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context())?;
+    let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context(), false)?;
     let state = make_live_state(shared);
     let first = open_slot(&state, &agent(), SlotKind::Connection)?;
     assert!(open_slot(&state, &agent(), SlotKind::Connection).is_err());
@@ -92,7 +93,7 @@ fn an_invalid_reload_keeps_the_old_settings() -> TestResult {
     let dir = long_tempdir()?;
     write_bound(dir.path(), SECOND_BOUND)?;
     let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
-    let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context())?;
+    let (engine, shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context(), false)?;
     let state = make_live_state(shared);
     fs::write(dir.path().join(SETTINGS_FILE), "max_message_bytes: 0\n")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("max_message_bytes")));
@@ -112,12 +113,12 @@ fn the_first_load_must_be_valid() -> TestResult {
     let dir = long_tempdir()?;
     let audit = || recording_audit(Arc::new(Mutex::new(Vec::new())));
     assert!(matches!(
-        open_settings_engine(dir.path().join(SETTINGS_FILE), audit(), context()),
+        open_settings_engine(dir.path().join(SETTINGS_FILE), audit(), context(), false),
         Err(SettingsError::Config(_))
     ));
     fs::write(dir.path().join(SETTINGS_FILE), "max_total_connections: 0\n")?;
     assert!(matches!(
-        open_settings_engine(dir.path().join(SETTINGS_FILE), audit(), context()),
+        open_settings_engine(dir.path().join(SETTINGS_FILE), audit(), context(), false),
         Err(SettingsError::Invalid(_))
     ));
     Ok(())
@@ -258,5 +259,25 @@ fn a_message_bound_above_the_sink_line_limit_is_refused() -> TestResult {
         .ok_or("accepted")?
         .to_string()
         .contains("max_message_bytes"));
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_without_relay_sources_warns_only_when_a_relay_listener_is_configured() -> TestResult {
+    init_logging()?;
+    let dir = long_tempdir()?;
+    write_bound(dir.path(), FIRST_BOUND)?;
+    let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let (without, _shared) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(Arc::clone(&recorded)), context(), false)?;
+    let (with, _other) = open_settings_engine(dir.path().join(SETTINGS_FILE), recording_audit(recorded), context(), true)?;
+    write_bound(dir.path(), SECOND_BOUND)?;
+    let (captured, _guard) = captured_log();
+    assert!(matches!(reload(&without), ReloadOutcome::Applied { .. }));
+    assert!(!String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?.contains("no relay_sources"));
+    write_bound(dir.path(), CAPACITY)?;
+    assert!(matches!(reload(&with), ReloadOutcome::Applied { .. }));
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert_eq!(log.lines().filter(|line| line.contains("no relay_sources")).count(), 1);
     Ok(())
 }
