@@ -1,7 +1,7 @@
 use crate::types::TestResult;
 use core_audit::log::{append, genesis_log};
-use core_config::reload::ReloadContext;
-use hunt_packs::settings::{hunt_state, open_hunt, tick_limits, validate_hunt, HuntSettings, HuntSettingsError, OpenError};
+use core_config::reload::{current_config, reload, ReloadContext, ReloadOutcome};
+use hunt_packs::settings::{hunt_state, open_hunt, open_hunt_from, tick_limits, validate_hunt, HuntSettings, HuntSettingsError, OpenError};
 use hunt_packs::tick::DEFAULT_MAX_TENANTS;
 use std::fs;
 use std::io;
@@ -120,5 +120,27 @@ fn opening_refuses_unknown_keys_bad_bounds_and_a_missing_file() -> TestResult {
         Err(OpenError::Config(_))
     ));
     assert!(matches!(open_text(&format!("{BASE}tick_seconds: 1\n")), Err(OpenError::Invalid(_))));
+    Ok(())
+}
+
+
+#[test]
+fn the_engine_baseline_is_the_value_the_caller_read_not_a_second_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("hunt.yaml");
+    let swapped = BASE.replace("/a/audit.log", "/b/audit.log");
+    fs::write(&file, format!("{swapped}tick_seconds: 60\n"))?;
+    let log = genesis_log(io::sink());
+    let context = ReloadContext {
+        actor_id: "t".to_owned(),
+        tenant: "all".to_owned(),
+        module: "t".to_owned(),
+        target: "t".to_owned(),
+        request_id: "t".to_owned(),
+    };
+    let engine = open_hunt_from(file, settings(), Box::new(move |entry| append(&log, entry)), context)?;
+    assert_eq!(current_config(&engine).audit_file, settings().audit_file);
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
+    assert_eq!(current_config(&engine).audit_file, settings().audit_file);
     Ok(())
 }

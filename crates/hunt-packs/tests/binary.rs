@@ -11,7 +11,7 @@ use core_audit::log::open_file_log;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use hunt_packs::model::HuntPack;
 use hunt_packs::packs::load_file;
-use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, run_one, setup_failed, start};
+use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, AUDIT_TENANT};
 use hunt_packs::store::GET_SQL;
 use hunt_packs::types::InterruptWait;
 use metric_alerts::fetch::FetchError;
@@ -452,5 +452,33 @@ fn the_reload_audit_appends_to_the_file_log() -> TestResult {
     let text = fs::read_to_string(dir.path().join("audit.log"))?;
     assert_eq!(text.lines().count(), 1);
     assert!(text.contains("\"denied\""), "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn the_reload_context_names_the_non_customer_tenant_and_the_file() -> TestResult {
+    let context = reload_context(Path::new("/etc/hunt.yaml"));
+    assert_eq!(AUDIT_TENANT, "all");
+    assert_eq!(context.tenant, "all");
+    assert_eq!(context.target, "/etc/hunt.yaml");
+    assert_eq!((context.actor_id.as_str(), context.module.as_str()), ("ostyr-hunt", "hunt-packs"));
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_audit_record_carries_the_tenant_all() -> TestResult {
+    let dir = tempdir()?;
+    let log = open_file_log(&dir.path().join("audit.log"))?;
+    let engine_audit = boxed_reload_audit(log);
+    let context = reload_context(Path::new("hunt.yaml"));
+    let entry = NewEntry {
+        tenant: context.tenant,
+        ..reload_entry()
+    };
+    engine_audit(entry)?;
+    let text = fs::read_to_string(dir.path().join("audit.log"))?;
+    assert!(text.contains("\"tenant\":\"all\""), "{text}");
     Ok(())
 }

@@ -2,10 +2,11 @@ use crate::schedule::MAX_GRACE_SECONDS;
 use crate::tick::{check_limits, TickError, TickLimits, DEFAULT_MAX_RUNS, DEFAULT_MAX_RUNS_PER_TICK, DEFAULT_MAX_TENANTS};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
-use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
+use core_config::reload::{open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{ConfigState, SharedAuditFn};
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 
@@ -123,9 +124,29 @@ pub fn hunt_subscriber(started_with: PathBuf, started_audit: PathBuf) -> Subscri
 
 /// Loads and validates the first settings; later reloads go through the subscriber and are refused (and audited `denied`) when invalid.
 pub fn open_hunt(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadContext) -> Result<ReloadEngine<HuntSettings>, OpenError> {
-    let mut engine = open_engine(Box::new(move || load_file::<HuntSettings>(&path)), hunt_state, Vec::new(), audit, context)?;
-    let first = current_config(&engine);
+    let first = load_file::<HuntSettings>(&path)?;
+    open_hunt_from(path, first, audit, context)
+}
+
+
+/// Opens the engine on settings the caller already read: that value is the baseline, the file is read again only by reloads.
+pub fn open_hunt_from(
+    path: PathBuf,
+    first: HuntSettings,
+    audit: Box<SharedAuditFn>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<HuntSettings>, OpenError> {
     validate_hunt(&first)?;
+    let seeded = AtomicBool::new(false);
+    let seed = first.clone();
+    let loader = move || {
+        if seeded.swap(true, Ordering::SeqCst) {
+            load_file::<HuntSettings>(&path)
+        } else {
+            Ok(seed.clone())
+        }
+    };
+    let mut engine = open_engine(Box::new(loader), hunt_state, Vec::new(), audit, context)?;
     engine
         .subscribers
         .push(hunt_subscriber(first.pg_settings.clone(), first.audit_file.clone()));

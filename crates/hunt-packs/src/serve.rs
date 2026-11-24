@@ -7,7 +7,7 @@ use crate::model::HuntPack;
 use crate::run::{run_pack, HuntOutcome, RunError};
 use crate::schedule::due_runs;
 use crate::service::{run_service, ServiceReport, SettingsSource};
-use crate::settings::{open_hunt, HuntSettings, HuntSettingsError};
+use crate::settings::{open_hunt_from, HuntSettings, HuntSettingsError};
 use crate::store::{Param, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE};
 use crate::tick::Hooks;
 use crate::types::{InterruptWait, SleepFuture};
@@ -35,6 +35,9 @@ const USAGE: &str = "usage: ostyr-hunt <hunt.yaml>";
 
 
 const WORKER_THREADS: usize = 2;
+
+
+pub const AUDIT_TENANT: &str = "all";
 
 
 const UNBOUNDED_ROUNDS: u64 = u64::MAX;
@@ -122,18 +125,24 @@ pub async fn serve_hunt(arguments: &[String], interrupt: InterruptWait) -> Resul
 }
 
 
+/// The audit identity of a reload: the tenant is the non-customer `all`, the diff lists every tenant of the service.
+pub fn reload_context(hunt_file: &Path) -> ReloadContext {
+    ReloadContext {
+        actor_id: "ostyr-hunt".to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
+        module: "hunt-packs".to_owned(),
+        target: hunt_file.display().to_string(),
+        request_id: "hunt-reload".to_owned(),
+    }
+}
+
+
 pub async fn start(hunt_file: &Path, rounds: u64, interrupt: InterruptWait) -> Result<ServiceReport, Box<dyn Error>> {
     let first = load_file::<HuntSettings>(hunt_file)?;
     first.audit_file.is_absolute().then_some(()).ok_or(HuntSettingsError::AuditFile)?;
     let audit_log = open_file_log(&first.audit_file)?;
-    let context = ReloadContext {
-        actor_id: "ostyr-hunt".to_owned(),
-        tenant: "system".to_owned(),
-        module: "hunt-packs".to_owned(),
-        target: hunt_file.display().to_string(),
-        request_id: "hunt-reload".to_owned(),
-    };
-    let engine = open_hunt(hunt_file.to_path_buf(), boxed_reload_audit(audit_log), context)?;
+    let context = reload_context(hunt_file);
+    let engine = open_hunt_from(hunt_file.to_path_buf(), first, boxed_reload_audit(audit_log), context)?;
     let started = current_config(&engine);
     let client = connect(&load_settings(&started.pg_settings)?).await?;
     migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
