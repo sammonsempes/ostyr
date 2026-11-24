@@ -624,6 +624,7 @@ fn files(dir: &Path, page: &str, with_pg: bool) -> Result<AppFile, std::io::Erro
         settings_file: dir.join("settings.yaml"),
         audit_file: dir.join("audit.log"),
         pg_file: with_pg.then(|| dir.join("pg.yaml")),
+        listen_address: None,
     })
 }
 

@@ -1,4 +1,4 @@
-//! Usage: status_api <module.yaml> <server.yaml> <public-address>. Serves the incident write routes through core-api and, in the same process, the public page of `status_server`.
+//! Usage: status_api <module.yaml> <server.yaml> <public-address>. Serves the incident write routes through core-api and, in the same process, the public page of `ostyr-status-page`.
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
 use alerts::settings::{api_startup_reloads, open_pg_engine_from, SETTING_PG};
 use core_api::config::DEFAULT_LOG_LEVEL;
