@@ -90,6 +90,12 @@ const LIMITED_THIRD: u64 = 3;
 const PENDING_LIMITED: u64 = 4;
 
 
+const FAILING_DRAIN_LIMITED: u64 = 7;
+
+
+const FAILING_DRAIN_DROPPED: u64 = 9;
+
+
 const LAST_STATUS: u64 = 7;
 
 
@@ -480,24 +486,35 @@ fn a_failing_spool_write_stops_the_probe_and_reaches_the_controller() -> TestRes
         spool: fixture.dir.path().join("blocked"),
         ..fixture.sink.clone()
     };
-    let batch = drained(vec![record(REFUSED_PID, 0, "a")], KernelDropped::Counted(0));
+    let batch = Drained {
+        report: report(KernelDropped::Counted(FAILING_DRAIN_DROPPED), FAILING_DRAIN_LIMITED, 0),
+        ..drained(vec![record(REFUSED_PID, 0, "a")], KernelDropped::Counted(0))
+    };
     assert!(deliver(&broken, Delivery::default(), &batch).is_err());
     let stop = AtomicBool::new(false);
     let (sender, receiver) = channel();
-    let kept = Delivery {
+    let pending = Delivery {
         losses: Losses {
             limited: PENDING_LIMITED,
             ..Losses::default()
         },
         last_status: Some(LAST_STATUS),
     };
-    let after = deliver_or_stop(&broken, kept.clone(), &batch, &stop, &sender);
+    let kept = Delivery {
+        losses: Losses {
+            limited: PENDING_LIMITED + FAILING_DRAIN_LIMITED,
+            kernel_dropped: FAILING_DRAIN_DROPPED,
+            ..Losses::default()
+        },
+        ..pending.clone()
+    };
+    let after = deliver_or_stop(&broken, pending.clone(), &batch, &stop, &sender);
     assert_eq!(after, kept);
     assert!(stop.load(Ordering::Relaxed));
     assert_eq!(receiver.try_iter().count(), 1);
     drop(receiver);
     let orphan_stop = AtomicBool::new(false);
-    assert_eq!(deliver_or_stop(&broken, kept.clone(), &batch, &orphan_stop, &sender), kept);
+    assert_eq!(deliver_or_stop(&broken, pending, &batch, &orphan_stop, &sender), kept);
     assert!(orphan_stop.load(Ordering::Relaxed));
     Ok(())
 }

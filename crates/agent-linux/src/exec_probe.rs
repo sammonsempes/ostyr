@@ -259,9 +259,14 @@ pub fn settle_unjoined(tenant: &str, audit: &SharedAuditFn, was_loaded: bool, lo
 }
 
 
-/// Joins a finished thread (it is finished, so the join never waits): the one place a panic becomes `panicked`.
-pub fn finish(controller: Controller, run: ProbeRun, env: &ProbeEnv, audit: &SharedAuditFn) -> Controller {
+/// Joins a finished thread (it is finished, so the join never waits): the one place a panic becomes `panicked`, and the last read of its failure channel, so an error sent just before the thread ended is never lost.
+pub fn finish(earlier: Controller, run: ProbeRun, env: &ProbeEnv, audit: &SharedAuditFn) -> Controller {
     let records = run.records.load(Ordering::Relaxed);
+    let late_error = run.failures.try_iter().next();
+    let controller = Controller {
+        spool_error: earlier.spool_error.or(late_error),
+        ..earlier
+    };
     match run.handle.join() {
         Ok(Ok(_polls)) => {
             settle_ended(&env.tenant, audit, run.loaded.load(Ordering::Relaxed), run.loaded_reported, records);
