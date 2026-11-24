@@ -37,7 +37,7 @@ const GROUP_OTHER_WRITE: u32 = 0o022;
 /// Why the switch file is refused, named in the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchCause {
-    Unreadable,
+    Unreadable(ErrorKind),
     NotRegular,
     Owner,
     Writable,
@@ -96,20 +96,14 @@ pub fn read_switch_bytes(reader: &mut dyn Read) -> Result<Vec<u8>, SwitchCause> 
     reader
         .take(MAX_SWITCH_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| {
-            tracing::warn!(%error, "the shell switch file cannot be read");
-            SwitchCause::Unreadable
-        })
+        .map_err(|error| SwitchCause::Unreadable(error.kind()))
         .map(|_count| bytes)
 }
 
 
 /// The kind, owner and mode of the opened handle, then its bytes: both come from the one handle.
 pub fn judge_handle(file: &mut File, owner: u32, inspect: InspectFn) -> Result<SwitchState, SwitchCause> {
-    let metadata = inspect(file).map_err(|error| {
-        tracing::warn!(%error, "the shell switch file cannot be inspected");
-        SwitchCause::Unreadable
-    })?;
+    let metadata = inspect(file).map_err(|error| SwitchCause::Unreadable(error.kind()))?;
     match fault_of(&metadata, owner) {
         Some(cause) => Err(cause),
         None => read_switch_bytes(file).map(|bytes| judge_bytes(&bytes)),
@@ -131,10 +125,7 @@ pub fn read_switch_with(path: &Path, owner: u32, inspect: InspectFn) -> SwitchSt
     match open_switch(path) {
         Ok(mut file) => judge_handle(&mut file, owner, inspect).unwrap_or_else(SwitchState::Refused),
         Err(error) if error.kind() == ErrorKind::NotFound => SwitchState::Disabled,
-        Err(error) => {
-            tracing::warn!(%error, "the shell switch file cannot be opened");
-            SwitchState::Refused(SwitchCause::Unreadable)
-        }
+        Err(error) => SwitchState::Refused(SwitchCause::Unreadable(error.kind())),
     }
 }
 

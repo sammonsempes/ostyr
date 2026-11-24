@@ -110,6 +110,7 @@ pub struct SharedHooks<'env> {
 /// The spawn and cleanup of one session, both built from the one account resolution of that session, with the uid it resolved to.
 pub struct SessionHooks {
     pub uid: u32,
+    pub previous_holders: usize,
     pub spawn: Box<SpawnFn>,
     pub cleanup: Box<CleanupFn>,
 }

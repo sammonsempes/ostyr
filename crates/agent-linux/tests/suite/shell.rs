@@ -126,9 +126,12 @@ fn a_link_a_directory_or_an_uninspectable_handle_is_refused_by_name() -> TestRes
     let target = switch_with(directory.path(), ENABLED_BYTES, PRIVATE_FILE)?;
     let link = directory.path().join("link.yaml");
     symlink(&target, &link)?;
-    assert_eq!(read_switch(&link, owner), SwitchState::Refused(SwitchCause::Unreadable));
+    assert!(matches!(read_switch(&link, owner), SwitchState::Refused(SwitchCause::Unreadable(_))));
     assert_eq!(read_switch(directory.path(), owner), SwitchState::Refused(SwitchCause::NotRegular));
-    assert_eq!(read_switch_with(&target, owner, fails), SwitchState::Refused(SwitchCause::Unreadable));
+    assert!(matches!(
+        read_switch_with(&target, owner, fails),
+        SwitchState::Refused(SwitchCause::Unreadable(_))
+    ));
     assert_eq!(read_switch_with(&target, owner, File::metadata), SwitchState::Enabled);
     Ok(())
 }
@@ -137,7 +140,7 @@ fn a_link_a_directory_or_an_uninspectable_handle_is_refused_by_name() -> TestRes
 #[test]
 fn a_failing_read_and_a_long_read_are_bounded_and_named() -> TestResult {
     let _log = scoped_logging();
-    assert_eq!(read_switch_bytes(&mut Failing).err(), Some(SwitchCause::Unreadable));
+    assert!(matches!(read_switch_bytes(&mut Failing).err(), Some(SwitchCause::Unreadable(_))));
     let long = vec![b'a'; usize::try_from(MAX_SWITCH_BYTES)? * LONG_FACTOR];
     assert_eq!(
         read_switch_bytes(&mut long.as_slice()).map(|bytes| bytes.len()),
@@ -285,5 +288,25 @@ async fn the_shell_dial_is_built_once_from_the_agent_file() -> TestResult {
     assert!(matches!(broken().await, Err(agent_channel::error::ChannelError::Io { .. })));
     let direct = broken_dial(&missing);
     assert!(direct().await.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn an_unreadable_switch_is_logged_once_with_its_kind_and_never_per_read() -> TestResult {
+    let directory = tempdir()?;
+    let owner = owner_of(directory.path())?;
+    let target = switch_with(directory.path(), ENABLED_BYTES, PRIVATE_FILE)?;
+    let link = directory.path().join("link.yaml");
+    symlink(&target, &link)?;
+    let seen = Mutex::new(None);
+    let logged = captured_logs(|| {
+        assert!(!switch_enabled(&link, owner, &seen));
+        assert!(!switch_enabled(&link, owner, &seen));
+        assert!(!switch_enabled(&link, owner, &seen));
+    })?;
+    assert_eq!(logged.matches("stays disabled").count(), 1, "{logged}");
+    assert_eq!(logged.matches("cannot be").count(), 0, "{logged}");
+    assert!(logged.contains("Unreadable("), "{logged}");
     Ok(())
 }

@@ -193,9 +193,10 @@ pub fn check_enabled(shared: &ShellShared<'_>) -> Result<(), ShellError> {
 }
 
 
-/// When the account now resolves to another uid, the processes of the earlier uid are cleaned first and any leftover refuses the session.
+/// When the account now resolves to another uid, the earlier uid is swept only if no passwd line holds it any more (a reassigned uid is an operator step); a leftover refuses the session.
 pub async fn clear_previous(previous: Option<&SessionHooks>, hooks: &SessionHooks) -> Result<(), ShellError> {
     match previous {
+        Some(earlier) if earlier.uid != hooks.uid && hooks.previous_holders > 0 => Err(ShellError::PreviousUidReassigned),
         Some(earlier) if earlier.uid != hooks.uid => cleanup_verdict((earlier.cleanup)().await),
         _ => Ok(()),
     }
@@ -210,7 +211,7 @@ pub async fn prepare_session(
     previous: Option<&SessionHooks>,
 ) -> Result<SessionHooks, ShellError> {
     check_enabled(shared)?;
-    let hooks = build(account)?;
+    let hooks = build(account, previous.map(|earlier| earlier.uid))?;
     clear_previous(previous, &hooks).await?;
     Ok(hooks)
 }

@@ -35,6 +35,8 @@ pub enum ShellError {
     Spawn(#[source] io::Error),
     #[error("the remote shell is disabled on this host")]
     Disabled,
+    #[error("the uid of the previous shell account is now held by a passwd line: its cleanup is an operator step")]
+    PreviousUidReassigned,
     #[error("the shell account is refused: {0}")]
     Account(#[from] AccountError),
 }

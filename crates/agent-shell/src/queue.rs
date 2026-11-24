@@ -54,6 +54,7 @@ pub fn shell_refusal(error: &ShellError) -> ExecuteRefusal {
         | ShellError::Store(_)
         | ShellError::Dial(_)
         | ShellError::Spawn(_)
+        | ShellError::PreviousUidReassigned
         | ShellError::Account(_) => ExecuteRefusal::Invalid,
     }
 }

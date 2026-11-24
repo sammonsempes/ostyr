@@ -570,11 +570,12 @@ fn leftover_of(directory: &std::path::Path, uid: u32) -> io::Result<usize> {
 }
 
 
-fn logging_hooks(directory: &std::path::Path, uid: u32) -> SessionHooks {
+fn logging_hooks(directory: &std::path::Path, uid: u32, previous_holders: usize) -> SessionHooks {
     let spawn_directory = directory.to_path_buf();
     let cleanup_directory = directory.to_path_buf();
     SessionHooks {
         uid,
+        previous_holders,
         spawn: Box::new(move |_order| {
             let logged = log_line(&spawn_directory, &format!("spawn-{uid}")).and_then(|()| Err(io::Error::other("no pty")));
             Box::pin(std::future::ready(logged))
@@ -587,7 +588,7 @@ fn logging_hooks(directory: &std::path::Path, uid: u32) -> SessionHooks {
 }
 
 
-fn build_from_files(account: &str) -> Result<SessionHooks, ShellError> {
+fn build_from_files(account: &str, previous: Option<u32>) -> Result<SessionHooks, ShellError> {
     let directory = std::path::PathBuf::from(account);
     log_line(&directory, "build").map_err(ShellError::Spawn)?;
     let text = std::fs::read_to_string(directory.join("account")).map_err(ShellError::Spawn)?;
@@ -598,7 +599,10 @@ fn build_from_files(account: &str) -> Result<SessionHooks, ShellError> {
                 name: "ostyr-shell".to_owned(),
             }))
         }
-        number => Ok(logging_hooks(&directory, number.parse().map_err(|_| ShellError::Disabled)?)),
+        number => {
+            let holders = usize::from(previous.is_some() && directory.join("reassigned").exists());
+            Ok(logging_hooks(&directory, number.parse().map_err(|_| ShellError::Disabled)?, holders))
+        }
     }
 }
 
@@ -772,5 +776,30 @@ async fn a_store_directory_open_to_group_or_other_refuses_the_session_before_the
     let refused = run_shell_session(default_order()?, &env_of(&fakes)?).await;
     assert!(matches!(refused, Err(ShellError::Store(StoreError::Insecure { .. }))));
     assert!(!calls_of(&fakes)?.contains(&"spawn-forbidden"));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_previous_uid_held_by_another_passwd_line_is_not_swept_and_refuses_the_session() -> TestResult {
+    let directory = account_directory("7")?;
+    std::fs::write(directory.path().join("reassigned"), "")?;
+    let (handled, log, slot) = worker_log(text_of(&directory)?, vec![("8", "0")], &[SESSION, SECOND_SESSION], true).await?;
+    assert_eq!(handled, TWICE);
+    assert!(!slot);
+    assert_eq!(log, lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build"]));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_held_uid_that_did_not_change_runs_as_before() -> TestResult {
+    let directory = account_directory("7")?;
+    std::fs::write(directory.path().join("reassigned"), "")?;
+    let (_handled, log, _slot) = worker_log(text_of(&directory)?, Vec::new(), &[SESSION, SECOND_SESSION], true).await?;
+    assert_eq!(
+        log,
+        lines_of(&["build", "cleanup-7", "spawn-7", "cleanup-7", "build", "cleanup-7", "spawn-7", "cleanup-7"])
+    );
     Ok(())
 }
