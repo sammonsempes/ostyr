@@ -197,6 +197,19 @@ fn hooks_run<'a>(
     run: &'a intel_feeds::types::RunRetroFn<'a>,
     insert: &'a intel_feeds::types::AlertInsertFn<'a>,
 ) -> Hooks<'a> {
+    hooks_saving(config, clock, wait, stop, run, insert, &|_| Ok(()))
+}
+
+
+fn hooks_saving<'a>(
+    config: &'a (dyn Fn() -> Option<Arc<FeedsFile>> + 'a),
+    clock: &'a (dyn Fn() -> OffsetDateTime + 'a),
+    wait: &'a (dyn Fn(Duration) + 'a),
+    stop: &'a (dyn Fn() -> bool + 'a),
+    run: &'a intel_feeds::types::RunRetroFn<'a>,
+    insert: &'a intel_feeds::types::AlertInsertFn<'a>,
+    save: &'a intel_feeds::types::SaveEndFn<'a>,
+) -> Hooks<'a> {
     Hooks {
         snapshot: config,
         clock,
@@ -204,6 +217,7 @@ fn hooks_run<'a>(
         stop,
         run,
         insert,
+        save,
     }
 }
 
@@ -281,7 +295,7 @@ fn the_schedule_stops_on_the_stop_test_or_after_its_pass_cap_and_picks_up_a_relo
     };
     let insert = |_: &_, _: &_| Ok(0);
     let hooks = hooks_run(&snapshot, &clock, &wait, &never, &run, &insert);
-    let end_state = run_schedule(&hooks, PASS_CAP, &mut |outcome| {
+    let end_state = run_schedule(&hooks, ScheduleState::default(), PASS_CAP, &mut |outcome| {
         seen.borrow_mut().push(matches!(outcome, RoundOutcome::Done { .. }))
     });
     assert!(runs.get() > PAIR_RUNS);
@@ -293,8 +307,85 @@ fn the_schedule_stops_on_the_stop_test_or_after_its_pass_cap_and_picks_up_a_relo
     };
     let stopping = hooks_run(&snapshot, &clock, &wait, &counting_stop, &run, &insert);
     let before = runs.get();
-    run_schedule(&stopping, PASS_CAP, &mut |_| ());
+    run_schedule(&stopping, ScheduleState::default(), PASS_CAP, &mut |_| ());
     assert_eq!(runs.get(), before + 1);
     assert_eq!(passes.get(), PAIR_RUNS);
+    Ok(())
+}
+
+
+#[test]
+fn a_good_round_saves_its_end_a_failed_round_saves_nothing_and_a_failed_save_does_not_stop_the_schedule() -> TestResult {
+    let current: RefCell<Option<Arc<FeedsFile>>> = RefCell::new(Some(Arc::new(FeedsFile {
+        retro: Some(section()),
+        ..FeedsFile::default()
+    })));
+    let saved = RefCell::new(Vec::new());
+    let broken = Cell::new(false);
+    let failing = Cell::new(false);
+    let snapshot = || current.borrow().clone();
+    let clock = || T0;
+    let wait = |_: Duration| ();
+    let never = || false;
+    let run = |_: &_, start, end, _| {
+        if failing.get() {
+            Err(RetroError::Timeout)
+        } else {
+            Ok(run_of(start, end, None))
+        }
+    };
+    let insert = |_: &_, _: &_| Ok(0);
+    let save = |end| {
+        saved.borrow_mut().push(end);
+        if broken.get() {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        } else {
+            Ok(())
+        }
+    };
+    let hooks = hooks_saving(&snapshot, &clock, &wait, &never, &run, &insert, &save);
+    let (state, done) = pass(&hooks, ScheduleState::default());
+    assert!(matches!(done, Some(RoundOutcome::Done { .. })));
+    assert_eq!(saved.borrow().as_slice(), [T0]);
+    failing.set(true);
+    pass(&hooks, ScheduleState::default());
+    assert_eq!(saved.borrow().len(), 1);
+    failing.set(false);
+    broken.set(true);
+    let (after_broken, again) = pass(&hooks, ScheduleState::default());
+    assert!(matches!(again, Some(RoundOutcome::Done { .. })));
+    assert_eq!(after_broken.previous_end, state.previous_end);
+    assert_eq!(saved.borrow().len(), PAIR);
+    Ok(())
+}
+
+
+#[test]
+fn the_first_round_after_a_restart_gets_the_saved_end_as_its_previous_end() -> TestResult {
+    let current: RefCell<Option<Arc<FeedsFile>>> = RefCell::new(Some(Arc::new(FeedsFile {
+        retro: Some(section()),
+        ..FeedsFile::default()
+    })));
+    let seen = RefCell::new(Vec::new());
+    let passes = Cell::<u32>::default();
+    let snapshot = || current.borrow().clone();
+    let clock = || T0;
+    let wait = |_: Duration| ();
+    let stop = || {
+        passes.set(passes.get() + 1);
+        passes.get() > 1
+    };
+    let run = |_: &_, start, end, previous| {
+        seen.borrow_mut().push(previous);
+        Ok(run_of(start, end, None))
+    };
+    let insert = |_: &_, _: &_| Ok(0);
+    let hooks = hooks_run(&snapshot, &clock, &wait, &stop, &run, &insert);
+    let initial = ScheduleState {
+        previous_end: Some(after(-HOUR)),
+        ..ScheduleState::default()
+    };
+    run_schedule(&hooks, initial, PASS_CAP, &mut |_| ());
+    assert_eq!(seen.borrow().as_slice(), [Some(after(-HOUR))]);
     Ok(())
 }

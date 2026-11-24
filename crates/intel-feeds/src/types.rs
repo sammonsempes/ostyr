@@ -68,3 +68,7 @@ pub type StopFn<'a> = dyn Fn() -> bool + 'a;
 
 
 pub type SnapshotFn<'a> = dyn Fn() -> Option<Arc<FeedsFile>> + 'a;
+
+
+/// Saves the end of a successful window; a failure is logged by the schedule and never stops it.
+pub type SaveEndFn<'a> = dyn Fn(OffsetDateTime) -> io::Result<()> + 'a;
