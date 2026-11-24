@@ -6,7 +6,8 @@ mod types;
 
 use core_audit::error::AuditError;
 use core_audit::log::{
-    append, await_answer, head, lead, leave_outcome, new_log, take_outcome, AuditLog, LogState, Pending, SlotCell, MAX_GROUP_RECORDS,
+    append, await_answer, head, lead, leave_outcome, new_log, publish, take_group, take_outcome, AuditLog, LogState, Pending, SlotCell,
+    MAX_GROUP_RECORDS,
 };
 use core_audit::model::GENESIS_HASH;
 use core_audit::types::Slot;
@@ -644,5 +645,61 @@ fn a_waiter_absent_from_the_queue_leads_one_round_and_is_told_nothing_was_left()
         assert!(matches!(await_answer(&log, held, &stranger), Err(AuditError::LogPoisoned)));
         assert!(!log.pending.lock().map_err(|error| error.to_string())?.leader_active);
         Ok(())
+    })
+}
+
+
+const PARKED_FOLLOWERS: usize = 32;
+
+
+#[test]
+fn every_follower_parked_behind_a_gated_leader_is_woken_and_answered() -> TestResult {
+    guarded(|| {
+        let (log, gate) = spawn_log(gated_sync, false)?;
+        let first = entry(0)?;
+        let others = (1..=PARKED_FOLLOWERS).map(entry).collect::<Result<Vec<_>, _>>()?;
+        thread::scope(|scope| -> TestResult {
+            let leader = scope.spawn(|| append(&log, first));
+            await_latch(&gate.entered);
+            let followers = others.into_iter().map(|item| scope.spawn(|| append(&log, item))).collect::<Vec<_>>();
+            assert!(wait_until_queued(&log, PARKED_FOLLOWERS));
+            raise(&gate.release);
+            leader.join().map_err(|_| "leader panicked")??;
+            followers.into_iter().try_for_each(|follower| -> TestResult {
+                follower.join().map_err(|_| "follower panicked")??;
+                Ok(())
+            })?;
+            Ok(())
+        })
+    })
+}
+
+
+#[test]
+fn a_publish_wakes_every_waiter_while_the_leader_stays_active() -> TestResult {
+    guarded(|| {
+        let log = log_with(None, counting_sync);
+        log.pending.lock().map_err(|error| error.to_string())?.leader_active = true;
+        let items = (0..PARKED_FOLLOWERS).map(entry).collect::<Result<Vec<_>, _>>()?;
+        thread::scope(|scope| -> TestResult {
+            let waiters = items.into_iter().map(|item| scope.spawn(|| append(&log, item))).collect::<Vec<_>>();
+            assert!(wait_until_queued(&log, PARKED_FOLLOWERS));
+            let outcomes = take_group(&log)
+                .into_iter()
+                .map(|pending| (pending.slot, Err(AuditError::LogPoisoned)))
+                .collect();
+            publish(&log, outcomes);
+            assert!(log.pending.lock().map_err(|error| error.to_string())?.leader_active);
+            waiters.into_iter().try_for_each(|waiter| {
+                waiter
+                    .join()
+                    .map_err(|_| "waiter panicked")?
+                    .err()
+                    .filter(|error| matches!(error, AuditError::LogPoisoned))
+                    .map(drop)
+                    .ok_or("not refused")
+            })?;
+            Ok(())
+        })
     })
 }
