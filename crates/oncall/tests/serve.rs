@@ -17,9 +17,10 @@ use core_pg::scope::tenant_scope;
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
 use oncall::alert_source::{Round, TenantCounts};
 use oncall::error::{SourceError, StoreError};
+use oncall::serve::ServiceSettings;
 use oncall::serve::{
     audit_purge, boxed_reload_audit, finish_code, interrupt_wait, is_deadline, load_service, note_deadline, open_service_settings, open_session,
-    pause, poll_round, purge_entry, purge_rows, refresh, report, round_summary, service_state, start, start_only_changed, store_deadline,
+    pause, poll_round, purge_entry, purge_rows, refresh, report, round_summary, service_state, start, start_only_changed, start_with, store_deadline,
     validate_service, wait_for_signals, watched_rows, Finish, PurgeDeadlines, FAILURE_EXIT_CODE, ROUND_CAP_EXIT_CODE,
 };
 use oncall::types::{InterruptWait, PurgedCounts};
@@ -463,6 +464,32 @@ fn the_settings_are_validated_after_parsing() -> TestResult {
     let mut no_tenant = settings;
     no_tenant.source.tenants.clear();
     assert!(validate_service(&no_tenant, chrono::Utc::now()).is_err());
+    Ok(())
+}
+
+
+fn read_then_swap_the_audit_path(file: &Path) -> Result<ServiceSettings, core_config::error::ConfigError> {
+    let first = load_service(file)?;
+    let swapped = fs::read_to_string(file)
+        .map_err(|failure| oncall::serve::setting_error("swap", &failure.to_string()))?
+        .replace("audit.log", "elsewhere.log");
+    fs::write(file, swapped).map_err(|failure| oncall::serve::setting_error("swap", &failure.to_string()))?;
+    Ok(first)
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_path_comes_from_the_first_start_read_and_a_swap_refuses_the_start() -> TestResult {
+    let dir = tempdir()?;
+    let (fake, ca_pem) = fake_with(accepting()).await?;
+    let settings_file = write_site(dir.path(), fake.port, &ca_pem)?;
+    let refusal = start_with(read_then_swap_the_audit_path, &settings_file, ONE_ROUND, never())
+        .await
+        .err()
+        .ok_or("the swap was accepted")?;
+    assert!(refusal.to_string().contains("start-only"), "{refusal}");
+    assert!(dir.path().join("audit.log").exists());
+    assert!(!dir.path().join("elsewhere.log").exists());
     Ok(())
 }
 

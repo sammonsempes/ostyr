@@ -8,7 +8,7 @@ use crate::holder::{process_holder, validate_holder};
 use crate::limits::PURGE_CLIENT_DEADLINE_MILLIS;
 use crate::link::os_random;
 use crate::store::{MIGRATIONS, MIGRATION_NAMESPACE};
-use crate::types::{AppendFn, InterruptWait, PurgedCounts, Row};
+use crate::types::{AppendFn, InterruptWait, PurgedCounts, Row, StartRead};
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use alerts::types::RowFuture;
@@ -522,7 +522,13 @@ pub async fn run_service(arguments: &[String], interrupt: InterruptWait) -> Resu
 
 
 pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<Finish, Box<dyn Error>> {
-    let baseline = load_service(settings_file)?;
+    start_with(load_service, settings_file, rounds, interrupt).await
+}
+
+
+/// `first_read` is the one start read; a test swaps the file inside it to show where the audit path comes from.
+pub async fn start_with(first_read: StartRead, settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<Finish, Box<dyn Error>> {
+    let baseline = first_read(settings_file)?;
     let log = Arc::new(open_file_log(&baseline.audit_file)?);
     let engine = Arc::new(open_service_settings(settings_file, baseline, boxed_reload_audit(&log))?);
     let _watch = watch_files(Arc::clone(&engine), &[settings_file.to_path_buf()], DEBOUNCE)?;
