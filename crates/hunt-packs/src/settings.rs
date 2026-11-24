@@ -23,13 +23,14 @@ pub fn default_max_runs_per_tick() -> usize {
 }
 
 
-/// The service settings. `tenants` are checked by the tick one by one (a refused one is counted); `pg_settings` is start-only.
+/// The service settings. `tenants` are checked by the tick one by one (a refused one is counted); `pg_settings` and `audit_file` are start-only.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HuntSettings {
     pub pg_settings: PathBuf,
     pub clickhouse_settings: PathBuf,
     pub packs_dir: PathBuf,
+    pub audit_file: PathBuf,
     pub tenants: Vec<String>,
     pub tick_seconds: u64,
     #[serde(default)]
@@ -45,8 +46,10 @@ pub enum HuntSettingsError {
     TickSeconds,
     #[error("grace_seconds must be 0 to {MAX_GRACE_SECONDS}")]
     Grace,
-    #[error("pg_settings can only change with a restart")]
+    #[error("pg_settings and audit_file can only change with a restart")]
     StartOnly,
+    #[error("audit_file must be an absolute path")]
+    AuditFile,
     #[error("tick limits refused")]
     Limits(#[from] TickError),
 }
@@ -77,6 +80,8 @@ pub fn validate_hunt(settings: &HuntSettings) -> Result<(), HuntSettingsError> {
         Err(HuntSettingsError::TickSeconds)
     } else if !(0..=MAX_GRACE_SECONDS).contains(&settings.grace_seconds) {
         Err(HuntSettingsError::Grace)
+    } else if !settings.audit_file.is_absolute() {
+        Err(HuntSettingsError::AuditFile)
     } else {
         check_limits(&tick_limits(settings), settings.tenants.len()).map_err(HuntSettingsError::from)
     }
@@ -88,6 +93,7 @@ pub fn hunt_state(settings: &HuntSettings) -> ConfigState {
         ("pg_settings", format!("{:?}", settings.pg_settings)),
         ("clickhouse_settings", format!("{:?}", settings.clickhouse_settings)),
         ("packs_dir", format!("{:?}", settings.packs_dir)),
+        ("audit_file", format!("{:?}", settings.audit_file)),
         ("tenants", format!("{:?}", settings.tenants)),
         ("tick_seconds", settings.tick_seconds.to_string()),
         ("grace_seconds", settings.grace_seconds.to_string()),
@@ -99,13 +105,15 @@ pub fn hunt_state(settings: &HuntSettings) -> ConfigState {
 }
 
 
-/// Validates a reload: the bounds, and `pg_settings` equal to the one the service started with.
-pub fn hunt_subscriber(started_with: PathBuf) -> Subscriber<HuntSettings> {
+/// Validates a reload: the bounds, and `pg_settings` and `audit_file` equal to the ones the service started with.
+pub fn hunt_subscriber(started_with: PathBuf, started_audit: PathBuf) -> Subscriber<HuntSettings> {
     Subscriber {
         section: HUNT_SECTION.to_owned(),
         validate: Box::new(move |config| {
             validate_hunt(config)?;
-            (config.pg_settings == started_with).then_some(()).ok_or(HuntSettingsError::StartOnly)?;
+            (config.pg_settings == started_with && config.audit_file == started_audit)
+                .then_some(())
+                .ok_or(HuntSettingsError::StartOnly)?;
             Ok(())
         }),
         apply: Box::new(|_config| ()),
@@ -118,6 +126,8 @@ pub fn open_hunt(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadContex
     let mut engine = open_engine(Box::new(move || load_file::<HuntSettings>(&path)), hunt_state, Vec::new(), audit, context)?;
     let first = current_config(&engine);
     validate_hunt(&first)?;
-    engine.subscribers.push(hunt_subscriber(first.pg_settings.clone()));
+    engine
+        .subscribers
+        .push(hunt_subscriber(first.pg_settings.clone(), first.audit_file.clone()));
     Ok(engine)
 }

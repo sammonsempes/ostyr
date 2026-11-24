@@ -116,7 +116,8 @@ pub struct Rig {
 
 fn hunt_text(dir: &Path, pg: &str, tick_seconds: u64, tenants: &str) -> String {
     format!(
-        "pg_settings: {pg}\nclickhouse_settings: /nonexistent/ch.yaml\npacks_dir: {}/packs\ntenants: {tenants}\ntick_seconds: {tick_seconds}\n",
+        "pg_settings: {pg}\nclickhouse_settings: /nonexistent/ch.yaml\npacks_dir: {}/packs\naudit_file: {}/audit.log\ntenants: {tenants}\ntick_seconds: {tick_seconds}\n",
+        dir.display(),
         dir.display()
     )
 }
@@ -466,6 +467,23 @@ async fn a_pg_settings_change_is_refused_as_start_only() -> TestResult {
     assert_eq!((report.reloads_applied, report.reloads_refused), (0, 1));
     assert_eq!(denied(&rig)?, 1);
     assert_eq!(rig.wall.get(), START + TWO_STEP * tick_step());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_audit_file_change_is_refused_as_start_only() -> TestResult {
+    let rig = rig()?;
+    let report = drive(&rig, TWO, false, &mut |index, held| {
+        if index == 0 {
+            let text = hunt_text(held.dir.path(), "/nonexistent/pg.yaml", SLOWER, "[a, b]").replace("audit.log", "other.log");
+            replace_file(&held.dir.path().join("hunt.yaml"), &text)?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_eq!((report.reloads_applied, report.reloads_refused), (0, 1));
+    assert_eq!(denied(&rig)?, 1);
     Ok(())
 }
 

@@ -16,7 +16,7 @@ const TOO_SHORT: u64 = 9;
 const TOO_LONG: u64 = 3_601;
 
 
-const BASE: &str = "pg_settings: /p\nclickhouse_settings: /c\npacks_dir: /d\ntenants: [a]\n";
+const BASE: &str = "pg_settings: /p\nclickhouse_settings: /c\npacks_dir: /d\naudit_file: /a/audit.log\ntenants: [a]\n";
 
 
 fn settings() -> HuntSettings {
@@ -24,6 +24,7 @@ fn settings() -> HuntSettings {
         pg_settings: "/p".into(),
         clickhouse_settings: "/c".into(),
         packs_dir: "/d".into(),
+        audit_file: "/a/audit.log".into(),
         tenants: vec!["a".to_owned()],
         tick_seconds: MINUTE,
         grace_seconds: 0,
@@ -82,6 +83,13 @@ fn validation_names_the_refused_bound() -> TestResult {
         }),
         Err(HuntSettingsError::Grace)
     ));
+    assert!(matches!(
+        validate_hunt(&HuntSettings {
+            audit_file: "audit.log".into(),
+            ..settings()
+        }),
+        Err(HuntSettingsError::AuditFile)
+    ));
     let many = (0..=DEFAULT_MAX_TENANTS).map(|index| format!("t{index}")).collect();
     assert!(matches!(
         validate_hunt(&HuntSettings { tenants: many, ..settings() }),
@@ -105,6 +113,10 @@ fn opening_refuses_unknown_keys_bad_bounds_and_a_missing_file() -> TestResult {
     assert!(open_text(&format!("{BASE}tick_seconds: 60\n")).is_ok());
     assert!(matches!(
         open_text(&format!("{BASE}tick_seconds: 60\nextra: 1\n")),
+        Err(OpenError::Config(_))
+    ));
+    assert!(matches!(
+        open_text("pg_settings: /p\nclickhouse_settings: /c\npacks_dir: /d\ntenants: [a]\ntick_seconds: 60\n"),
         Err(OpenError::Config(_))
     ));
     assert!(matches!(open_text(&format!("{BASE}tick_seconds: 1\n")), Err(OpenError::Invalid(_))));
