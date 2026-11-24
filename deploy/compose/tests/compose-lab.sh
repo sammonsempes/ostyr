@@ -77,7 +77,7 @@ wait_ready() {
 }
 
 analyst_code() {
-    printf 'totp %s\n' "$1" | remote_stdin "cd compose && sudo docker compose run --rm -T platform /usr/local/bin/auth_tool $STORE_ARGS"
+    printf 'totp %s\n' "$1" | remote_stdin "cd compose && sudo docker compose run --rm -T platform /usr/local/bin/ostyr-auth $STORE_ARGS"
 }
 
 login_token() {

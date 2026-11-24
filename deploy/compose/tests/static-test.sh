@@ -290,7 +290,7 @@ expect "the web service is hardened, publishes 9443 and holds three secrets" web
 for refused_secret in pg_password pg_service_password pg_server store_key; do
     expect "the web service holds no $refused_secret secret" web_lacks "$refused_secret"
 done
-expect "the web service runs web_ui on its own settings file" web_has 'command: \["/usr/local/bin/web_ui", "/etc/ostyr/web-ui.yaml"\]'
+expect "the web service runs ostyr-web-ui on its own settings file" web_has 'command: \["/usr/local/bin/ostyr-web-ui", "/etc/ostyr/web-ui.yaml"\]'
 expect "the platform trusts the web address only as forwarder" grep -qx '  trusted_forwarders: 172.29.63.10' "$COMPOSE_DIR/config/module.yaml"
 expect "the module file selects all fifteen modules the platform mounts" grep -qx '  modules: alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths' "$COMPOSE_DIR/config/module.yaml"
 expect "the module file names the status page file" grep -qx '  status.page_file: /etc/ostyr/status-page.yaml' "$COMPOSE_DIR/config/module.yaml"

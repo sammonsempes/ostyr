@@ -1,3 +1,6 @@
+//! Usage: ostyr-auth <store> <audit-log> <key-file> <compromised-list> [<webauthn-config> [<roles-file>]]; commands on stdin.
+
+
 use core_auth::cli::run;
 use core_auth::random::os_random;
 use std::io::{stderr, stdin, stdout, Write};

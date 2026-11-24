@@ -22,7 +22,8 @@ datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"
 trap 'datastore_ssh "sudo -u postgres dropdb --if-exists $database" || true' EXIT
 datastore_ssh "sudo -u postgres psql -Atc \"ALTER SYSTEM SET log_connections = on\" -c 'SELECT pg_reload_conf()'"
 ssh -n "${ssh_options[@]}" "$client_user@$client_address" "mkdir -p $work"
-for binary in rshell_register rshell_api shell_record auth_tool; do scp "${ssh_options[@]}" "$musl/$binary" "$client_user@$client_address:$work/$binary"; done
+for binary in rshell_register rshell_api shell_record; do scp "${ssh_options[@]}" "$musl/$binary" "$client_user@$client_address:$work/$binary"; done
+scp "${ssh_options[@]}" "$musl/../ostyr-auth" "$client_user@$client_address:$work/ostyr-auth"
 scp "${ssh_options[@]}" "$here/crates/remote-shell/tests/routes-live-remote.sh" "$client_user@$client_address:$work/routes-live-remote.sh"
 
 client_phase setup

@@ -1,5 +1,5 @@
 *
 !ostyr-platform
-!auth_tool
-!web_ui
+!ostyr-auth
+!ostyr-web-ui
 !state

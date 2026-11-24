@@ -3,7 +3,7 @@
 # Live check of the posture read route (T712) on a datastore-pair lab: posture_store fills a scratch database, two posture_api instances (tenants a and b)
 # serve it on the client VM, curl reads it back, and the PostgreSQL log (log_connections = on) proves that a refused request opens no connection.
 # Build first: cargo build --release --target x86_64-unknown-linux-musl -p cloud-posture --example posture_store --example posture_api
-#              cargo build --release --target x86_64-unknown-linux-musl -p core-auth --example auth_tool
+#              cargo build --release --target x86_64-unknown-linux-musl -p core-auth --bin ostyr-auth
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -24,7 +24,8 @@ datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"
 trap 'datastore_ssh "sudo -u postgres dropdb --if-exists $database" || true' EXIT
 datastore_ssh "sudo -u postgres psql -Atc \"ALTER SYSTEM SET log_connections = on\" -c 'SELECT pg_reload_conf()'"
 ssh -n "${ssh_options[@]}" "$client_user@$client_address" "mkdir -p $work"
-for binary in posture_store posture_api auth_tool; do scp "${ssh_options[@]}" "$musl/$binary" "$client_user@$client_address:$work/$binary"; done
+for binary in posture_store posture_api; do scp "${ssh_options[@]}" "$musl/$binary" "$client_user@$client_address:$work/$binary"; done
+scp "${ssh_options[@]}" "$musl/../ostyr-auth" "$client_user@$client_address:$work/ostyr-auth"
 scp "${ssh_options[@]}" "$here/crates/cloud-posture/tests/routes-live-remote.sh" "$client_user@$client_address:$work/routes-live-remote.sh"
 scp "${ssh_options[@]}" "$here/crates/cloud-posture/tests/fixtures/prowler-aws-iam-inline.json" "$here/crates/cloud-posture/tests/fixtures/prowler-k3s-ocsf.json" "$client_user@$client_address:$work/"
 

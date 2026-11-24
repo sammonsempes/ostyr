@@ -20,7 +20,7 @@ done
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/image"
 
-cargo build --release --locked -p core-api --example module_api -p core-auth --example auth_tool -p xdrctl --example xdrctl
+cargo build --release --locked -p core-api --example module_api -p core-auth --bin ostyr-auth -p xdrctl --example xdrctl
 
 mkdir -p target/release/sbom
 cargo cyclonedx --format json --spec-version 1.5 --override-filename sbom.cdx

@@ -64,7 +64,7 @@ systemd-units = { unit-name = "ostyr-example-module", unit-scripts = "../../pack
 conf-files = ["/etc/ostyr/example-module/module.yaml", "/etc/ostyr/example-module/compromised.txt"]
 assets = [
     ["target/release/examples/module_api", "usr/bin/ostyr-example-module", "755"],
-    ["target/release/examples/auth_tool", "usr/bin/ostyr-auth-tool", "755"],
+    ["target/release/ostyr-auth", "usr/bin/ostyr-auth-tool", "755"],
     ["target/release/examples/xdrctl", "usr/bin/xdrctl", "755"],
     ["../../packaging/module.yaml", "etc/ostyr/example-module/module.yaml", "644"],
     ["../../packaging/compromised.txt", "etc/ostyr/example-module/compromised.txt", "644"],

@@ -44,7 +44,9 @@ ssh_options=(-i "$key" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnown
 build_dir="$repo_dir/target/$MUSL_TARGET/release/examples"
 log "building the release examples for $MUSL_TARGET"
 (cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --examples \
-    -p event-gateway -p siem-ingest -p detection -p alerts -p web-ui -p agent-linux -p core-auth) >&2
+    -p event-gateway -p siem-ingest -p detection -p alerts -p agent-linux) >&2
+(cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --bin ostyr-web-ui --bin ostyr-auth -p web-ui -p core-auth) >&2
+bin_dir="$repo_dir/target/$MUSL_TARGET/release"
 
 stage="$lab_state/e2e-stage"
 rm -rf "$stage"
@@ -95,9 +97,10 @@ install -m 644 "$stage/pki/platform.pem" "$client_etc/platform-ca.pem"
 install -m 644 "$stage/pki/agent-leaf.crt" "$client_etc/agent.crt"
 install -m 600 "$stage/pki/agent-leaf.key" "$client_etc/agent.key"
 
-for binary in event_gateway ingest_run detect alerts_api web_ui; do
+for binary in event_gateway ingest_run detect alerts_api; do
     install -m 755 "$build_dir/$binary" "$stage/datastore/usr/local/bin/$binary"
 done
+install -m 755 "$bin_dir/ostyr-web-ui" "$stage/datastore/usr/local/bin/ostyr-web-ui"
 install -m 755 "$build_dir/linux_agent" "$stage/client/usr/local/bin/linux_agent"
 
 cat >"$datastore_etc/gateway-server.yaml" <<YAML
@@ -220,7 +223,7 @@ printf 'passwordpassword\n' >"$datastore_etc/compromised.txt"
 head -c "$STORE_KEY_BYTES" /dev/urandom >"$datastore_etc/store.key"
 chmod 600 "$datastore_etc/store.key"
 
-auth_tool="$build_dir/auth_tool"
+auth_tool="$bin_dir/ostyr-auth"
 auth_dir="$stage/auth"
 mkdir -p "$auth_dir"
 bootstrap_output="$("$auth_tool" "$auth_dir/accounts.json" "$auth_dir/audit.log" "$datastore_etc/store.key" "$datastore_etc/compromised.txt" \
@@ -264,7 +267,7 @@ unit event-gateway "/usr/local/bin/event_gateway /etc/ostyr/gateway-server.yaml 
 unit siem-ingest "/usr/local/bin/ingest_run /etc/ostyr/ingest.yaml /run/ostyr-stop-ingest" "User=ostyr-siem" >"$datastore_units/ostyr-siem-ingest.service"
 unit detection "/usr/local/bin/detect /etc/ostyr/detection.yaml /run/ostyr-stop-detection" "User=ostyr-detection" >"$datastore_units/ostyr-detection.service"
 unit alerts-api "/usr/local/bin/alerts_api /etc/ostyr/alerts.yaml" "User=ostyr-alerts" >"$datastore_units/ostyr-alerts-api.service"
-unit web-ui "/usr/local/bin/web_ui /etc/ostyr/web-ui.yaml" "User=ostyr-web" >"$datastore_units/ostyr-web-ui.service"
+unit web-ui "/usr/local/bin/ostyr-web-ui /etc/ostyr/web-ui.yaml" "User=ostyr-web" >"$datastore_units/ostyr-web-ui.service"
 
 cat >"$client_etc/agent.yaml" <<YAML
 server: "$datastore_address:$GATEWAY_PORT"
