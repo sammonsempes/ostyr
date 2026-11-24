@@ -11,7 +11,7 @@ use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
 use response_playbooks::bundle::{open_playbooks, PlaybookSettings};
 use response_playbooks::error::RoundError;
-use response_playbooks::service::{open_service_settings, run_round, serve, Live, Outcome, ROUND_KEYS};
+use response_playbooks::service::{open_service_settings, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
 use std::error::Error;
 use std::fs::File;
 use std::future::Future;
@@ -21,12 +21,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio::sync::Mutex;
 
 
 const USAGE: &str = "usage: playbooks_service <settings.yaml>";
-
-
-const DEADLINE: Duration = Duration::from_secs(30);
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -85,17 +83,25 @@ async fn run(settings_file: &Path) -> Result<(), Box<dyn Error>> {
     let _bundle_signals = keep_signals(&bundle_engine)?;
     let _settings_signals = keep_signals(&settings_engine)?;
     let pg_settings = Arc::new(load_pg_settings(&start.pg_settings)?);
-    migrate(&connect(&pg_settings).await?, ALERT_NAMESPACE, &ALERT_MIGRATIONS, DEADLINE).await?;
+    migrate(
+        &connect(&pg_settings).await?,
+        ALERT_NAMESPACE,
+        &ALERT_MIGRATIONS,
+        statement_deadline(&pg_settings),
+    )
+    .await?;
     let tenant = Arc::new(tenant_scope(&start.tenant)?);
     let live = || Live {
         bundle: current_config(&bundle_engine),
         settings: current_config(&settings_engine),
     };
+    let replays = Arc::new(Mutex::new(Replays::default()));
     let mut next_round = |snapshot: Live| {
         one_round(
             Arc::clone(&pg_settings),
             Arc::clone(&tenant),
             Arc::clone(&settings_engine_audit_log),
+            Arc::clone(&replays),
             snapshot,
         )
     };
@@ -104,11 +110,24 @@ async fn run(settings_file: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 
-async fn one_round(pg: Arc<PgSettings>, scope: Arc<TenantScope>, log: Arc<AuditLog<File>>, snapshot: Live) -> Result<Outcome, RoundError> {
+/// The deadline of every statement is the core-pg `statement_timeout_secs` setting.
+fn statement_deadline(settings: &PgSettings) -> Duration {
+    Duration::from_secs(settings.statement_timeout_secs)
+}
+
+
+async fn one_round(
+    pg: Arc<PgSettings>,
+    scope: Arc<TenantScope>,
+    log: Arc<AuditLog<File>>,
+    replays: Arc<Mutex<Replays>>,
+    snapshot: Live,
+) -> Result<Outcome, RoundError> {
     let client = connect(&pg).await.map_err(StoreError::Pg)?;
-    let exec = pg_executor(&client, DEADLINE);
+    let exec = pg_executor(&client, statement_deadline(&pg));
     let audit = |entry| append_declared(&log, entry, &ROUND_KEYS).map(|_record| ());
-    run_round(&exec, &scope, &snapshot, &audit, OffsetDateTime::now_utc, &mut stdout()).await
+    let mut state = replays.lock().await;
+    run_round(&exec, &scope, &snapshot, &audit, OffsetDateTime::now_utc, &mut stdout(), &mut state).await
 }
 
 

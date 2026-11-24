@@ -69,6 +69,9 @@ pub const MAX_BACKOFF_SHIFT: u32 = 5;
 pub const LOUD_AFTER_FAILURES: u32 = 2;
 
 
+pub const MAX_REPLAYED_ROUNDS: u32 = 3;
+
+
 pub const ROUND_KEYS: [&str; 12] = [
     BOUNDS_KEY,
     "alerts",
@@ -115,13 +118,21 @@ pub struct Live {
 }
 
 
-/// The feed page sorted: rows to simulate, ids of rows too old, ids of rows that do not decode, and the `seq` range of the decoded rows.
+/// The feed page sorted: rows to simulate, ids of rows too old, ids of rows that do not decode, and the `seq` range of every row of the page.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sorted<'a> {
     pub runnable: Vec<&'a FeedRow>,
     pub expired: Vec<String>,
     pub undecodable: Vec<String>,
     pub range: Option<(u64, u64)>,
+}
+
+
+/// The range of the last page whose record was appended but whose delete failed, and how many records that range already has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replays {
+    pub range: Option<(u64, u64)>,
+    pub records: u32,
 }
 
 
@@ -256,7 +267,7 @@ pub fn decoded(item: &FeedItem) -> Option<&FeedRow> {
 
 pub fn sort_page(items: &[FeedItem]) -> Sorted<'_> {
     let rows: Vec<&FeedRow> = items.iter().filter_map(decoded).collect();
-    let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
+    let seqs: Vec<u64> = items.iter().filter_map(|item| item.seq).collect();
     Sorted {
         runnable: rows.iter().copied().filter(|row| row.age_seconds <= MAX_FEED_AGE_SECONDS).collect(),
         expired: rows
@@ -392,6 +403,21 @@ pub async fn simulate_page(live: &Live, lines: Vec<Line>) -> Result<Option<DryRu
 }
 
 
+/// The state after a record was appended for `range`: the count grows only while the same range comes back.
+pub fn next_replays(replays: &Replays, range: Option<(u64, u64)>) -> Replays {
+    Replays {
+        range,
+        records: if replays.range == range { replays.records.saturating_add(1) } else { 1 },
+    }
+}
+
+
+pub fn log_replay(range: Option<(u64, u64)>, records: u32) {
+    let text = format!("playbooks round replays range {range:?} after {records} records, no new record until its rows are deleted");
+    error!("{text}");
+}
+
+
 /// One round: read the oldest page of the tenant's feed, simulate, write the trace, append one record, then delete the rows.
 pub async fn run_round<Out: Write>(
     exec: StoreExec<'_, '_>,
@@ -400,6 +426,7 @@ pub async fn run_round<Out: Write>(
     audit: AuditAppendFn<'_>,
     now: NowFn,
     trace_out: &mut Out,
+    replays: &mut Replays,
 ) -> Result<Outcome, RoundError> {
     let items = read_playbook_feed(exec, scope, live.settings.page_size).await?;
     if items.is_empty() {
@@ -416,9 +443,15 @@ pub async fn run_round<Out: Write>(
             write_dry_run(trace_out, found).map_err(RoundError::Trace)?;
         }
         let outcome = outcome_of(&items, &sorted, report.as_ref(), live.settings.page_size);
-        audit(round_entry(tenant_of(scope), &outcome, now()))?;
-        let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
-        ack_playbook_feed(exec, scope, &ids).await?;
+        let replayed = replays.range == outcome.range && replays.records >= MAX_REPLAYED_ROUNDS;
+        if replayed {
+            log_replay(outcome.range, replays.records);
+        } else {
+            audit(round_entry(tenant_of(scope), &outcome, now()))?;
+            *replays = next_replays(replays, outcome.range);
+        }
+        ack_playbook_feed(exec, scope, &items).await?;
+        *replays = Replays::default();
         Ok(outcome)
     }
 }

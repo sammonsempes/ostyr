@@ -19,9 +19,9 @@ use response_playbooks::error::RoundError;
 use response_playbooks::feed::{alert_json, summary_value};
 use response_playbooks::model::{ConditionOutcome, Mode, Trace, TraceEvent};
 use response_playbooks::service::{
-    backoff, bounded_name, list, load_settings, next_failures, open_service_settings, outcome_of, round_entry, run_id, run_round, serve, shown_id,
-    sort_page, start_only_changed, validate_settings, Live, Outcome, ServiceSettings, Sorted, INVALID_ID, MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS,
-    MAX_NAME_BYTES, MAX_RECORD_NAMES, NO_RANGE_REQUEST, ROUND_KEYS,
+    backoff, bounded_name, list, load_settings, next_failures, next_replays, open_service_settings, outcome_of, round_entry, run_id, run_round,
+    serve, shown_id, sort_page, start_only_changed, validate_settings, Live, Outcome, Replays, ServiceSettings, Sorted, INVALID_ID,
+    MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -81,6 +81,9 @@ const SEQ_FOUR: u64 = 4;
 
 
 const COLUMN_THREE: usize = 3;
+
+
+const SEQ_COLUMN: usize = 12;
 
 
 const THIRD_CALL: usize = 3;
@@ -234,6 +237,7 @@ pub fn row_of(alert: &Alert, seq: u64, age: u64) -> Row {
         alert.summary.original_bytes.to_string(),
         seq.to_string(),
         age.to_string(),
+        format!("(0,{seq})"),
     ]
 }
 
@@ -291,7 +295,15 @@ pub async fn round(env: &Env, out: &mut impl Write) -> Result<Outcome, RoundErro
     let exec = |_scope, sql, params: Vec<String>| -> RowFuture<'_> { Box::pin(ready(handle(&env.fake, sql, &params))) };
     let audit = |entry| audit_into(&env.fake, entry);
     let scope = tenant_scope("acme").map_err(|_bad| RoundError::Store(alerts::error::StoreError::BadId))?;
-    run_round(&exec, &scope, &env.live, &audit, now, out).await
+    run_round(&exec, &scope, &env.live, &audit, now, out, &mut Replays::default()).await
+}
+
+
+pub async fn round_with(env: &Env, replays: &mut Replays) -> Result<Outcome, RoundError> {
+    let exec = |_scope, sql, params: Vec<String>| -> RowFuture<'_> { Box::pin(ready(handle(&env.fake, sql, &params))) };
+    let audit = |entry| audit_into(&env.fake, entry);
+    let scope = tenant_scope("acme").map_err(|_bad| RoundError::Store(alerts::error::StoreError::BadId))?;
+    run_round(&exec, &scope, &env.live, &audit, now, &mut Vec::new(), replays).await
 }
 
 
@@ -443,6 +455,8 @@ fn a_page_is_sorted_into_runnable_expired_and_undecodable_rows() -> TestResult {
     let items = vec![
         FeedItem {
             id: fresh.id.clone(),
+            tid: "(0,1)".to_owned(),
+            seq: Some(LATE_SEQ),
             row: Ok(FeedRow {
                 seq: LATE_SEQ,
                 age_seconds: 0,
@@ -451,6 +465,8 @@ fn a_page_is_sorted_into_runnable_expired_and_undecodable_rows() -> TestResult {
         },
         FeedItem {
             id: old.id.clone(),
+            tid: "(0,1)".to_owned(),
+            seq: Some(FIRST_SEQ),
             row: Ok(FeedRow {
                 seq: FIRST_SEQ,
                 age_seconds: AGE_OLD,
@@ -459,6 +475,8 @@ fn a_page_is_sorted_into_runnable_expired_and_undecodable_rows() -> TestResult {
         },
         FeedItem {
             id: "not an id".to_owned(),
+            tid: "(0,2)".to_owned(),
+            seq: Some(SEQ_THREE),
             row: Err(alerts::error::StoreError::BadId),
         },
     ];
@@ -466,7 +484,7 @@ fn a_page_is_sorted_into_runnable_expired_and_undecodable_rows() -> TestResult {
     assert_eq!(sorted.runnable.len(), 1);
     assert_eq!(sorted.expired, vec![old.id]);
     assert_eq!(sorted.undecodable, vec![INVALID_ID.to_owned()]);
-    assert_eq!(sorted.range, Some((FIRST_SEQ, LATE_SEQ)));
+    assert_eq!(sorted.range, Some((SEQ_THREE, LATE_SEQ)));
     assert_eq!(sort_page(&[]).range, None);
     assert_eq!(shown_id(&fresh.id), fresh.id);
     assert_eq!(shown_id("x"), INVALID_ID);
@@ -688,7 +706,7 @@ async fn expired_undecodable_and_skipped_rows_are_named_and_deleted_and_the_next
     let audit = |entry| audit_into(&env.fake, entry);
     let scope = tenant_scope("acme")?;
     let mut trace = Vec::new();
-    let outcome = run_round(&exec, &scope, &env.live, &audit, now, &mut trace).await?;
+    let outcome = run_round(&exec, &scope, &env.live, &audit, now, &mut trace, &mut Replays::default()).await?;
     assert_eq!(left(&env), 0);
     assert_eq!(outcome.expired, vec![old.id.clone()]);
     assert_eq!(outcome.undecodable.len(), TWO);
@@ -719,16 +737,74 @@ async fn a_round_of_only_expired_rows_simulates_nothing_still_writes_a_record_an
 
 
 #[tokio::test]
-async fn a_round_of_only_undecodable_rows_has_no_range_and_a_run_outside_the_page_is_named_invalid() -> TestResult {
+async fn a_round_of_only_undecodable_rows_has_a_range_and_a_run_outside_the_page_is_named_invalid() -> TestResult {
     let env = env()?;
-    let mut odd_id = row_of(&whoami("odd"), 1, 0);
+    let mut odd_id = row_of(&whoami("odd"), SEQ_THREE, 0);
     odd_id.first_mut().ok_or("column")?.push_str("-odd");
-    put(&env, vec![odd_id]);
+    let mut odd_too = row_of(&whoami("odd2"), SEQ_FOUR, 0);
+    odd_too.first_mut().ok_or("column")?.push_str("-odd");
+    put(&env, vec![odd_id, odd_too]);
     let outcome = round(&env, &mut Vec::new()).await?;
-    assert_eq!(outcome.range, None);
+    assert_eq!((outcome.read, outcome.simulated, outcome.range), (TWO, 0, Some((SEQ_THREE, SEQ_FOUR))));
     let entries = recorded(&env);
-    assert_eq!(entries.first().ok_or("no record")?.request_id, NO_RANGE_REQUEST);
+    assert_eq!(entries.first().ok_or("no record")?.request_id, "round-3-4");
     assert_eq!(run_id(&Sorted::default(), &run_of(FIRST_SEQ as usize, None, &[])), INVALID_ID);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_round_whose_rows_have_no_readable_seq_has_no_range() -> TestResult {
+    let env = env()?;
+    let mut unreadable = row_of(&whoami("odd"), 1, 0);
+    unreadable.get_mut(SEQ_COLUMN).ok_or("column")?.clear();
+    put(&env, vec![unreadable]);
+    let outcome = round(&env, &mut Vec::new()).await?;
+    assert_eq!((outcome.read, outcome.range, outcome.undecodable.len()), (1, None, 1));
+    assert_eq!(recorded(&env).first().ok_or("no record")?.request_id, NO_RANGE_REQUEST);
+    assert_eq!(left(&env), 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn consecutive_failed_deletes_stop_appending_after_the_replay_cap_and_resume_once_deleted() -> TestResult {
+    let env = env()?;
+    put(&env, vec![row_of(&whoami("e1"), FIRST_SEQ, 0)]);
+    *lock(&env.fake.fail_ack) = true;
+    let mut replays = Replays::default();
+    let rounds = MAX_REPLAYED_ROUNDS as usize + TWO;
+    for _attempt in 0..rounds {
+        assert!(matches!(round_with(&env, &mut replays).await, Err(RoundError::Store(_))));
+    }
+    assert_eq!(recorded(&env).len(), MAX_REPLAYED_ROUNDS as usize);
+    assert_eq!(
+        replays,
+        Replays {
+            range: Some((FIRST_SEQ, FIRST_SEQ)),
+            records: MAX_REPLAYED_ROUNDS
+        }
+    );
+    *lock(&env.fake.fail_ack) = false;
+    round_with(&env, &mut replays).await?;
+    assert_eq!(recorded(&env).len(), MAX_REPLAYED_ROUNDS as usize);
+    assert_eq!((left(&env), replays.clone()), (0, Replays::default()));
+    put(&env, vec![row_of(&whoami("e2"), LATE_SEQ, 0)]);
+    round_with(&env, &mut replays).await?;
+    assert_eq!(recorded(&env).len(), MAX_REPLAYED_ROUNDS as usize + 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_new_range_restarts_the_replay_count() -> TestResult {
+    let low = Some((1, FIRST_SEQ));
+    let high = Some((SEQ_THREE, SEQ_FOUR));
+    let first = next_replays(&Replays::default(), low);
+    let again = next_replays(&first, low);
+    let other = next_replays(&again, high);
+    assert_eq!((first.records, again.records, other.records), (1, TWO as u32, 1));
+    assert_eq!(other.range, high);
     Ok(())
 }
 

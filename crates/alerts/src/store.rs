@@ -77,20 +77,29 @@ pub const TRIAGE_GET_SQL: &str = "SELECT status, actor, COALESCE(note, ''), upda
 pub const PLAYBOOK_FEED_SQL: &str = "SELECT o.id, COALESCE(a.rule_id, ''), COALESCE(a.rule_title, ''), COALESCE(a.severity, ''), COALESCE(a.event_time, ''), \
                                      COALESCE(a.created::text, '0'), COALESCE(a.host_name, ''), COALESCE(a.user_name, ''), COALESCE(a.event_ids::text, '[]'), \
                                      COALESCE(a.summary, ''), COALESCE(a.summary_truncated::text, 'false'), COALESCE(a.summary_original_bytes::text, '0'), \
-                                     o.seq::text, GREATEST(extract(epoch FROM now() - o.queued_at), 0)::bigint::text \
-                                     FROM (SELECT tenant, id, seq, queued_at FROM playbook_outbox WHERE tenant = $1 ORDER BY seq LIMIT $2::text::bigint) o \
+                                     o.seq::text, GREATEST(extract(epoch FROM now() - o.queued_at), 0)::bigint::text, o.tid \
+                                     FROM (SELECT tenant, id, seq, queued_at, ctid::text AS tid FROM playbook_outbox WHERE tenant = $1 ORDER BY seq LIMIT $2::text::bigint) o \
                                      LEFT JOIN LATERAL (SELECT * FROM alerts WHERE tenant = o.tenant AND id = o.id) a ON true ORDER BY o.seq";
 
 
-/// `$1` tenant, `$2` JSON array of alert ids: deletes those rows of the tenant's feed; answers the number deleted.
-pub const PLAYBOOK_ACK_SQL: &str = "WITH gone AS (DELETE FROM playbook_outbox WHERE tenant = $1 AND id IN \
-                                    (SELECT jsonb_array_elements_text($2::text::jsonb)) RETURNING 1) SELECT count(*)::text FROM gone";
+/// `$1` tenant, `$2` JSON array of ids, `$3` of their row positions (`tid`): a Tid Scan CTE, never a tenant and id lookup (reasons in the crate notes).
+pub const PLAYBOOK_ACK_SQL: &str = "WITH cand AS MATERIALIZED (SELECT ctid AS c, tenant, id FROM playbook_outbox \
+                                    WHERE ctid = ANY(ARRAY(SELECT jsonb_array_elements_text($3::text::jsonb)::tid))), \
+                                    gone AS (DELETE FROM playbook_outbox AS o USING cand WHERE o.ctid = cand.c AND cand.tenant = $1 \
+                                    AND cand.id = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb))) RETURNING 1) \
+                                    SELECT count(*)::text FROM gone";
 
 
 pub const FEED_SEQ_COLUMN: usize = 12;
 
 
 pub const FEED_AGE_COLUMN: usize = 13;
+
+
+pub const FEED_TID_COLUMN: usize = 14;
+
+
+pub const MAX_TID_PART_DIGITS: usize = 10;
 
 
 pub const MAX_NOTE_CHARS: usize = 2_048;
@@ -603,6 +612,8 @@ pub async fn read_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, siz
             .map(|row| {
                 Ok(FeedItem {
                     id: cell(row, ID_COLUMN)?.to_owned(),
+                    tid: tid_cell(row)?,
+                    seq: number(row, FEED_SEQ_COLUMN).ok(),
                     row: feed_row(scope, row),
                 })
             })
@@ -611,15 +622,41 @@ pub async fn read_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, siz
 }
 
 
-/// Deletes the feed rows of `ids` (at most `MAX_PAGE_SIZE`) under the scope's tenant and answers how many were there.
-pub async fn ack_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, ids: &[String]) -> Result<usize, StoreError> {
-    if ids.len() > MAX_PAGE_SIZE {
+/// A row position as PostgreSQL prints it, `(block,offset)`: two short runs of digits.
+pub fn is_tid(text: &str) -> bool {
+    text.strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .and_then(|inner| inner.split_once(','))
+        .is_some_and(|(block, offset)| {
+            [block, offset]
+                .iter()
+                .all(|part| (1..=MAX_TID_PART_DIGITS).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+}
+
+
+pub fn tid_cell(row: &Row) -> Result<String, StoreError> {
+    let text = cell(row, FEED_TID_COLUMN)?;
+    if is_tid(text) {
+        Ok(text.to_owned())
+    } else {
+        Err(StoreError::BadRow { column: FEED_TID_COLUMN })
+    }
+}
+
+
+/// Deletes the feed rows of `items` (at most `MAX_PAGE_SIZE`, each by the id and position it was read with) under the scope's tenant and answers how many were there.
+pub async fn ack_playbook_feed(exec: Executor<'_, '_>, scope: &TenantScope, items: &[FeedItem]) -> Result<usize, StoreError> {
+    if items.len() > MAX_PAGE_SIZE {
         Err(StoreError::BadPageSize { limit: MAX_PAGE_SIZE })
-    } else if ids.is_empty() {
+    } else if items.is_empty() {
         Ok(0)
     } else {
-        let document = serde_json::to_string(ids).map_err(StoreError::Document)?;
-        let rows = exec(scope.clone(), PLAYBOOK_ACK_SQL, vec![document]).await?;
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        let tids: Vec<&str> = items.iter().map(|item| item.tid.as_str()).collect();
+        let documents = [&ids, &tids].map(|list| serde_json::to_string(list).map_err(StoreError::Document));
+        let [ids_document, tids_document] = documents;
+        let rows = exec(scope.clone(), PLAYBOOK_ACK_SQL, vec![ids_document?, tids_document?]).await?;
         let answer = rows.first().ok_or(StoreError::BadRow { column: 0 })?;
         cell(answer, 0)?
             .parse::<usize>()

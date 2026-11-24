@@ -168,10 +168,12 @@ pub struct FeedRow {
 }
 
 
-/// One row of the playbook feed: its id (always kept, so the row can be deleted) and the decoded row or why it does not decode.
+/// One row of the playbook feed: id and row position `tid` (kept, so it can be deleted), `seq` when it reads, and the decoded row or its cause.
 #[derive(Debug)]
 pub struct FeedItem {
     pub id: String,
+    pub tid: String,
+    pub seq: Option<u64>,
     pub row: Result<FeedRow, StoreError>,
 }
 
