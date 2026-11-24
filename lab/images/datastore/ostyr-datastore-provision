@@ -139,7 +139,7 @@ chown clickhouse:clickhouse /etc/clickhouse-server/config.d/ostyr.xml /etc/click
 chmod 640 /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
 
 readonly NATS_JS_PREFIX="JS.EVENTS.API"
-readonly NATS_DEAD_SUBJECT="dead.events"
+readonly NATS_DEAD_SUBJECT="dead.events.*"
 readonly NATS_PULL_THRESHOLD="60s"
 readonly NATS_CONSUMERS=("SIEM:siem_ingest:siem-ingest" "DETECTION:detection:detection" "METRICS:metrics_ingest:metrics-ingest")
 

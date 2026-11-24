@@ -1156,7 +1156,7 @@ fn a_document_the_batcher_refuses_is_dead_lettered_not_detected() -> TestResult 
     assert_eq!(report.dead_lettered, 1);
     let state = lock(&rig.stub.hub);
     let letter = state.published.first().ok_or("no dead letter")?;
-    assert_eq!(letter.subject, "dead.events");
+    assert_eq!(letter.subject, "dead.events.a");
     assert!(letter.headers.contains("Ostyr-Tenant: a"));
     assert_eq!(letter.payload, b"not json");
     assert!(records_of(&rig.output)?.is_empty());

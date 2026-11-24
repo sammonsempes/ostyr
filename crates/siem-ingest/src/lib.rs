@@ -2,6 +2,7 @@
 
 pub mod batcher;
 pub mod clickhouse;
+pub mod dead;
 pub mod error;
 pub mod logging;
 pub mod model;

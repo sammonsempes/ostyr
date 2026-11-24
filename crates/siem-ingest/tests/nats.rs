@@ -22,7 +22,7 @@ use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
     acknowledge, check_payload_limit, connect_options, fetch_batch, nats_wiring, progress_in, publish_dead_letter, read_bounded, report_progress,
-    settle_token, terminate, tls_config, MAX_NATS_FILE_BYTES,
+    settle_token, terminate, tls_config, MAX_DEAD_LETTER_BODY_BYTES, MAX_NATS_FILE_BYTES,
 };
 use siem_ingest::settings::{open_settings, IngestSettings};
 use socket2::{Domain, Socket, Type};
@@ -1212,5 +1212,37 @@ fn a_fetch_window_that_reaches_the_response_threshold_is_refused_by_name() -> Re
     assert!(engine_for(&dir, &yaml(1, last_accepted, "")).is_ok());
     let refused = engine_for(&dir, &yaml(1, last_accepted + 1, "")).err().ok_or("accepted")?;
     assert!(refused.to_string().contains("nats_fetch_deadline_ms"), "{refused}");
+    Ok(())
+}
+
+
+const FLOOD_BYTES: usize = 1_048_576;
+
+
+#[test]
+fn a_dead_letter_goes_to_its_tenant_subject_with_a_cut_body_and_visible_headers() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    let flood = vec![b'x'; FLOOD_BYTES];
+    publish_dead_letter(&rig.link, "tenant-a", &flood, "big")?;
+    publish_dead_letter(&rig.link, "tenant-b", flood.get(..MAX_DEAD_LETTER_BODY_BYTES).ok_or("short")?, "exact")?;
+    publish_dead_letter(&rig.link, "a.b", b"small", "dotted")?;
+    publish_dead_letter(&rig.link, ">", b"small", "wildcard")?;
+    let state = lock(&rig.stub.hub);
+    let mut letters = state.published.iter();
+    let big = letters.next().ok_or("no first letter")?;
+    let exact = letters.next().ok_or("no second letter")?;
+    let dotted = letters.next().ok_or("no third letter")?;
+    let wildcard = letters.next().ok_or("no fourth letter")?;
+    assert_eq!(big.subject, "dead.events.tenant-a");
+    assert_eq!(big.payload.len(), MAX_DEAD_LETTER_BODY_BYTES);
+    assert!(big.headers.contains("Ostyr-Truncated: true"));
+    assert!(big.headers.contains(&format!("Ostyr-Original-Bytes: {FLOOD_BYTES}")));
+    assert_eq!(exact.payload.len(), MAX_DEAD_LETTER_BODY_BYTES);
+    assert!(!exact.headers.contains("Ostyr-Truncated"));
+    assert_eq!(dotted.subject, "dead.events._invalid");
+    assert!(dotted.headers.contains("Ostyr-Tenant: _invalid"));
+    assert!(dotted.headers.contains("Ostyr-Original-Bytes: 5"));
+    assert_eq!(wildcard.subject, "dead.events._invalid");
     Ok(())
 }
