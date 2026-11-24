@@ -5,7 +5,8 @@ use common::types::TestResult;
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
-use core_config::types::{BoxError, SharedAuditFn};
+use core_config::reload::{current_config, reload, ReloadOutcome};
+use core_config::types::SharedAuditFn;
 use metrics_ingest::cardinality::CardinalityState;
 use metrics_ingest::consume::{run_loop, Hooks};
 use metrics_ingest::consumer_settings::{
@@ -17,7 +18,6 @@ use siem_ingest::model::{Delivery, Wiring};
 use siem_ingest::settings::IngestSettings;
 use std::fs;
 use std::io;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -48,9 +48,6 @@ const THOUSAND: usize = 1_000;
 const SECOND_FETCH: usize = 2;
 
 
-const THIRD_FETCH: usize = 3;
-
-
 const SEVEN: usize = 7;
 
 
@@ -60,7 +57,7 @@ const CYCLES: usize = 4;
 const EVENT: &str = r#"{"event":{"dataset":"ostyr.host_metrics"},"host":{"name":"claimed"},"metrics":{"system.uptime":5}}"#;
 
 
-const BASE: &str = "ingest:\n  nats_consumer: metrics-ingest\n  clickhouse_table: metric_samples\n  backoff_initial_ms: 10\n  max_batch_messages: 5\nlimits:\n  max_batch_rows: 100\n";
+const BASE: &str = "audit_file: /var/lib/metrics/audit.log\ningest:\n  nats_consumer: metrics-ingest\n  clickhouse_table: metric_samples\n  backoff_initial_ms: 10\n  max_batch_messages: 5\nlimits:\n  max_batch_rows: 100\n";
 
 
 fn held<Item>(mutex: &Mutex<Item>) -> MutexGuard<'_, Item> {
@@ -166,25 +163,13 @@ fn an_unknown_key_or_an_invalid_limit_or_a_missing_file_is_refused_at_open() -> 
 }
 
 
-fn loop_wiring(path: &Path, calls: &Arc<AtomicUsize>, asked: &Arc<Mutex<Vec<usize>>>, redeliver: bool) -> Wiring {
+fn loop_wiring(calls: &Arc<AtomicUsize>, asked: &Arc<Mutex<Vec<usize>>>, redeliver: bool) -> Wiring {
     let counter = Arc::clone(calls);
     let log = Arc::clone(asked);
-    let owned = path.to_path_buf();
     Wiring {
         fetch: Box::new(move |max| {
             held(&log).push(max);
             let call = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            match call {
-                SECOND_FETCH => fs::write(&owned, text_with("").replace("max_batch_messages: 5", "max_batch_messages: 7")).map_err(BoxError::from)?,
-                THIRD_FETCH => fs::write(
-                    &owned,
-                    text_with("")
-                        .replace("metrics-ingest", "siem-ingest")
-                        .replace("max_batch_rows: 100", "max_batch_rows: 0"),
-                )
-                .map_err(BoxError::from)?,
-                _ => (),
-            }
             let wanted = redeliver && call <= SECOND_FETCH;
             Ok(if wanted {
                 vec![Delivery {
@@ -206,12 +191,12 @@ fn loop_wiring(path: &Path, calls: &Arc<AtomicUsize>, asked: &Arc<Mutex<Vec<usiz
 
 
 #[test]
-fn the_loop_backs_off_after_a_failed_insert_stores_the_redelivery_and_reloads_each_cycle() -> TestResult {
+fn the_loop_backs_off_after_a_failed_insert_stores_the_redelivery_and_never_reloads_by_itself() -> TestResult {
     let dir = tempdir()?;
-    let (engines, path) = engines_for(&dir, BASE)?;
+    let (engines, _) = engines_for(&dir, BASE)?;
     let calls = Arc::new(AtomicUsize::new(0));
     let asked: Arc<Mutex<Vec<usize>>> = Arc::default();
-    let mut wiring = loop_wiring(&path, &calls, &asked, true);
+    let mut wiring = loop_wiring(&calls, &asked, true);
     let sent: Arc<Mutex<Vec<String>>> = Arc::default();
     let sleeps: Arc<Mutex<Vec<Duration>>> = Arc::default();
     let sent_log = Arc::clone(&sent);
@@ -242,7 +227,7 @@ fn the_loop_backs_off_after_a_failed_insert_stores_the_redelivery_and_reloads_ea
     let bodies = held(&sent).clone();
     assert_eq!(bodies.len(), SECOND_FETCH);
     assert_eq!(bodies.first(), bodies.get(1));
-    assert_eq!(*held(&asked), vec![FIVE, FIVE, SEVEN, SEVEN]);
+    assert_eq!(*held(&asked), vec![FIVE, FIVE, FIVE, FIVE]);
     Ok(())
 }
 
@@ -250,9 +235,9 @@ fn the_loop_backs_off_after_a_failed_insert_stores_the_redelivery_and_reloads_ea
 #[test]
 fn a_loop_that_is_stopped_at_once_runs_no_cycle() -> TestResult {
     let dir = tempdir()?;
-    let (engines, path) = engines_for(&dir, BASE)?;
+    let (engines, _) = engines_for(&dir, BASE)?;
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut wiring = loop_wiring(&path, &calls, &Arc::default(), false);
+    let mut wiring = loop_wiring(&calls, &Arc::default(), false);
     let send = |_: &MetricsSettings, _: &[Batch]| -> Result<usize, InsertError> { Ok(0) };
     let sleep = |_: Duration| ();
     let now = || NOW;
@@ -272,9 +257,9 @@ fn a_loop_that_is_stopped_at_once_runs_no_cycle() -> TestResult {
 #[test]
 fn a_loop_that_is_never_stopped_ends_at_its_cycle_cap() -> TestResult {
     let dir = tempdir()?;
-    let (engines, path) = engines_for(&dir, BASE)?;
+    let (engines, _) = engines_for(&dir, BASE)?;
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut wiring = loop_wiring(&path, &calls, &Arc::default(), false);
+    let mut wiring = loop_wiring(&calls, &Arc::default(), false);
     let send = |_: &MetricsSettings, _: &[Batch]| -> Result<usize, InsertError> { Ok(0) };
     let sleep = |_: Duration| ();
     let now = || NOW;
@@ -286,5 +271,46 @@ fn a_loop_that_is_never_stopped_ends_at_its_cycle_cap() -> TestResult {
     };
     let summary = run_loop(&mut wiring, &engines, &mut CardinalityState::default(), (&hooks, &|| false));
     assert_eq!((summary.cycles, summary.failures), (SMALL_CAP, 0));
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_or_relative_audit_file_is_refused_at_open() -> TestResult {
+    let dir = tempdir()?;
+    let line = "audit_file: /var/lib/metrics/audit.log\n";
+    let missing = engines_for(&dir, &BASE.replace(line, "")).err().ok_or("opened without an audit file")?;
+    assert!(missing.to_string().contains("audit_file"), "{missing}");
+    let relative = engines_for(&dir, &BASE.replace(line, "audit_file: audit.log\n"))
+        .err()
+        .ok_or("opened with a relative audit file")?;
+    assert!(relative.to_string().contains("audit_file"), "{relative}");
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_that_names_another_audit_file_is_refused_whole_and_a_plain_edit_is_applied() -> TestResult {
+    let dir = tempdir()?;
+    let (engines, path) = engines_for(&dir, BASE)?;
+    fs::write(
+        &path,
+        BASE.replace("audit_file: /var/lib/metrics/audit.log", "audit_file: /var/lib/metrics/other.log")
+            .replace("max_batch_messages: 5", "max_batch_messages: 7"),
+    )?;
+    let ingest = reload(&engines.ingest);
+    let limits = reload(&engines.limits);
+    assert!(
+        matches!(&ingest, ReloadOutcome::Refused { reason } if reason.contains("audit_file")),
+        "{ingest:?}"
+    );
+    assert!(
+        matches!(&limits, ReloadOutcome::Refused { reason } if reason.contains("audit_file")),
+        "{limits:?}"
+    );
+    assert_eq!(current_config(&engines.ingest).max_batch_messages, FIVE);
+    fs::write(&path, BASE.replace("max_batch_messages: 5", "max_batch_messages: 7"))?;
+    assert!(matches!(reload(&engines.ingest), ReloadOutcome::Applied { .. }));
+    assert_eq!(current_config(&engines.ingest).max_batch_messages, SEVEN);
     Ok(())
 }
