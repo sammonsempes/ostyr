@@ -612,6 +612,12 @@ const SCAN_REFUSED: &str = "scan_refused";
 const PARTS_SKIPPED: &str = "parts_skipped";
 
 
+const NESTING_CUT: &str = "nesting_cut";
+
+
+const MESSAGES_UNOPENED: &str = "messages_unopened";
+
+
 fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
     if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
         mark_uncertain(record, reason);
@@ -652,6 +658,10 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     mark_once(&mut record, context.scan_refused, SCAN_REFUSED);
     let skipped = record.counts.parts_skipped > 0;
     mark_once(&mut record, skipped, PARTS_SKIPPED);
+    let cut = record.counts.nesting_cut > 0;
+    let unopened = record.counts.messages_unopened > 0;
+    mark_once(&mut record, cut, NESTING_CUT);
+    mark_once(&mut record, unopened, MESSAGES_UNOPENED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -677,9 +687,16 @@ fn collect_urls(
                 urls
             }
             PartType::Text(markup) | PartType::Html(markup) => {
-                urls_index.shapes = if has_reference(markup) { Shapes::Refuse } else { Shapes::Markup };
+                let referenced = has_reference(markup);
+                urls_index.shapes = if referenced { Shapes::Refuse } else { Shapes::Markup };
                 let decoded = html_text(markup, counts);
-                collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts)
+                let listed = collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts);
+                urls_index.shapes = Shapes::Refuse;
+                if referenced {
+                    collect_indexed(context.rule, markup, level, limits, listed, urls_index, counts)
+                } else {
+                    listed
+                }
             }
             _ => urls,
         }

@@ -93,13 +93,14 @@ fn an_attached_original_is_always_an_attached_claim() -> Result<(), Box<dyn std:
         &policy(),
         &big,
     )?;
-    [with_url, with_pdf, two, empty, clean].iter().for_each(|record| {
+    [with_url, with_pdf, empty, clean].iter().for_each(|record| {
         assert_eq!(record.original_level, Some(1));
         assert!(record.original_uncertain);
         assert_eq!(record.uncertain_reasons, ["attached_claim"]);
         assert_eq!(record.counts.original_uncertain, 1);
         assert_eq!(record.original_source.as_deref(), Some("attached"));
     });
+    assert_eq!(two.uncertain_reasons, ["messages_unopened", "attached_claim"]);
     assert_eq!(unread.uncertain_reasons, ["parts_skipped", "attached_claim"]);
     assert!(unread.original_uncertain);
     Ok(())
