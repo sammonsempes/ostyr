@@ -8,7 +8,8 @@ use crate::tenant::{tenant_from_subject, EVENTS_SUBJECT_PREFIX};
 use crate::types::{AckToken, StopFn};
 use core_config::reload::current_config;
 use std::collections::HashSet;
-use tracing::{debug, warn};
+use std::sync::atomic::Ordering;
+use tracing::{debug, info, warn};
 
 
 pub const MAX_LOOP_CYCLES: u64 = 100_000;
@@ -192,15 +193,28 @@ pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> 
     carried.into_iter().for_each(|message| offer(pipeline, message, &mut report));
     let fetched = (pipeline.wiring.fetch)(settings.max_batch_messages).map_err(PipelineError::Fetch);
     log_dead_groups(&mut pipeline.dead_groups);
-    let deliveries = fetched?;
-    report.fetched = deliveries.len();
-    deliveries
-        .into_iter()
-        .for_each(|delivery| accept(pipeline, &settings, delivery, &mut report));
+    let outcome = fetched.map(|deliveries| {
+        report.fetched = deliveries.len();
+        deliveries
+            .into_iter()
+            .for_each(|delivery| accept(pipeline, &settings, delivery, &mut report));
+        drain_pull_counts(pipeline, &mut report);
+    });
     let aged = tick(&mut pipeline.batcher);
     aged.into_iter().for_each(|done| settle(pipeline, done, &mut report));
     log_dead_groups(&mut pipeline.dead_groups);
-    Ok(report)
+    outcome.map(|()| report)
+}
+
+
+/// Moves the adapter's pull counts into the cycle report and writes one summary line when either is not zero.
+pub fn drain_pull_counts(pipeline: &Pipeline, report: &mut CycleReport) {
+    report.pull_byte_cap = pipeline.wiring.pulls.byte_cap.swap(0, Ordering::SeqCst);
+    report.head_pulled_alone = pipeline.wiring.pulls.head_alone.swap(0, Ordering::SeqCst);
+    let (byte_cap, head_alone) = (report.pull_byte_cap, report.head_pulled_alone);
+    if byte_cap > 0 || head_alone > 0 {
+        info!(byte_cap, head_alone, "pulls ended at the byte cap, heads fetched alone");
+    }
 }
 
 
@@ -217,6 +231,8 @@ pub fn run_loop(pipeline: &mut Pipeline, stop: &StopFn) -> LoopReport {
                 summary.host_metrics_skipped = summary.host_metrics_skipped.saturating_add(cycle.skipped as u64);
                 summary.dead_lettered = summary.dead_lettered.saturating_add(cycle.dead_lettered as u64);
                 summary.dead_letter_failed = summary.dead_letter_failed.saturating_add(cycle.dead_letter_failed as u64);
+                summary.pull_byte_cap = summary.pull_byte_cap.saturating_add(cycle.pull_byte_cap);
+                summary.head_pulled_alone = summary.head_pulled_alone.saturating_add(cycle.head_pulled_alone);
             }
             Err(error) => {
                 let settings = current_config(&pipeline.batcher.settings);

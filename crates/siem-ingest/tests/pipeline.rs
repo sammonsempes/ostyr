@@ -166,6 +166,7 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
             }
         }),
         progress: Arc::new(|| Ok(())),
+        pulls: Default::default(),
         dead_letter: Box::new(move |tenant, payload, reason| {
             record(&dead_lines, format!("dead:{tenant}:{}:{reason}", payload.len()))?;
             if dead_failing.load(Ordering::SeqCst) {
@@ -443,7 +444,9 @@ fn the_loop_backs_off_on_a_dead_bus_and_restarts_after_a_success() -> Result<(),
             fetch_failures: FAILING_CYCLES,
             host_metrics_skipped: 0,
             dead_lettered: 0,
-            dead_letter_failed: 0
+            dead_letter_failed: 0,
+            pull_byte_cap: 0,
+            head_pulled_alone: 0,
         }
     );
     let expected: Vec<Duration> = [FIRST_DELAY_MS, SECOND_DELAY_MS, THIRD_DELAY_MS]
@@ -791,5 +794,85 @@ fn the_dead_letter_groups_are_logged_before_a_fetch_error_returns() -> Result<()
     assert!(matches!(outcome, Err(PipelineError::Fetch(_))));
     assert!(logs.contains("dead letters of this cycle") && logs.contains("tenant-a/other=1"), "{logs}");
     assert!(rig.pipeline.dead_groups.groups.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_fetch_error_still_flushes_an_old_batch() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_age_seconds: 1\n")?;
+    enqueue(&rig, vec![delivery("events.tenant-a", EVENT, TOKEN_ONE)])?;
+    run_cycle(&mut rig.pipeline)?;
+    assert!(lines(&rig)?.is_empty());
+    rig.clock.fetch_add(LATER, Ordering::SeqCst);
+    rig.queue
+        .items
+        .lock()
+        .map_err(|_| "poisoned")?
+        .push_back(Err("head too large".to_owned()));
+    assert!(matches!(run_cycle(&mut rig.pipeline), Err(PipelineError::Fetch(_))));
+    assert_eq!(lines(&rig)?, ["sink:tenant-a:1", "ack:1"]);
+    Ok(())
+}
+
+
+#[test]
+fn pull_counts_reach_the_cycle_report_one_summary_line_and_the_loop_report() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    rig.pipeline.wiring.pulls.byte_cap.store(TWO as u64, Ordering::SeqCst);
+    rig.pipeline.wiring.pulls.head_alone.store(1, Ordering::SeqCst);
+    let (outcome, logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    let report = outcome?;
+    assert_eq!((report.pull_byte_cap, report.head_pulled_alone), (TWO as u64, 1));
+    assert_eq!(logs.matches("pulls ended at the byte cap").count(), 1, "{logs}");
+    assert!(logs.contains("byte_cap=2") && logs.contains("head_alone=1"), "{logs}");
+    assert_eq!(rig.pipeline.wiring.pulls.byte_cap.load(Ordering::SeqCst), 0);
+    let (quiet, quiet_logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!((quiet?.pull_byte_cap, quiet_logs.contains("pulls ended")), (0, false));
+    rig.pipeline.wiring.pulls.head_alone.store(1, Ordering::SeqCst);
+    let (alone, alone_logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!((alone?.head_pulled_alone, alone_logs.contains("head_alone=1")), (1, true));
+    rig.pipeline.wiring.pulls.byte_cap.store(THREE as u64, Ordering::SeqCst);
+    let (capped, capped_logs) = captured(|| run_cycle(&mut rig.pipeline))?;
+    assert_eq!((capped?.pull_byte_cap, capped_logs.contains("byte_cap=3")), (THREE as u64, true));
+    rig.pipeline.wiring.pulls.byte_cap.store(TWO as u64, Ordering::SeqCst);
+    rig.pipeline.wiring.pulls.head_alone.store(1, Ordering::SeqCst);
+    let summary = run_loop(&mut rig.pipeline, &stop_after(1));
+    assert_eq!((summary.pull_byte_cap, summary.head_pulled_alone), (TWO as u64, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_fetch_leaves_the_pull_counts_for_the_next_good_cycle() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    rig.pipeline.wiring.pulls.byte_cap.store(1, Ordering::SeqCst);
+    rig.queue
+        .items
+        .lock()
+        .map_err(|_| "poisoned")?
+        .push_back(Err("head too large".to_owned()));
+    assert!(run_cycle(&mut rig.pipeline).is_err());
+    assert_eq!(rig.pipeline.wiring.pulls.byte_cap.load(Ordering::SeqCst), 1);
+    assert_eq!(run_cycle(&mut rig.pipeline)?.pull_byte_cap, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_summary_line_carries_the_pull_counts() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    let clock = Arc::clone(&rig.clock);
+    let seen = AtomicU64::new(0);
+    let stop = move || {
+        clock.fetch_add(SUMMARY_SECONDS, Ordering::SeqCst);
+        seen.fetch_add(1, Ordering::SeqCst) >= 1
+    };
+    rig.pipeline.wiring.pulls.byte_cap.store(TWO as u64, Ordering::SeqCst);
+    let (_, logs) = captured(|| run_loop(&mut rig.pipeline, &stop))?;
+    assert!(
+        logs.contains("ingest pull summary") && logs.contains("pull_byte_cap=2") && logs.contains("head_pulled_alone=0"),
+        "{logs}"
+    );
     Ok(())
 }

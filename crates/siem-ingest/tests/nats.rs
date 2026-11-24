@@ -8,6 +8,7 @@ use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
+use core_config::types::BoxError;
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Queued, Stub, StubState};
 use nkeys::KeyPair;
 use private::write_private;
@@ -21,8 +22,8 @@ use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_text
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
-    acknowledge, check_payload_limit, connect_options, fetch_batch, nats_wiring, progress_in, publish_dead_letter, read_bounded, report_progress,
-    settle_token, terminate, tls_config, MAX_DEAD_LETTER_BODY_BYTES, MAX_NATS_FILE_BYTES,
+    acknowledge, check_payload_limit, connect_options, fetch_batch, is_byte_cap_end, nats_wiring, progress_in, publish_dead_letter, read_bounded,
+    report_progress, settle_token, terminate, tls_config, MAX_DEAD_LETTER_BODY_BYTES, MAX_NATS_FILE_BYTES, PULL_OVERHEAD_BYTES,
 };
 use siem_ingest::settings::{open_settings, IngestSettings};
 use socket2::{Domain, Socket, Type};
@@ -32,7 +33,7 @@ use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
@@ -130,6 +131,7 @@ fn link_for(engine: &Arc<ReloadEngine<IngestSettings>>) -> Result<Arc<Link>, Box
         session: Mutex::new(None),
         next_token: AtomicU64::new(1),
         refused_field: Mutex::new(None),
+        pulls: Arc::default(),
     }))
 }
 
@@ -353,7 +355,10 @@ fn a_server_payload_limit_above_the_batch_cap_is_refused() -> Result<(), Box<dyn
         .err()
         .ok_or("a payload limit above the batch cap was accepted")?;
     assert!(failure.to_string().contains("accepts payloads of 8388608 bytes"));
-    assert!(check_payload_limit(1, 1).is_ok());
+    assert!(check_payload_limit(BATCH_CAP - PULL_OVERHEAD_BYTES, BATCH_CAP).is_ok());
+    assert!(check_payload_limit(BATCH_CAP - PULL_OVERHEAD_BYTES + 1, BATCH_CAP).is_err());
+    assert!(check_payload_limit(BATCH_CAP, BATCH_CAP).is_err());
+    assert!(check_payload_limit(usize::MAX, BATCH_CAP).is_err());
     assert!(lock(&rig.stub.hub).infos.is_empty());
     Ok(())
 }
@@ -1244,5 +1249,123 @@ fn a_dead_letter_goes_to_its_tenant_subject_with_a_cut_body_and_visible_headers(
     assert!(dotted.headers.contains("Ostyr-Tenant: _invalid"));
     assert!(dotted.headers.contains("Ostyr-Original-Bytes: 5"));
     assert_eq!(wildcard.subject, "dead.events._invalid");
+    Ok(())
+}
+
+
+const BATCH_CAP: usize = 4096;
+
+
+const CAP_YAML: &str = "max_batch_bytes: 4096\nmax_message_bytes: 1024\n";
+
+
+const SMALL_SERVER_LIMIT: usize = 512;
+
+
+const MEDIUM_PAYLOAD: usize = 1500;
+
+
+const LARGE_PAYLOAD: usize = 6000;
+
+
+const BYTE_CAP_TEXT: &str = "409 Message Size Exceeds MaxBytes";
+
+
+fn sized(subject: &str, size: usize) -> Queued {
+    queued(subject, &"x".repeat(size))
+}
+
+
+fn counts(link: &Link) -> (u64, u64) {
+    (link.pulls.byte_cap.load(Ordering::SeqCst), link.pulls.head_alone.load(Ordering::SeqCst))
+}
+
+
+#[test]
+fn a_pull_ended_at_the_byte_cap_with_messages_is_a_normal_end() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, CAP_YAML, |state| {
+        state.max_payload = SMALL_SERVER_LIMIT;
+        ["events.a", "events.b", "events.c"]
+            .into_iter()
+            .for_each(|subject| state.queue.push_back(sized(subject, MEDIUM_PAYLOAD)));
+    })?;
+    let first = fetch_batch(&rig.link, FETCH_MAX)?;
+    assert_eq!(
+        first.iter().map(|delivery| delivery.subject.as_str()).collect::<Vec<_>>(),
+        ["events.a", "events.b"]
+    );
+    assert_eq!(counts(&rig.link), (1, 0));
+    assert!(!is_empty_slot(&rig.link));
+    let second = fetch_batch(&rig.link, FETCH_MAX)?;
+    assert_eq!(second.len(), 1);
+    assert_eq!(counts(&rig.link), (1, 0));
+    assert_eq!(lock(&rig.stub.hub).pulls.len(), PAIR);
+    acknowledge(&rig.link, TOKEN_ONE, AckAction::Ack)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_byte_cap_end_with_no_message_pulls_the_head_alone_without_a_byte_limit() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, CAP_YAML, |state| {
+        state.max_payload = SMALL_SERVER_LIMIT;
+        state.queue.push_back(sized("events.a", LARGE_PAYLOAD));
+        state.queue.push_back(queued("events.b", "two"));
+    })?;
+    let head = fetch_batch(&rig.link, FETCH_MAX)?;
+    assert_eq!(head.len(), 1);
+    let delivered = head.first().ok_or("no head")?;
+    assert_eq!((delivered.subject.as_str(), delivered.payload.len()), ("events.a", LARGE_PAYLOAD));
+    assert_eq!(counts(&rig.link), (1, 1));
+    {
+        let state = lock(&rig.stub.hub);
+        let pull = state.pulls.get(1).ok_or("no head pull")?;
+        assert_eq!(pull.get("batch").and_then(|value| value.as_u64()), Some(1));
+        assert_eq!(pull.get("no_wait").and_then(|value| value.as_bool()), Some(true));
+        assert!(pull.get("max_bytes").and_then(|value| value.as_u64()).unwrap_or(0) == 0);
+    }
+    let next = fetch_batch(&rig.link, FETCH_MAX)?;
+    assert_eq!(next.first().map(|delivery| delivery.subject.as_str()), Some("events.b"));
+    assert_eq!(counts(&rig.link), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_head_the_server_will_not_deliver_is_named_and_keeps_the_session_and_its_held_tokens() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, CAP_YAML, |state| {
+        state.max_payload = SMALL_SERVER_LIMIT;
+        state.queue.push_back(queued("events.a", "one"));
+    })?;
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    lock(&rig.stub.hub).pull_status = Some(BYTE_CAP_TEXT.to_owned());
+    let failure = fetch_batch(&rig.link, FETCH_MAX).err().ok_or("a head that never arrives was accepted")?;
+    assert_eq!(
+        failure.to_string(),
+        "the NATS server would not deliver the head of the stream, which exceeds the pull's byte cap"
+    );
+    assert!(!is_empty_slot(&rig.link));
+    assert_eq!(counts(&rig.link), (PAIR as u64, 1));
+    acknowledge(&rig.link, TOKEN_ONE, AckAction::Ack)?;
+    wait_until(&rig.stub, |state| state.acks.len() == 1)?;
+    assert_eq!(lock(&rig.stub.hub).connections, 1);
+    Ok(())
+}
+
+
+#[test]
+fn only_the_409_byte_cap_status_is_a_normal_end() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let wording = |text: &str| -> BoxError { Box::new(io::Error::other(text.to_owned())) };
+    let prefix = "error while processing messages from the stream";
+    assert!(is_byte_cap_end(&wording(&format!(
+        "{prefix}: 409, Some(\"Message Size Exceeds MaxBytes\")"
+    ))));
+    assert!(!is_byte_cap_end(&wording(&format!(
+        "{prefix}: 409, Some(\"Exceeded MaxRequestBatch of 10\")"
+    ))));
+    assert!(!is_byte_cap_end(&wording(&format!(
+        "{prefix}: 503, Some(\"Message Size Exceeds MaxBytes\")"
+    ))));
+    assert!(!is_byte_cap_end(&BoxError::from("409, Message Size Exceeds MaxBytes")));
     Ok(())
 }

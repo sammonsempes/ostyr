@@ -113,6 +113,8 @@ pub struct CycleReport {
     pub dead_letter_failed: usize,
     pub skipped: usize,
     pub ack_failures: usize,
+    pub pull_byte_cap: u64,
+    pub head_pulled_alone: u64,
 }
 
 
@@ -123,6 +125,8 @@ pub struct LoopReport {
     pub host_metrics_skipped: u64,
     pub dead_lettered: u64,
     pub dead_letter_failed: u64,
+    pub pull_byte_cap: u64,
+    pub head_pulled_alone: u64,
 }
 
 
@@ -131,6 +135,7 @@ pub struct Wiring {
     pub ack: Box<AckFn>,
     pub dead_letter: Box<DeadLetterFn>,
     pub progress: Arc<ProgressFn>,
+    pub pulls: Arc<PullCounts>,
 }
 
 
@@ -171,6 +176,7 @@ pub struct Link {
     pub session: Mutex<Option<Session>>,
     pub next_token: AtomicU64,
     pub refused_field: Mutex<Option<&'static str>>,
+    pub pulls: Arc<PullCounts>,
 }
 
 
@@ -190,4 +196,27 @@ pub enum DeadLetterClass {
 pub struct DeadGroups {
     pub groups: BTreeMap<(String, String), u64>,
     pub other_groups: u64,
+}
+
+
+/// Pulls the adapter counted since the pipeline last read them: ends at the byte cap, and heads fetched alone.
+#[derive(Debug, Default)]
+pub struct PullCounts {
+    pub byte_cap: AtomicU64,
+    pub head_alone: AtomicU64,
+}
+
+
+/// What one fetch gathered: the messages, the pulls the server ended at the byte cap, and whether a head pull ran.
+pub struct Collected {
+    pub messages: Vec<async_nats::jetstream::Message>,
+    pub byte_cap_ends: u64,
+    pub head_pulled: bool,
+}
+
+
+/// One pull's messages and whether the server ended it with the byte-cap status.
+pub struct Pulled {
+    pub messages: Vec<async_nats::jetstream::Message>,
+    pub byte_cap_end: bool,
 }
