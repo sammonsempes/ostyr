@@ -5,7 +5,7 @@ use crate::support::{
 use crate::types::TestResult;
 use agent_linux::cursor::{read_cursor, write_cursor};
 use agent_linux::error::SourceError;
-use agent_linux::follow::{file_len, log_states, open_export, poll_stepped, settle_pass, track, Pass};
+use agent_linux::follow::{file_len, log_states, open_export, poll_stepped, settle_pass, track, Pass, NOT_REGULAR_FILE};
 use agent_linux::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, Stop};
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt};
@@ -328,6 +328,21 @@ fn a_file_length_error_other_than_not_found_is_reported() -> TestResult {
     fs::write(&blocked, "x")?;
     assert!(file_len(&blocked.join("inside")).is_err());
     assert_eq!(file_len(&setup.dir.path().join("absent"))?, 0);
+    Ok(())
+}
+
+
+const DIRECTORY_ENTRIES: u32 = 300;
+
+
+#[test]
+fn a_directory_is_an_error_whatever_size_the_filesystem_reports_for_it() -> TestResult {
+    let setup = setup()?;
+    let directory = setup.dir.path().join("directory");
+    fs::create_dir(&directory)?;
+    (0..DIRECTORY_ENTRIES).try_for_each(|index| fs::write(directory.join(format!("entry-with-a-long-name-{index:04}")), ""))?;
+    let error = file_len(&directory).err().map(|error| error.to_string());
+    assert_eq!(error.as_deref(), Some(NOT_REGULAR_FILE));
     Ok(())
 }
 

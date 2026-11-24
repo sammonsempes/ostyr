@@ -5,9 +5,9 @@ use agent_channel::types::PauseFuture;
 use agent_linux::error::SourceError;
 use agent_linux::exec_events::ExecSink;
 use agent_linux::exec_probe::{
-    end_on_spool_error, finish, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start, start_if_due, tick,
-    Controller, ProbeEnv, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_LOAD_DEADLINE_SECONDS, EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED,
-    RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED,
+    end_on_spool_error, finish, join_ended, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start,
+    start_if_due, tick, Controller, ProbeEnv, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_JOIN_POLL_MILLIS, EXEC_PROBE_LOAD_DEADLINE_SECONDS,
+    EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED, RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED, RESULT_UNLOAD_UNKNOWN,
 };
 use agent_linux::model::{ExecProbeSettings, SourceSettings};
 use agent_linux::settings::{open_settings_engine, settings_state};
@@ -569,5 +569,243 @@ fn a_spool_error_of_the_controller_ends_the_agent_and_a_normal_end_does_not() ->
     assert!(end_on_spool_error(Ok(Controller::default())).is_ok());
     let ended = end_on_spool_error(Err(io::Error::other("spool gone")));
     assert!(matches!(ended, Err(SourceError::Io(_))));
+    Ok(())
+}
+
+
+const LIMITED_FIRST: u64 = 3;
+
+
+const LIMITED_SECOND: u64 = 5;
+
+
+const LIMITED_DELIVERIES: usize = 2;
+
+
+const SPOOLED_AFTER_TWO_DELIVERIES: usize = 3;
+
+
+fn lossy(limited: u64) -> Result<Drained, Box<dyn std::error::Error>> {
+    let batch = drained(1)?;
+    Ok(Drained {
+        report: DrainReport { limited, ..batch.report },
+        ..batch
+    })
+}
+
+
+fn probe_lossy_then_stopped(stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    [LIMITED_FIRST, LIMITED_SECOND]
+        .into_iter()
+        .filter_map(|limited| lossy(limited).ok())
+        .for_each(&mut *deliver);
+    spin_until_stop(stop);
+    Ok(1)
+}
+
+
+fn probe_lossy_then_panicking(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    [LIMITED_FIRST, LIMITED_SECOND]
+        .into_iter()
+        .filter_map(|limited| lossy(limited).ok())
+        .for_each(&mut *deliver);
+    std::panic::resume_unwind(Box::new(EPERM))
+}
+
+
+fn status_limited(env: &ProbeEnv) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(&env.sink.spool)?;
+    Ok(text
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .filter_map(|event| event.pointer("/ostyr/exec_probe/limited").and_then(serde_json::Value::as_u64))
+        .collect())
+}
+
+
+fn fresh_environment(probe: ProbeFn, directory: &Path) -> ProbeEnv {
+    let base = environment(probe);
+    ProbeEnv {
+        sink: ExecSink {
+            spool: directory.join("spool"),
+            sending: directory.join("sending"),
+            ..base.sink
+        },
+        ..base
+    }
+}
+
+
+#[test]
+fn a_disable_leaves_a_final_status_with_the_counts_the_interval_held_back() -> TestResult {
+    let sink = audit()?;
+    let directory = tempdir()?;
+    let env = fresh_environment(probe_lossy_then_stopped, directory.path());
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| {
+        started
+            .run
+            .as_ref()
+            .is_some_and(|run| run.records.load(Ordering::Relaxed) == LIMITED_DELIVERIES)
+    })?;
+    let stopping = tick(started, false, 1, &env, sink.audit.as_ref());
+    wait_until(|| finished(&stopping))?;
+    assert_eq!(status_limited(&env)?, vec![LIMITED_FIRST, LIMITED_SECOND]);
+    Ok(())
+}
+
+
+#[test]
+fn a_panic_leaves_a_final_status_and_is_still_audited_as_panicked() -> TestResult {
+    let sink = audit()?;
+    let directory = tempdir()?;
+    let env = fresh_environment(probe_lossy_then_panicking, directory.path());
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| finished(&started))?;
+    tick(started, true, 1, &env, sink.audit.as_ref());
+    assert_eq!(status_limited(&env)?, vec![LIMITED_FIRST, LIMITED_SECOND]);
+    assert!(audited(&sink)?.contains("panicked"));
+    Ok(())
+}
+
+
+#[test]
+fn a_thread_with_nothing_pending_writes_no_final_status() -> TestResult {
+    let sink = audit()?;
+    let directory = tempdir()?;
+    let env = fresh_environment(probe_loaded, directory.path());
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| {
+        started
+            .run
+            .as_ref()
+            .is_some_and(|run| run.records.load(Ordering::Relaxed) == FIRST_DELIVERY + SECOND_DELIVERY)
+    })?;
+    let stopping = tick(started, false, 1, &env, sink.audit.as_ref());
+    wait_until(|| finished(&stopping))?;
+    assert!(status_limited(&env)?.is_empty());
+    Ok(())
+}
+
+
+fn immediate_pause(_: Duration) -> PauseFuture {
+    Box::pin(async {})
+}
+
+
+fn release_file() -> std::path::PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("exec-probe-release-{}", std::process::id()))
+}
+
+
+fn probe_held_until_released(stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    lossy(LIMITED_FIRST).into_iter().for_each(&mut *deliver);
+    spin_until_stop(stop);
+    (0..SPIN_CAP)
+        .take_while(|_| !release_file().exists())
+        .for_each(|_| std::thread::sleep(Duration::from_millis(1)));
+    Ok(1)
+}
+
+
+#[tokio::test]
+async fn a_spool_failure_joins_the_probe_and_audits_its_unload_before_the_agent_ends() -> TestResult {
+    fs::remove_file(release_file()).or_else(|error| if error.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(error) })?;
+    let sink = audit()?;
+    let blocked = tempdir()?;
+    let env = ProbeEnv {
+        sink: ExecSink {
+            spool: blocked.path().to_path_buf(),
+            ..environment(probe_held_until_released).sink
+        },
+        ..environment(probe_held_until_released)
+    };
+    let shared = Arc::new(ArcSwap::from_pointee(ExecProbeSettings { enabled: true }));
+    let release = release_file();
+    let pause = move |delay: Duration| -> PauseFuture {
+        std::thread::sleep(Duration::from_millis(1));
+        let joining = delay == Duration::from_millis(EXEC_PROBE_JOIN_POLL_MILLIS);
+        if joining {
+            fs::write(&release, "")
+                .inspect_err(|error| tracing::error!(%error, "release failed"))
+                .ok();
+        }
+        Box::pin(async {})
+    };
+    let clock = || 0;
+    let ended = run_exec_controller(&shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
+    assert!(ended.is_err());
+    let text = audited(&sink)?;
+    assert_eq!(text.matches(ACTION_LOAD).count(), 1, "{text}");
+    assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
+    assert!(text.contains(RESULT_UNLOADED), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_probe_that_outlives_the_join_deadline_is_audited_as_unload_unknown() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_attached_only);
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| loaded(&started))?;
+    let joined = join_ended(started, &env, sink.audit.as_ref(), &immediate_pause).await;
+    assert!(joined.run.is_none());
+    let text = audited(&sink)?;
+    assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
+    assert!(text.contains(RESULT_UNLOAD_UNKNOWN) && text.contains(RESULT_LOADED), "{text}");
+    assert!(!text.contains(RESULT_UNLOADED), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_load_already_audited_is_not_audited_again_when_the_unload_is_unknown() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_attached_only);
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| loaded(&started))?;
+    let reported = tick(started, true, 1, &env, sink.audit.as_ref());
+    let joined = join_ended(reported, &env, sink.audit.as_ref(), &immediate_pause).await;
+    assert!(joined.run.is_none());
+    let text = audited(&sink)?;
+    assert_eq!(text.matches(ACTION_LOAD).count(), 1, "{text}");
+    assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn a_final_status_the_spool_refuses_is_logged_and_the_thread_still_ends() -> TestResult {
+    let _log = scoped_logging();
+    let sink = audit()?;
+    let directory = tempdir()?;
+    let env = fresh_environment(probe_lossy_then_stopped, directory.path());
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| fs::read_to_string(&env.sink.spool).is_ok_and(|text| text.lines().count() == SPOOLED_AFTER_TWO_DELIVERIES))?;
+    fs::remove_file(&env.sink.spool)?;
+    fs::create_dir(&env.sink.spool)?;
+    let stopping = tick(started, false, 1, &env, sink.audit.as_ref());
+    wait_until(|| finished(&stopping))?;
+    let ended = tick(stopping, false, TICKS, &env, sink.audit.as_ref());
+    assert!(ended.run.is_none() && ended.spool_error.is_none());
+    assert!(audited(&sink)?.contains(RESULT_UNLOADED));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_probe_that_never_attached_and_outlives_the_deadline_is_abandoned_and_no_run_is_a_no_op() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_slow);
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    let joined = join_ended(started, &env, sink.audit.as_ref(), &immediate_pause).await;
+    assert!(joined.run.is_none());
+    let text = audited(&sink)?;
+    assert!(text.contains(RESULT_ABANDONED) && !text.contains(ACTION_UNLOAD), "{text}");
+    let idle = join_ended(Controller::default(), &env, sink.audit.as_ref(), &immediate_pause).await;
+    assert!(idle.run.is_none());
     Ok(())
 }
