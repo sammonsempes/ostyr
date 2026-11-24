@@ -5,15 +5,41 @@ use crate::model::{
     MIN_INTERVAL_SECONDS, NAT64_PREFIX_LENGTHS,
 };
 use core_config::error::ConfigError;
-use core_config::load::load_file;
+use core_config::parse::{parse_document, read_file};
+use core_config::strict::{refuse_features, refuse_forbidden_bytes, Rules};
 use ipnet::Ipv6Net;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::Path;
 
 
+pub const CHECKS_KEY: &str = "checks";
+
+
+pub const CHECKS_INVALID: &str = "the document is not a valid checks file";
+
+
+pub const CHECK_RULES: Rules<'static> = Rules {
+    list_key: CHECKS_KEY,
+    invalid_text: CHECKS_INVALID,
+    allow_flow: true,
+    show_line: true,
+};
+
+
+/// Reads the file once, refuses forbidden bytes and YAML features on those bytes, then parses exactly them.
 pub fn load_checks(path: &Path) -> Result<CheckFile, ConfigError> {
-    load_file(path)
+    let file = path.display().to_string();
+    let text = read_file(path)?;
+    refuse_forbidden_bytes(&text, &file)?;
+    refuse_features(&text, &file, CHECK_RULES)?;
+    parse_document(&text, &file)
+}
+
+
+/// A runner location is ASCII and passes the checks file's text grammar.
+pub fn runner_location_ok(location: &str) -> bool {
+    location.is_ascii() && text_ok("location", location, MAX_LOCATION_LEN).is_ok()
 }
 
 

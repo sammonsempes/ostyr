@@ -18,6 +18,12 @@ const BAD: &str = "tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: 
 const TAGGED: &str = "tenant: tenant-a\nagents:\n  - agent_id: !!binary YWdlbnQtMg==\n    asset: srv2\n";
 
 
+const ESCAPED: &str = "tenant: tenant-a\nagents:\n  - agent_id: \"agent-\\x32\"\n    asset: srv2\n";
+
+
+const ALIASED: &str = "tenant: tenant-a\nagents:\n  - agent_id: &a agent-1\n    asset: srv1\n  - agent_id: *a\n    asset: srv2\n";
+
+
 const CR_HIDDEN: &str = "tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: srv1\n# retired\r  - agent_id: agent-2\n    asset: srv2\n";
 
 
@@ -78,6 +84,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         "srv1 after tagged reload -> {:?}",
         resolve_agent(&current_config(&engine), "tenant-a", "srv1")
     )?;
+    fs::write(&path, ESCAPED)?;
+    writeln!(out, "reload escaped file -> {:?}", reload(&engine))?;
+    fs::write(&path, ALIASED)?;
+    writeln!(out, "reload aliased file -> {:?}", reload(&engine))?;
     fs::write(&path, CR_HIDDEN)?;
     writeln!(out, "reload CR-hidden file -> {:?}", reload(&engine))?;
     writeln!(

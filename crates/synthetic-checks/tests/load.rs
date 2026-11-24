@@ -3,11 +3,13 @@ mod types;
 
 
 use core_config::parse::parse_document;
+use core_config::strict::{feature_reason, ANCHORS_REFUSED};
+use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
-use synthetic_checks::load::load_checks;
+use synthetic_checks::load::{load_checks, runner_location_ok};
 use synthetic_checks::model::{
     certificate_day_value, failure_run_len, CertificateDay, CheckFile, CheckKind, DEFAULT_CERT_DAYS, DEFAULT_CONSECUTIVE_FAILURES,
-    DEFAULT_INTERVAL_SECONDS, DEFAULT_MIN_FAILING_LOCATIONS, DEFAULT_TIMEOUT_SECONDS, MAX_CHECKS, MAX_NAME_LEN, MAX_SCOPE_ENTRIES,
+    DEFAULT_INTERVAL_SECONDS, DEFAULT_MIN_FAILING_LOCATIONS, DEFAULT_TIMEOUT_SECONDS, MAX_CHECKS, MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES,
 };
 use tempfile::tempdir;
 use types::TestResult;
@@ -230,5 +232,97 @@ fn a_ca_file_is_kept_and_bounded() -> TestResult {
     let kept = parse(&format!("ca_file: /etc/ostyr/ca.pem\n{MINIMAL}"))?;
     assert_eq!(kept.ca_file.as_deref(), Some("/etc/ostyr/ca.pem"));
     assert!(message_of(&format!("ca_file: \"\"\n{MINIMAL}"))?.contains("ca_file"));
+    Ok(())
+}
+
+
+fn load_text(text: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let path = dir.path().join(FILE_NAME);
+    fs::write(&path, text)?;
+    Ok(load_checks(&path).err().ok_or("expected a refusal")?.to_string())
+}
+
+
+#[test]
+fn each_hostile_form_is_refused_by_name_on_load() -> TestResult {
+    let head = "scope: [10.1.0.0/24]\nchecks:\n  - name: web\n    kind: http\n";
+    let tail = "    locations: [paris]\n";
+    let cases = [
+        (
+            format!("{head}    target: !!str https://example.org/\n{tail}"),
+            "line 5: checks[0]: tags are not allowed",
+        ),
+        (
+            format!("{head}    target: &t https://example.org/\n{tail}"),
+            "anchors, aliases and merge keys",
+        ),
+        (
+            format!("{head}    target: https://example.org/\n    locations: &l [paris]\n    other: *l\n"),
+            "anchors, aliases and merge keys",
+        ),
+        (format!("{head}    <<: {{target: x}}\n{tail}"), "anchors, aliases and merge keys"),
+        (
+            format!("{head}    target: \"https://example.org/\\u0041\"\n{tail}"),
+            "escapes are not allowed",
+        ),
+        (
+            format!("{head}    target: |\n      https://example.org/\n{tail}"),
+            "block scalars are not allowed",
+        ),
+        (format!("{head}    target: x\r{tail}"), "line 5: only printable ASCII"),
+        (format!("{head}    target: caf\u{e9}\n{tail}"), "line 5: only printable ASCII"),
+        (format!("# \u{202e}\n{head}    target: x\n{tail}"), "line 1: only printable ASCII"),
+        (format!("{head}\ttarget: x\n{tail}"), "only printable ASCII"),
+    ];
+    cases.iter().try_for_each(|(text, expected)| -> TestResult {
+        let message = load_text(text)?;
+        assert!(message.contains(expected), "{expected}: {message}");
+        assert!(!message.contains("example.org"), "{message}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_plain_url_with_an_ampersand_still_loads() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join(FILE_NAME);
+    fs::write(
+        &path,
+        "checks:\n  - name: web\n    kind: http\n    target: https://example.org/?a=1&b=2\n    locations: [paris]\n",
+    )?;
+    assert_eq!(load_checks(&path)?.checks.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_syntax_error_on_load_is_the_fixed_text() -> TestResult {
+    assert!(load_text("checks: [\n")?.contains("the document is not a valid checks file"));
+    Ok(())
+}
+
+
+#[test]
+fn a_runner_location_is_ascii_and_in_the_text_grammar() -> TestResult {
+    assert!(runner_location_ok("paris"));
+    assert!(!runner_location_ok(""));
+    assert!(!runner_location_ok("par\u{e9}s"));
+    assert!(!runner_location_ok("a\nb"));
+    assert!(!runner_location_ok(&"x".repeat(MAX_LOCATION_LEN + 1)));
+    assert!(runner_location_ok(&"x".repeat(MAX_LOCATION_LEN)));
+    Ok(())
+}
+
+
+#[test]
+fn an_alias_event_without_an_anchor_is_refused_by_the_shared_walk() -> TestResult {
+    let span = Span::default();
+    assert_eq!(feature_reason(&Event::Alias(1), &span, "", true), Some(ANCHORS_REFUSED));
+    assert_eq!(
+        feature_reason(&Event::UnresolvedAlias("a".into()), &span, "", true),
+        Some(ANCHORS_REFUSED)
+    );
     Ok(())
 }
