@@ -432,3 +432,82 @@ fn the_region_must_end_with_exactly_one_empty_line() -> Result<(), Box<dyn std::
     assert!(!lines_ambiguous(b"\r\n", 0, &[]));
     Ok(())
 }
+
+
+#[test]
+fn a_duplicated_transfer_encoding_or_disposition_flags_any_part() -> Result<(), Box<dyn std::error::Error>> {
+    all_flagged(&[
+        (
+            "two encodings, base64 last",
+            b"From: a@x.test\r\nContent-Transfer-Encoding: 7bit\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n".to_vec(),
+        ),
+        (
+            "two encodings, base64 first",
+            b"From: a@x.test\r\nContent-Transfer-Encoding: base64\r\nContent-Transfer-Encoding: 7bit\r\n\r\naGk=\r\n".to_vec(),
+        ),
+        (
+            "two dispositions",
+            mixed(&[
+                b"--b1\r\nContent-Disposition: inline\r\nContent-Disposition: attachment; filename=\"a.eml\"\r\n\r\nxx\r\n",
+                END,
+            ]),
+        ),
+        (
+            "two dispositions at the root",
+            b"From: a@x.test\r\nContent-Disposition: inline\r\ncontent-disposition: attachment\r\n\r\nhi\r\n".to_vec(),
+        ),
+    ])
+}
+
+
+#[test]
+fn a_transfer_encoding_that_is_not_a_plain_known_word_flags_the_part() -> Result<(), Box<dyn std::error::Error>> {
+    let with = |value: &[u8]| joined(&[b"From: a@x.test\r\nContent-Transfer-Encoding:", value, b"\r\n\r\naGk=\r\n"]);
+    all_flagged(&[
+        ("encoded word", with(b" =?us-ascii?Q?base64?=")),
+        ("comment", with(b" base64 (c)")),
+        ("unknown", with(b" x-uuencode")),
+        ("empty", with(b"")),
+        ("not UTF-8", with(b" base64\xff")),
+        ("quoted", with(b" \"base64\"")),
+        ("prefix", with(b" base6")),
+    ])?;
+    none_flagged(&[
+        ("base64", with(b" base64")),
+        ("upper case", with(b" BASE64")),
+        ("quoted-printable", with(b" Quoted-Printable")),
+        ("7bit", with(b" 7bit")),
+        ("8bit", with(b"\t8bit \t")),
+        ("binary", with(b"binary")),
+        ("one disposition", b"From: a@x.test\r\nContent-Disposition: inline\r\n\r\nhi\r\n".to_vec()),
+        ("lf only", b"From: a@x.test\nContent-Transfer-Encoding: base64\n\naGk=\n".to_vec()),
+    ])
+}
+
+
+#[test]
+fn a_line_starting_with_a_colon_that_mail_parser_lists_flags_the_part() -> Result<(), Box<dyn std::error::Error>> {
+    all_flagged(&[
+        (
+            "colon content type at the root",
+            b"From: a@ext.test\r\nMIME-Version: 1.0\r\n:Content-Type: application/octet-stream\r\n\r\nclick https://hidden-ct.evil.test/login\r\n".to_vec(),
+        ),
+        (
+            "colon content type in a child",
+            mixed(&[
+                PLAIN,
+                b"--b1\r\n:Content-Type: application/octet-stream\r\n\r\nclick https://hidden-part.evil.test/login\r\n",
+                END,
+            ]),
+        ),
+        (
+            "colon disposition hiding an eml",
+            mixed(&[
+                PLAIN,
+                b"--b1\r\nContent-Type: application/octet-stream; name=\"orig.eml\"\r\n:Content-Disposition: attachment; filename=\"orig.txt\"\r\n\r\n",
+                b"From: x@ext.test\r\nSubject: inner\r\n\r\nhttps://inner-eml.evil.test/x\r\n\r\n",
+                END,
+            ]),
+        ),
+    ])
+}

@@ -1,5 +1,5 @@
 use crate::limits::{Limits, MAX_HEADER_REGION_BYTES};
-use crate::triage::{content_type_raws, parameter_pairs};
+use crate::triage::{content_type_raws, parameter_pairs, raw_bytes};
 use mail_parser::{Header, HeaderName, Message, MessagePart, MimeHeaders, PartType};
 
 
@@ -28,6 +28,15 @@ const ENCODED_WORD_MARK: &str = "=?";
 
 
 const BACKSLASH: char = '\\';
+
+
+const TRANSFER_HEADER: &str = "content-transfer-encoding";
+
+
+const DISPOSITION_HEADER: &str = "content-disposition";
+
+
+const KNOWN_TRANSFERS: &[&str] = &["7bit", "8bit", "binary", "base64", "quoted-printable"];
 
 
 #[derive(Debug, Clone, Copy)]
@@ -207,9 +216,29 @@ fn container_ambiguous(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
 }
 
 
+fn named_headers<'a>(part: &'a MessagePart<'a>, name: &'a str) -> impl Iterator<Item = &'a Header<'a>> {
+    part.headers().iter().filter(move |header| header.name().eq_ignore_ascii_case(name))
+}
+
+
+fn transfer_known(raw: &[u8]) -> bool {
+    let line = raw.strip_suffix(&[LF]).map_or(raw, |rest| rest.strip_suffix(&[CR]).unwrap_or(rest));
+    let value = trim_blank_end(line.split_at(line.iter().take_while(|byte| is_blank(byte)).count()).1);
+    KNOWN_TRANSFERS.iter().any(|known| value.eq_ignore_ascii_case(known.as_bytes()))
+}
+
+
+fn transfer_ambiguous(message: &Message<'_>, part: &MessagePart<'_>) -> bool {
+    named_headers(part, TRANSFER_HEADER).count() > 1
+        || named_headers(part, TRANSFER_HEADER).any(|header| raw_bytes(message, header).is_none_or(|raw| !transfer_known(raw)))
+}
+
+
 fn part_ambiguous(message: &Message<'_>, index: usize, part: &MessagePart<'_>) -> bool {
     region_ambiguous(message, part)
         || content_type_raws(message, part).count() > 1
+        || transfer_ambiguous(message, part)
+        || named_headers(part, DISPOSITION_HEADER).count() > 1
         || delimiter_ambiguous(message, index, part)
         || container_ambiguous(message, part)
 }
