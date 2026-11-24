@@ -181,7 +181,7 @@ async fn acknowledging_deletes_by_id_and_checks_the_answer() -> TestResult {
 
 #[tokio::test]
 async fn a_row_position_is_two_short_runs_of_digits_and_a_bad_one_fails_the_read() -> TestResult {
-    ["(0,1)", "(123456,65535)", "(4294967295,1)"]
+    ["(0,1)", "(123456,65535)", "(4294967295,1)", "(0,0)"]
         .iter()
         .for_each(|good| assert!(is_tid(good)));
     [
@@ -196,6 +196,10 @@ async fn a_row_position_is_two_short_runs_of_digits_and_a_bad_one_fails_the_read
         "(0,-1)",
         "(0,1,2)",
         "(12345678901,1)",
+        "(4294967296,1)",
+        "(1,65536)",
+        "(+1,1)",
+        "(1,+1)",
         "(0, 1)",
     ]
     .iter()

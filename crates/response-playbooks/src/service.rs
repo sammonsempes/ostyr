@@ -72,8 +72,9 @@ pub const LOUD_AFTER_FAILURES: u32 = 2;
 pub const MAX_REPLAYED_ROUNDS: u32 = 3;
 
 
-pub const ROUND_KEYS: [&str; 12] = [
+pub const ROUND_KEYS: [&str; 13] = [
     BOUNDS_KEY,
+    "acknowledged",
     "alerts",
     "seq_first",
     "seq_last",
@@ -128,10 +129,10 @@ pub struct Sorted<'a> {
 }
 
 
-/// The range of the last page whose record was appended but whose delete failed, and how many records that range already has.
+/// The row ids of the last recorded page whose delete failed, and how many records that page already has.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Replays {
-    pub range: Option<(u64, u64)>,
+    pub ids: BTreeSet<String>,
     pub records: u32,
 }
 
@@ -149,6 +150,7 @@ pub struct Outcome {
     pub skipped: Vec<String>,
     pub undecodable: Vec<String>,
     pub expired: Vec<String>,
+    pub acknowledged: Vec<String>,
     pub bounds: Vec<&'static str>,
 }
 
@@ -333,6 +335,7 @@ pub fn outcome_of(items: &[FeedItem], sorted: &Sorted<'_>, report: Option<&DryRu
             .collect(),
         undecodable: sorted.undecodable.clone(),
         expired: sorted.expired.clone(),
+        acknowledged: items.iter().map(|item| shown_id(&item.id)).collect(),
         bounds: bounds.into_iter().filter(|(hit, _name)| *hit).map(|(_hit, name)| name).collect(),
     }
 }
@@ -357,6 +360,7 @@ pub fn round_entry(tenant: &str, outcome: &Outcome, now: OffsetDateTime) -> NewE
         ("skipped", list(&outcome.skipped)),
         ("undecodable", list(&outcome.undecodable)),
         ("expired_unprocessed", list(&outcome.expired)),
+        ("acknowledged", list(&outcome.acknowledged)),
         (BOUNDS_KEY, json!(outcome.bounds).to_string()),
     ]
     .into_iter()
@@ -403,11 +407,21 @@ pub async fn simulate_page(live: &Live, lines: Vec<Line>) -> Result<Option<DryRu
 }
 
 
-/// The state after a record was appended for `range`: the count grows only while the same range comes back.
-pub fn next_replays(replays: &Replays, range: Option<(u64, u64)>) -> Replays {
+/// A page is a replay when its ids were all recorded and the cap is reached: one id outside the recorded set always gets a record.
+pub fn is_replay(replays: &Replays, ids: &BTreeSet<String>) -> bool {
+    ids.is_subset(&replays.ids) && replays.records >= MAX_REPLAYED_ROUNDS
+}
+
+
+/// The state after a record was appended for the page `ids`: the count grows only while the page holds ids already recorded.
+pub fn next_replays(replays: &Replays, ids: &BTreeSet<String>) -> Replays {
     Replays {
-        range,
-        records: if replays.range == range { replays.records.saturating_add(1) } else { 1 },
+        ids: ids.clone(),
+        records: if ids.is_subset(&replays.ids) {
+            replays.records.saturating_add(1)
+        } else {
+            1
+        },
     }
 }
 
@@ -415,6 +429,12 @@ pub fn next_replays(replays: &Replays, range: Option<(u64, u64)>) -> Replays {
 pub fn log_replay(range: Option<(u64, u64)>, records: u32) {
     let text = format!("playbooks round replays range {range:?} after {records} records, no new record until its rows are deleted");
     error!("{text}");
+}
+
+
+pub fn log_partial_ack(range: Option<(u64, u64)>, deleted: usize, expected: usize) {
+    let text = format!("playbooks round partial ack range {range:?}: {deleted} of {expected} rows deleted, the rest replays");
+    warn!("{text}");
 }
 
 
@@ -443,16 +463,27 @@ pub async fn run_round<Out: Write>(
             write_dry_run(trace_out, found).map_err(RoundError::Trace)?;
         }
         let outcome = outcome_of(&items, &sorted, report.as_ref(), live.settings.page_size);
-        let replayed = replays.range == outcome.range && replays.records >= MAX_REPLAYED_ROUNDS;
-        if replayed {
+        let page_ids: BTreeSet<String> = items.iter().map(|item| item.id.clone()).collect();
+        if is_replay(replays, &page_ids) {
             log_replay(outcome.range, replays.records);
         } else {
             audit(round_entry(tenant_of(scope), &outcome, now()))?;
-            *replays = next_replays(replays, outcome.range);
+            *replays = next_replays(replays, &page_ids);
         }
-        ack_playbook_feed(exec, scope, &items).await?;
-        *replays = Replays::default();
-        Ok(outcome)
+        let deleted = ack_playbook_feed(exec, scope, &items).await?;
+        if deleted > items.len() {
+            Err(RoundError::AckCount {
+                deleted,
+                expected: items.len(),
+            })
+        } else {
+            if deleted < items.len() {
+                log_partial_ack(outcome.range, deleted, items.len());
+            } else {
+                *replays = Replays::default();
+            }
+            Ok(outcome)
+        }
     }
 }
 
@@ -467,6 +498,12 @@ pub fn next_failures(failures: u32, outcome: &Result<Outcome, RoundError>) -> u3
 
 pub fn backoff(interval_seconds: u64, failures: u32) -> Duration {
     Duration::from_secs(interval_seconds).saturating_mul(1 << failures.min(MAX_BACKOFF_SHIFT))
+}
+
+
+/// A failure streak is loud at its second failure and again at each power of two.
+pub fn is_loud(failures: u32) -> bool {
+    failures >= LOUD_AFTER_FAILURES && failures.is_power_of_two()
 }
 
 
@@ -488,7 +525,7 @@ pub fn log_round(outcome: &Result<Outcome, RoundError>, failures: u32) {
         Ok(_empty) => {}
         Err(failed) => {
             let text = format!("playbooks round failed ({failures} in a row), rows kept: {failed}");
-            if failures == LOUD_AFTER_FAILURES {
+            if is_loud(failures) {
                 error!("{text}");
             } else {
                 warn!("{text}");
