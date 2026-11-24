@@ -26,3 +26,19 @@ pub fn tenant_from_subject<'a>(subject: &'a str, prefix: &str, max_bytes: usize)
         Ok(tenant)
     }
 }
+
+
+pub const INVALID_TENANT_TOKEN: &str = "_invalid";
+
+
+/// The tenant as one dead-letter subject token: the same checks as `tenant_from_subject`, else `INVALID_TENANT_TOKEN`.
+pub fn dead_letter_token(tenant: &str, max_bytes: usize) -> String {
+    let probe = format!("{EVENTS_SUBJECT_PREFIX}.{tenant}");
+    tenant_from_subject(&probe, EVENTS_SUBJECT_PREFIX, max_bytes).map_or_else(|_| INVALID_TENANT_TOKEN.to_owned(), str::to_owned)
+}
+
+
+/// `<prefix>.<token>`: exactly one token after the prefix, whatever the tenant text.
+pub fn dead_letter_subject(prefix: &str, tenant: &str, max_bytes: usize) -> String {
+    format!("{prefix}.{}", dead_letter_token(tenant, max_bytes))
+}

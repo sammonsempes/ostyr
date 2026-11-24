@@ -2,7 +2,8 @@ use crate::settings::IngestSettings;
 use crate::types::{AckFn, AckToken, ClockFn, DeadLetterFn, FetchFn, PendingMap, ProgressFn, SinkFn, SleepFn};
 use core_config::reload::ReloadEngine;
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde_json::error::Category;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
@@ -109,6 +110,7 @@ pub struct CycleReport {
     pub acknowledged: usize,
     pub redelivered: usize,
     pub dead_lettered: usize,
+    pub dead_letter_failed: usize,
     pub skipped: usize,
     pub ack_failures: usize,
 }
@@ -119,6 +121,8 @@ pub struct LoopReport {
     pub cycles: u64,
     pub fetch_failures: u64,
     pub host_metrics_skipped: u64,
+    pub dead_lettered: u64,
+    pub dead_letter_failed: u64,
 }
 
 
@@ -136,6 +140,7 @@ pub struct Pipeline {
     pub wiring: Wiring,
     pub pending: PendingMap,
     pub carry: Vec<Message>,
+    pub dead_groups: DeadGroups,
 }
 
 
@@ -166,4 +171,23 @@ pub struct Link {
     pub session: Mutex<Option<Session>>,
     pub next_token: AtomicU64,
     pub refused_field: Mutex<Option<&'static str>>,
+}
+
+
+/// Why a message was dead-lettered; the text of each class is fixed, never payload content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeadLetterClass {
+    Oversize,
+    NotEcs(Category),
+    Poison,
+    Identity(String),
+    Other,
+}
+
+
+/// One cycle's confirmed dead letters by `(tenant, class text)`, at most `MAX_DEAD_LETTER_GROUPS` groups; `other_groups` counts the letters beyond.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeadGroups {
+    pub groups: BTreeMap<(String, String), u64>,
+    pub other_groups: u64,
 }

@@ -10,7 +10,8 @@ use crate::types::{Dropped, NowFn, StoreFn, Tally};
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use core_config::types::BoxError;
 use siem_ingest::batcher::backoff_delay;
-use siem_ingest::model::{AckAction, Delivery, Wiring};
+use siem_ingest::dead::{log_dead_groups, record_dead_letter};
+use siem_ingest::model::{AckAction, DeadGroups, DeadLetterClass, Delivery, Wiring};
 use siem_ingest::parse::truncate_reason;
 use siem_ingest::settings::IngestSettings;
 use siem_ingest::tenant::{tenant_from_subject, EVENTS_SUBJECT_PREFIX};
@@ -62,6 +63,7 @@ pub struct Gather {
     pub row_bytes: usize,
     pub tally: Tally,
     pub dropped: Dropped,
+    pub dead: DeadGroups,
 }
 
 
@@ -111,9 +113,11 @@ pub fn settle(wiring: &Wiring, token: AckToken, action: AckAction, tally: &mut T
 pub fn refuse_identity(scope: &Scope, gather: &mut Gather, delivery: &Delivery, (tenant, refusal): (&str, IdentityRefusal)) {
     let reason = format!("identity_unusable: {refusal}");
     count(&mut gather.tally, "identity_unusable", 1);
-    warn!(token = delivery.token, %reason, "a host event with an unusable identity is dead-lettered");
     match (scope.wiring.dead_letter)(tenant, &delivery.payload, &reason) {
-        Ok(()) => settle(scope.wiring, delivery.token, AckAction::Ack, &mut gather.tally),
+        Ok(()) => {
+            record_dead_letter(&mut gather.dead, tenant, &DeadLetterClass::Identity(refusal.to_string()));
+            settle(scope.wiring, delivery.token, AckAction::Ack, &mut gather.tally);
+        }
         Err(error) => {
             let text = truncate_reason(&error.to_string());
             warn!(token = delivery.token, error = %text, "dead-letter publish failed, message left for redelivery");
@@ -242,6 +246,7 @@ pub fn run_cycle(
     };
     let mut gather = Gather::default();
     deliveries.into_iter().for_each(|delivery| triage(&scope, state, &mut gather, delivery));
+    log_dead_groups(&mut gather.dead);
     if gather.row_bytes >= MAX_BATCH_ROW_BYTES {
         let row_bytes = gather.row_bytes;
         warn!(row_bytes, "batch_row_budget reached");

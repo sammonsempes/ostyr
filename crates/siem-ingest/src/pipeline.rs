@@ -1,4 +1,5 @@
 use crate::batcher::{backoff_delay, flush, push, tick};
+use crate::dead::{class_of_reason, log_dead_groups, log_summary, record_dead_letter, summary_due};
 use crate::error::{InsertClass, InsertError, PipelineError, PushError};
 use crate::model::{AckAction, Batcher, CycleReport, Delivery, FlushReport, LoopReport, Message, Pipeline, Wiring};
 use crate::parse::truncate_reason;
@@ -22,6 +23,7 @@ pub fn new_pipeline(batcher: Batcher, wiring: Wiring) -> Pipeline {
         wiring,
         pending: Default::default(),
         carry: Vec::new(),
+        dead_groups: Default::default(),
     }
 }
 
@@ -53,10 +55,12 @@ pub fn dead_letter(pipeline: &mut Pipeline, token: AckToken, reason: &str, repor
         .for_each(|held| match (pipeline.wiring.dead_letter)(&held.tenant, &held.payload, reason) {
             Ok(()) => {
                 report.dead_lettered += 1;
+                record_dead_letter(&mut pipeline.dead_groups, &held.tenant, &class_of_reason(reason));
                 answer(pipeline, token, AckAction::Ack, report);
             }
             Err(error) => {
                 warn!(token, error = %truncate_reason(&error.to_string()), "dead-letter publish failed, message left for redelivery");
+                report.dead_letter_failed += 1;
                 answer(pipeline, token, AckAction::Nak, report);
             }
         });
@@ -193,6 +197,7 @@ pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> 
         .for_each(|delivery| accept(pipeline, &settings, delivery, &mut report));
     let aged = tick(&mut pipeline.batcher);
     aged.into_iter().for_each(|done| settle(pipeline, done, &mut report));
+    log_dead_groups(&mut pipeline.dead_groups);
     Ok(report)
 }
 
@@ -201,12 +206,15 @@ pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> 
 pub fn run_loop(pipeline: &mut Pipeline, stop: &StopFn) -> LoopReport {
     let mut summary = LoopReport::default();
     let mut streak: u32 = 0;
+    let mut last_summary = (pipeline.batcher.clock)();
     while !stop() && summary.cycles < MAX_LOOP_CYCLES {
         summary.cycles += 1;
         match run_cycle(pipeline) {
             Ok(cycle) => {
                 streak = 0;
-                summary.host_metrics_skipped += cycle.skipped as u64;
+                summary.host_metrics_skipped = summary.host_metrics_skipped.saturating_add(cycle.skipped as u64);
+                summary.dead_lettered = summary.dead_lettered.saturating_add(cycle.dead_lettered as u64);
+                summary.dead_letter_failed = summary.dead_letter_failed.saturating_add(cycle.dead_letter_failed as u64);
             }
             Err(error) => {
                 let settings = current_config(&pipeline.batcher.settings);
@@ -215,6 +223,11 @@ pub fn run_loop(pipeline: &mut Pipeline, stop: &StopFn) -> LoopReport {
                 streak = streak.saturating_add(1);
                 summary.fetch_failures += 1;
             }
+        }
+        let now = (pipeline.batcher.clock)();
+        if summary_due(last_summary, now) {
+            log_summary(&summary);
+            last_summary = now;
         }
     }
     summary
