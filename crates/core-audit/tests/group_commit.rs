@@ -5,13 +5,14 @@ mod types;
 
 
 use core_audit::error::AuditError;
-use core_audit::log::{append, fill_slot, follow, hand_off, new_log, take_outcome, AuditLog, LogState, Pending, SlotCell, MAX_GROUP_RECORDS};
+use core_audit::log::{append, await_answer, head, leave_outcome, new_log, take_outcome, AuditLog, LogState, Pending, SlotCell, MAX_GROUP_RECORDS};
 use core_audit::model::GENESIS_HASH;
 use core_audit::types::Slot;
 use core_audit::verify::{verify, MAX_RECORD_BYTES};
 use sample::entry;
 use std::error::Error;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use types::TestResult;
@@ -105,7 +106,7 @@ fn observing_sync(writer: &mut CountingWriter) -> io::Result<()> {
     writer.answered_before_sync = writer
         .watched
         .iter()
-        .filter(|slot| slot.state.lock().map(|state| state.outcome.is_some()).unwrap_or(true))
+        .filter(|slot| slot.outcome.lock().map(|outcome| outcome.is_some()).unwrap_or(true))
         .count();
     Ok(())
 }
@@ -145,7 +146,7 @@ fn queue(log: &AuditLog<CountingWriter>, count: usize) -> Result<Vec<Slot>, Box<
         .map(|index| {
             let slot: Slot = Arc::new(SlotCell::default());
             let new = entry(index + 1)?;
-            log.pending.lock().map_err(|error| error.to_string())?.push(Pending {
+            log.pending.lock().map_err(|error| error.to_string())?.entries.push(Pending {
                 entry: new,
                 slot: Arc::clone(&slot),
             });
@@ -227,7 +228,7 @@ fn an_oversized_entry_fails_alone_and_the_others_commit() -> TestResult {
     let mut big = entry(0)?;
     big.target = "t".repeat(MAX_RECORD_BYTES);
     let big_slot: Slot = Arc::new(SlotCell::default());
-    log.pending.lock().map_err(|error| error.to_string())?.insert(
+    log.pending.lock().map_err(|error| error.to_string())?.entries.insert(
         1,
         Pending {
             entry: big,
@@ -359,10 +360,10 @@ fn spawn_log(
 }
 
 
-fn wait_until_queued(log: &AuditLog<CountingWriter>) -> bool {
+fn wait_until_queued(log: &AuditLog<CountingWriter>, count: usize) -> bool {
     (0..QUEUE_WAIT_YIELDS).any(|_| {
         thread::yield_now();
-        log.pending.lock().map(|queue| !queue.is_empty()).unwrap_or(true)
+        log.pending.lock().map(|queue| queue.entries.len() >= count).unwrap_or(true)
     })
 }
 
@@ -375,7 +376,7 @@ fn a_follower_parked_through_a_slow_sync_gets_ok_after_it_never_poisoned() -> Te
         let leader = scope.spawn(|| append(&log, first));
         await_latch(&gate.entered);
         let follower = scope.spawn(|| append(&log, second));
-        assert!(wait_until_queued(&log));
+        assert!(wait_until_queued(&log, 1));
         (0..YIELDS_WHILE_HELD).for_each(|_| thread::yield_now());
         raise(&gate.release);
         let leader_record = leader.join().map_err(|_| "leader panicked")??;
@@ -391,14 +392,14 @@ fn a_follower_parked_through_a_slow_sync_gets_ok_after_it_never_poisoned() -> Te
 
 
 #[test]
-fn a_leader_that_panics_in_the_writer_refuses_its_followers_instead_of_leaving_them_waiting() -> TestResult {
+fn a_leader_that_panics_in_the_writer_hands_the_lead_to_a_waiter_who_refuses_every_queued_entry() -> TestResult {
     let (log, gate) = spawn_log(gated_sync, true)?;
     let (first, second) = (entry(0)?, entry(1)?);
     let (leader_panicked, follower_outcome) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
         let leader = scope.spawn(|| append(&log, first));
         await_latch(&gate.entered);
         let follower = scope.spawn(|| append(&log, second));
-        assert!(wait_until_queued(&log));
+        assert!(wait_until_queued(&log, 1));
         raise(&gate.release);
         let leader_panicked = leader.join().is_err();
         let follower_outcome = follower.join().map_err(|_| "follower panicked")?;
@@ -407,7 +408,7 @@ fn a_leader_that_panics_in_the_writer_refuses_its_followers_instead_of_leaving_t
     assert!(leader_panicked);
     assert!(matches!(follower_outcome, Err(AuditError::LogPoisoned)));
     assert!(matches!(append(&log, entry(0)?), Err(AuditError::LogPoisoned)));
-    assert!(log.pending.lock().map_err(|error| error.to_string())?.is_empty());
+    assert!(log.pending.lock().map_err(|error| error.to_string())?.entries.is_empty());
     Ok(())
 }
 
@@ -426,74 +427,105 @@ fn a_panicked_writer_lock_refuses_every_queued_entry() -> TestResult {
     let slots = queue(&log, EXTRA_QUEUED)?;
     assert!(matches!(append(&log, entry(0)?), Err(AuditError::LogPoisoned)));
     assert!(slots.iter().all(|slot| matches!(take_outcome(slot), Some(Err(AuditError::LogPoisoned)))));
-    assert!(log.pending.lock().map_err(|error| error.to_string())?.is_empty());
+    assert!(log.pending.lock().map_err(|error| error.to_string())?.entries.is_empty());
     Ok(())
 }
 
 
 #[test]
-fn an_answered_follower_returns_its_outcome_without_flushing() -> TestResult {
+fn an_append_queued_behind_a_leader_blocked_on_another_state_holder_is_answered_when_it_lets_go() -> TestResult {
     let log = log_with(None, counting_sync);
-    let record = append(&log, entry(0)?)?;
+    let held = Gate::default();
+    let (leader_record, follower_record) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+        let holder = scope.spawn(|| {
+            if let Ok(guard) = log.state.lock() {
+                raise(&held.entered);
+                await_latch(&held.release);
+                drop(guard);
+            }
+        });
+        await_latch(&held.entered);
+        let (first, second) = (entry(0)?, entry(1)?);
+        let leader = scope.spawn(|| append(&log, first));
+        assert!(wait_until_queued(&log, 1));
+        let follower = scope.spawn(|| append(&log, second));
+        assert!(wait_until_queued(&log, TWO_GROUPS));
+        raise(&held.release);
+        holder.join().map_err(|_| "holder panicked")?;
+        let leader_record = leader.join().map_err(|_| "leader panicked")??;
+        let follower_record = follower.join().map_err(|_| "follower panicked")??;
+        Ok((leader_record, follower_record))
+    })?;
+    assert_eq!(follower_record.previous_hash, leader_record.hash);
+    Ok(())
+}
+
+
+#[test]
+fn head_reads_beside_a_sequential_appender_never_strand_an_append() -> TestResult {
+    let log = log_with(None, counting_sync);
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| -> TestResult {
+        let reader = scope.spawn(|| {
+            (0..QUEUE_WAIT_YIELDS)
+                .take_while(|_| !stop.load(Ordering::SeqCst))
+                .for_each(|_| drop(head(&log)));
+        });
+        let appended =
+            (0..APPENDS_PER_THREAD * THREADS).try_for_each(|index| append(&log, entry(index)?).map(|_| ()).map_err(Box::<dyn Error>::from));
+        stop.store(true, Ordering::SeqCst);
+        reader.join().map_err(|_| "reader panicked")?;
+        appended
+    })?;
+    assert_eq!(log.state.into_inner()?.writer.syncs, APPENDS_PER_THREAD * THREADS);
+    Ok(())
+}
+
+
+#[test]
+fn a_filled_caller_returns_while_another_thread_holds_the_writer_lock() -> TestResult {
+    let log = log_with(None, counting_sync);
+    let held = Gate::default();
+    let returned = AtomicBool::new(false);
+    let returned_before_release = AtomicBool::new(false);
     let slot: Slot = Arc::new(SlotCell::default());
-    fill_slot(&slot, Ok(record.clone()));
+    let record = append(&log, entry(0)?)?;
+    leave_outcome(&slot, Ok(record.clone()));
+    thread::scope(|scope| -> TestResult {
+        let holder = scope.spawn(|| {
+            if let Ok(guard) = log.state.lock() {
+                raise(&held.entered);
+                let seen = (0..QUEUE_WAIT_YIELDS).any(|_| {
+                    thread::yield_now();
+                    returned.load(Ordering::SeqCst)
+                });
+                returned_before_release.store(seen, Ordering::SeqCst);
+                drop(guard);
+            }
+        });
+        await_latch(&held.entered);
+        let mut queue = log.pending.lock().map_err(|error| error.to_string())?;
+        queue.leader_active = true;
+        let answer = await_answer(&log, queue, &slot);
+        returned.store(true, Ordering::SeqCst);
+        holder.join().map_err(|_| "holder panicked")?;
+        assert!(matches!(answer, Ok(ref taken) if taken.hash == record.hash));
+        Ok(())
+    })?;
+    assert!(returned_before_release.load(Ordering::SeqCst));
+    Ok(())
+}
+
+
+#[test]
+fn a_waiter_whose_leader_ended_without_answering_it_leads_itself() -> TestResult {
+    let log = log_with(None, counting_sync);
     let queued = queue(&log, 1)?;
-    assert!(matches!(follow(&log, &slot), Ok(ref taken) if taken.hash == record.hash));
+    let slot = queued.first().ok_or("no slot")?;
+    let mut held = log.pending.lock().map_err(|error| error.to_string())?;
+    held.leader_active = false;
+    assert!(await_answer(&log, held, slot).is_ok());
+    assert!(!log.pending.lock().map_err(|error| error.to_string())?.leader_active);
     assert_eq!(syncs(&log)?, 1);
-    assert!(queued.iter().all(|pending| take_outcome(pending).is_none()));
-    Ok(())
-}
-
-
-#[test]
-fn a_promoted_follower_takes_the_lock_and_flushes_what_is_queued() -> TestResult {
-    let log = log_with(None, counting_sync);
-    let record = append(&log, entry(0)?)?;
-    let slot: Slot = Arc::new(SlotCell::default());
-    fill_slot(&slot, Ok(record.clone()));
-    slot.state.lock().map_err(|_| "poisoned")?.promoted = true;
-    let queued = queue(&log, EXTRA_QUEUED)?;
-    assert!(matches!(follow(&log, &slot), Ok(ref taken) if taken.hash == record.hash));
-    assert_eq!(syncs(&log)?, TWO_GROUPS);
-    assert!(queued.iter().all(|pending| matches!(take_outcome(pending), Some(Ok(_)))));
-    assert!(!slot.state.lock().map_err(|_| "poisoned")?.promoted);
-    Ok(())
-}
-
-
-#[test]
-fn a_promoted_follower_finding_the_writer_lock_poisoned_is_refused() -> TestResult {
-    let log = log_with(None, counting_sync);
-    thread::scope(|scope| {
-        let _panicked = scope
-            .spawn(|| {
-                let _guard = log.state.lock();
-                assert!(log.state.is_poisoned(), "poison the writer lock");
-            })
-            .join();
-    });
-    let slot: Slot = Arc::new(SlotCell::default());
-    slot.state.lock().map_err(|_| "poisoned")?.promoted = true;
-    let queued = queue(&log, 1)?;
-    fill_slot(&slot, Err(AuditError::LogPoisoned));
-    assert!(matches!(follow(&log, &slot), Err(AuditError::LogPoisoned)));
-    assert!(queued
-        .iter()
-        .all(|pending| matches!(take_outcome(pending), Some(Err(AuditError::LogPoisoned)))));
-    Ok(())
-}
-
-
-#[test]
-fn the_hand_off_promotes_only_the_oldest_queued_entry() -> TestResult {
-    let log = log_with(None, counting_sync);
-    hand_off(&log);
-    let slots = queue(&log, EXTRA_QUEUED)?;
-    hand_off(&log);
-    let promoted: Vec<bool> = slots
-        .iter()
-        .map(|slot| slot.state.lock().map(|state| state.promoted).unwrap_or(false))
-        .collect();
-    assert_eq!(promoted, vec![true, false, false]);
     Ok(())
 }
