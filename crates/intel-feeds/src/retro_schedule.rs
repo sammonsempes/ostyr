@@ -3,7 +3,7 @@
 use crate::config::{retro_settings, RetroSection};
 use crate::retro::{RetroError, RetroSummary};
 use crate::retro_alerts::{store_run, AlertsError, StoreReport};
-use crate::types::{AlertInsertFn, ClockFn, RunRetroFn, SnapshotFn, StopFn, WaitFn};
+use crate::types::{AlertInsertFn, ClockFn, RunRetroFn, SaveEndFn, SnapshotFn, StopFn, WaitFn};
 use std::time::Duration;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -14,8 +14,9 @@ pub const WAIT_SLICE_SECONDS: u64 = 5;
 
 
 /// `previous_end` moves only after a round whose run and insert both succeeded, so a failed round shows as a `gap` in the next summary when its span is not covered again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScheduleState {
+    pub tenant: Option<String>,
     pub previous_end: Option<OffsetDateTime>,
     pub last_started: Option<OffsetDateTime>,
 }
@@ -74,10 +75,11 @@ pub fn round(
     let settings = retro_settings(section);
     let started = ScheduleState {
         last_started: Some(now),
-        ..state
+        tenant: Some(section.reader.tenant.clone()),
+        previous_end: state.previous_end,
     };
     let done = window_of(section, now).ok_or(RoundFailure::Window).and_then(|(start, end)| {
-        let found = run(&settings, start, end, state.previous_end).map_err(RoundFailure::Run)?;
+        let found = run(&settings, start, end, started.previous_end).map_err(RoundFailure::Run)?;
         let report = store_run(&settings, &found, now, insert).map_err(RoundFailure::Store)?;
         Ok((end, found.summary, report))
     });
@@ -102,7 +104,7 @@ pub fn round(
 }
 
 
-/// The injected edges of the schedule: settings snapshot, clock, wait, stop test, retro run and alert insert.
+/// The injected edges of the schedule: settings snapshot, clock, wait, stop test, retro run, alert insert and the save of the window end.
 pub struct Hooks<'a> {
     pub snapshot: &'a SnapshotFn<'a>,
     pub clock: &'a ClockFn<'a>,
@@ -110,6 +112,32 @@ pub struct Hooks<'a> {
     pub stop: &'a StopFn<'a>,
     pub run: &'a RunRetroFn<'a>,
     pub insert: &'a AlertInsertFn<'a>,
+    pub save: &'a SaveEndFn<'a>,
+}
+
+
+/// After a round that ran and stored, the new window end is saved; a failed save is logged and the schedule goes on (the next restart then names a gap).
+pub fn remember(hooks: &Hooks, state: &ScheduleState, outcome: &RoundOutcome) {
+    if matches!(outcome, RoundOutcome::Done { .. }) {
+        state.previous_end.iter().zip(state.tenant.iter()).for_each(|(end, tenant)| {
+            if let Err(error) = (hooks.save)(tenant, *end) {
+                let kind = error.kind();
+                warn!(?kind, "retro state not saved");
+            }
+        });
+    }
+}
+
+
+/// The state with no previous end when the section's tenant is not the tenant of the last round (a reload changed it); `tenant_changed` is logged once.
+pub fn same_tenant(state: ScheduleState, section: &RetroSection) -> ScheduleState {
+    match state.tenant.as_deref() {
+        Some(tenant) if tenant != section.reader.tenant => {
+            warn!("tenant_changed");
+            ScheduleState { previous_end: None, ..state }
+        }
+        _ => state,
+    }
 }
 
 
@@ -127,7 +155,8 @@ pub fn pass(hooks: &Hooks, state: ScheduleState) -> (ScheduleState, Option<Round
                 (state, None)
             }
             None => {
-                let (next, outcome) = round(&section, state, now, hooks.run, hooks.insert);
+                let (next, outcome) = round(&section, same_tenant(state, &section), now, hooks.run, hooks.insert);
+                remember(hooks, &next, &outcome);
                 (next, Some(outcome))
             }
         },
@@ -135,9 +164,9 @@ pub fn pass(hooks: &Hooks, state: ScheduleState) -> (ScheduleState, Option<Round
 }
 
 
-/// At most `max_passes` passes, stopping at the first one where `stop` answers true; every round outcome goes to `report`.
-pub fn run_schedule(hooks: &Hooks, max_passes: u64, report: &mut dyn FnMut(&RoundOutcome)) -> ScheduleState {
-    let stopped = (0..max_passes).try_fold(ScheduleState::default(), |state, _| {
+/// At most `max_passes` passes from `initial`, stopping at the first one where `stop` answers true; every round outcome goes to `report`.
+pub fn run_schedule(hooks: &Hooks, initial: ScheduleState, max_passes: u64, report: &mut dyn FnMut(&RoundOutcome)) -> ScheduleState {
+    let stopped = (0..max_passes).try_fold(initial, |state, _| {
         if (hooks.stop)() {
             Err(state)
         } else {

@@ -12,6 +12,26 @@ pub const ESCAPED_CATEGORIES: [GeneralCategory; 6] = [
 ];
 
 
+/// Letters and marks that render blank, the list of status-page `INVISIBLE_CHARACTERS` (pinned by a test).
+pub const BLANK_LETTERS: [char; 15] = [
+    '\u{034F}',
+    '\u{115F}',
+    '\u{1160}',
+    '\u{17B4}',
+    '\u{17B5}',
+    '\u{2800}',
+    '\u{180F}',
+    '\u{3164}',
+    '\u{FFA0}',
+    '\u{13441}',
+    '\u{13442}',
+    '\u{13443}',
+    '\u{13444}',
+    '\u{13445}',
+    '\u{13446}',
+];
+
+
 /// Controls, every format, separator, private-use and unassigned character (bidi, zero-width, tag block included) and the backslash.
 pub fn is_unsafe_char(character: char) -> bool {
     character == '\\' || ESCAPED_CATEGORIES.contains(&get_general_category(character))

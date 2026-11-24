@@ -256,6 +256,8 @@ pub enum RetroSectionError {
     Window,
     #[error("retro.pg_settings must name a file")]
     PgSettings,
+    #[error("retro.reader.user must differ from clickhouse.user: the reader is never the loader's identity")]
+    ReaderIsLoader,
 }
 
 
@@ -401,6 +403,15 @@ pub fn validate_retro_section(section: &RetroSection) -> Result<(), RetroSection
 }
 
 
+/// The retro reader is never the loader: the same ClickHouse user in `retro.reader` and `clickhouse` is refused by name.
+pub fn validate_reader_apart(config: &FeedsFile) -> Result<(), RetroSectionError> {
+    match (config.retro.as_ref(), config.clickhouse.as_ref()) {
+        (Some(section), Some(loader)) if section.reader.user == loader.user => Err(RetroSectionError::ReaderIsLoader),
+        _ => Ok(()),
+    }
+}
+
+
 /// Names are unique and non-empty, confidences (feeds and export minimum) within 0 to 100, generic formats carry a value mapping.
 pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
     let mut names = BTreeSet::new();
@@ -426,7 +437,8 @@ pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
         config
             .retro
             .as_ref()
-            .map_or(Ok(()), |section| validate_retro_section(section).map_err(FeedsError::from))
+            .map_or(Ok(()), |section| validate_retro_section(section).map_err(FeedsError::from))?;
+        validate_reader_apart(config).map_err(FeedsError::from)
     }
 }
 
