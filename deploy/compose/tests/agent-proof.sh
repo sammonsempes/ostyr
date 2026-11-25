@@ -11,7 +11,9 @@ readonly agent_binary secrets_dir work_dir
 readonly RELAY_ADDRESS=127.0.0.1:7443
 readonly RUN_TIMEOUT_SECONDS=60
 readonly HANDSHAKE_TIMEOUT_SECONDS=15
-readonly EVENT='{"@timestamp":"2026-11-24T00:00:00Z","message":"t853 batch through the relay"}'
+readonly HOST_EVENT_HEAD='{"ecs":{"version":"8.11.0"},"event":{"kind":"metric","category":["host"],"type":["info"],"dataset":"ostyr.host_metrics"},"host":{"name":"lab-host"},"@timestamp":'
+readonly HOST_EVENT_TAIL=',"metrics":{"system.cpu.utilization":0.97},"metrics_omitted":0,"metrics_failed":0}'
+readonly EVENT='{"@timestamp":"2026-11-24T00:00:00Z","ecs":{"version":"8.11.0"},"event":{"kind":"event","dataset":"lab.proof"},"message":"t853 batch through the relay"}'
 
 rm -rf "$work_dir"
 install -d -m 0700 "$work_dir"
@@ -33,7 +35,8 @@ spool_file: $work_dir/spool
 sequence_file: $work_dir/sequence
 executed_file: $work_dir/executed
 YAML
-printf '%s\n' "$EVENT" >"$work_dir/spool"
+host_stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\n' "$EVENT" "${HOST_EVENT_HEAD}\"${host_stamp}\"${HOST_EVENT_TAIL}" >"$work_dir/spool"
 
 agent_status=0
 timeout "$RUN_TIMEOUT_SECONDS" "$agent_binary" "$work_dir/agent.yaml" 1 >"$work_dir/agent.out" 2>"$work_dir/agent.err" || agent_status=$?

@@ -1,0 +1,6 @@
+url: "https://clickhouse:8443"
+user: reader
+password_file: /run/secrets/metricalerts_clickhouse_password
+ca_file: /run/secrets/pg_ca
+timeout_ms: 10000
+database: ostyr

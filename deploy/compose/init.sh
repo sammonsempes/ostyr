@@ -15,6 +15,9 @@ readonly PLAYBOOKS_UID=65533
 readonly GATEWAY_UID=65534
 readonly CLICKHOUSE_UID=101
 readonly SCHEMA_UID=65530
+readonly SIEM_UID=65529
+readonly METRICS_UID=65528
+readonly ALERTS_UID=65527
 readonly CERT_DAYS=825
 readonly KEY_BYTES=32
 readonly ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -32,7 +35,12 @@ readonly BASE64_LENGTH=44
 readonly PLATFORM_CN=ostyr-platform
 readonly NATS_PORT=4222
 readonly NATS_MAX_FILE_STORE=2G
-readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)
+readonly NATS_STREAM=events
+readonly NATS_JS_PREFIX=JS.EVENTS.API
+readonly NATS_DEAD_SUBJECT='dead.events.*'
+readonly NATS_PULL_THRESHOLD=60s
+readonly NATS_CONSUMERS=(SIEM:siem_ingest:siem-ingest METRICS:metrics_ingest:metrics-ingest)
+readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema siem metrics metricalerts)
 readonly CLICKHOUSE_USERS=(schema ingest reader metrics)
 readonly CLICKHOUSE_SUBNET=172.29.63.0/24
 readonly CLICKHOUSE_DATABASE=ostyr
@@ -154,6 +162,9 @@ expected_owner() {
     playbooks_pg_password) printf '%s:%s' "$PLAYBOOKS_UID" "$PLAYBOOKS_UID" ;;
     clickhouse_server.key | clickhouse_users) printf '%s:%s' "$CLICKHOUSE_UID" "$CLICKHOUSE_UID" ;;
     clickhouse_schema_password) printf '%s:%s' "$SCHEMA_UID" "$SCHEMA_UID" ;;
+    clickhouse_ingest_password | nats_siem_password) printf '%s:%s' "$SIEM_UID" "$SIEM_UID" ;;
+    clickhouse_metrics_password | nats_metrics_password) printf '%s:%s' "$METRICS_UID" "$METRICS_UID" ;;
+    metricalerts_pg_password | metricalerts_clickhouse_password) printf '%s:%s' "$ALERTS_UID" "$ALERTS_UID" ;;
     *) printf '0:0' ;;
     esac
 }
@@ -161,7 +172,7 @@ expected_owner() {
 expected_mode() {
     case "$1" in
     *.crt) printf '644' ;;
-    playbooks_pg_password) printf '400' ;;
+    playbooks_pg_password | metricalerts_pg_password | metricalerts_clickhouse_password) printf '400' ;;
     *) printf '600' ;;
     esac
 }
@@ -206,14 +217,6 @@ make_random_file() {
     fi
 }
 
-warn_without_file_store() {
-    local name="$1"
-    if ! grep -qE '^[[:space:]]*max_file_store:' "$SECRETS_DIR/$name"; then
-        printf 'warning: %s has no max_file_store, so JetStream may fill the disk\n' "$name" >&2
-        printf 'to fix it, delete %s and rerun init.sh (the NATS passwords are kept); nothing was changed\n' "$name" >&2
-    fi
-}
-
 warn_gateway_san() {
     local expected=$'X509v3 Subject Alternative Name: \n    DNS:gateway' actual
     actual="$(openssl x509 -in "$SECRETS_DIR/gateway_tls.crt" -noout -ext subjectAltName)"
@@ -223,20 +226,82 @@ warn_gateway_san() {
     fi
 }
 
+nats_consumer_exports() {
+    local entry account durable
+    for entry in "${NATS_CONSUMERS[@]}"; do
+        IFS=: read -r account _ durable <<<"$entry"
+        cat <<EXPORTS
+        { service: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable", accounts: [$account] }
+        { service: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable", accounts: [$account], response_type: stream, response_threshold: "$NATS_PULL_THRESHOLD" }
+        { service: "\$JS.ACK.$NATS_STREAM.$durable.>", accounts: [$account] }
+EXPORTS
+    done
+}
+
+nats_consumer_account() {
+    local account="$1" user="$2" password="$3" durable="$4"
+    cat <<ACCOUNT
+    $account {
+        users: [{
+            user: $user
+            password: "$password"
+            permissions: {
+                publish: {
+                    allow: [
+                        "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable"
+                        "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable"
+                        "\$JS.ACK.$NATS_STREAM.$durable.>"
+                        "$NATS_DEAD_SUBJECT"
+                    ]
+                }
+                subscribe: { allow: ["_INBOX_$user.>"] }
+            }
+        }]
+        imports: [
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.INFO.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.INFO.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.API.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }, to: "$NATS_JS_PREFIX.CONSUMER.MSG.NEXT.$NATS_STREAM.$durable" }
+            { service: { account: EVENTS, subject: "\$JS.ACK.$NATS_STREAM.$durable.>" } }
+            { service: { account: EVENTS, subject: "$NATS_DEAD_SUBJECT" } }
+        ]
+    }
+ACCOUNT
+}
+
+nats_accounts() {
+    local admin_password="$1" gateway_password="$2" siem_password="$3" metrics_password="$4"
+    cat <<ACCOUNTS
+accounts {
+    EVENTS {
+        jetstream: enabled
+        users: [{ user: admin, password: "$admin_password" }]
+        exports: [
+            { service: "events.*", accounts: [GATEWAY] }
+            { service: "$NATS_DEAD_SUBJECT", accounts: [SIEM, METRICS] }
+$(nats_consumer_exports)
+        ]
+    }
+    GATEWAY {
+        users: [{
+            user: gateway
+            password: "$gateway_password"
+            permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }
+        }]
+        imports: [{ service: { account: EVENTS, subject: "events.*" } }]
+    }
+$(nats_consumer_account SIEM siem_ingest "$siem_password" siem-ingest)
+$(nats_consumer_account METRICS metrics_ingest "$metrics_password" metrics-ingest)
+}
+ACCOUNTS
+}
+
 make_nats_conf() {
-    local name=nats.conf temporary gateway_password admin_password
+    local name=nats.conf temporary gateway_password admin_password siem_password metrics_password
     gateway_password="$(cat "$SECRETS_DIR/nats_gateway_password")"
     admin_password="$(cat "$SECRETS_DIR/nats_admin_password")"
-    if is_present "$SECRETS_DIR/$name"; then
-        check_present "$name"
-        if ! grep -qF -e "\"$gateway_password\"" "$SECRETS_DIR/$name" || ! grep -qF -e "\"$admin_password\"" "$SECRETS_DIR/$name"; then
-            printf 'error: %s does not hold nats_gateway_password and nats_admin_password, delete it and run init again\n' "$name" >&2
-            exit 1
-        fi
-        warn_without_file_store "$name"
-    else
-        temporary="$(mktemp "$scratch/$name.XXXXXX")"
-        cat >"$temporary" <<CONF
+    siem_password="$(cat "$SECRETS_DIR/nats_siem_password")"
+    metrics_password="$(cat "$SECRETS_DIR/nats_metrics_password")"
+    temporary="$(mktemp "$scratch/$name.XXXXXX")"
+    cat >"$temporary" <<CONF
 server_name: ostyr-nats
 host: 0.0.0.0
 port: $NATS_PORT
@@ -249,22 +314,15 @@ tls {
     key_file: /run/secrets/nats_server_key
     handshake_first: true
 }
-accounts {
-    EVENTS {
-        jetstream: enabled
-        users: [{ user: admin, password: "$admin_password" }]
-        exports: [{ service: "events.*", accounts: [GATEWAY] }]
-    }
-    GATEWAY {
-        users: [{
-            user: gateway
-            password: "$gateway_password"
-            permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }
-        }]
-        imports: [{ service: { account: EVENTS, subject: "events.*" } }]
-    }
-}
+$(nats_accounts "$admin_password" "$gateway_password" "$siem_password" "$metrics_password")
 CONF
+    if is_present "$SECRETS_DIR/$name"; then
+        check_present "$name"
+        if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then
+            printf 'error: %s is not the file init.sh renders from the four NATS password files, delete it and run init again\n' "$name" >&2
+            exit 1
+        fi
+    else
         chown -h 0:0 "$temporary"
         chmod 0600 "$temporary"
         ln "$temporary" "$SECRETS_DIR/$name"
@@ -500,9 +558,13 @@ make_random_file store.key raw
 make_copy_file playbooks_pg_password pg_service_password
 make_random_file nats_gateway_password base64
 make_random_file nats_admin_password base64
+make_random_file nats_siem_password base64
+make_random_file nats_metrics_password base64
 make_nats_conf
 for clickhouse_user in "${CLICKHOUSE_USERS[@]}"; do
     make_random_file "clickhouse_${clickhouse_user}_password" base64
 done
 make_clickhouse_users
+make_copy_file metricalerts_pg_password pg_service_password
+make_copy_file metricalerts_clickhouse_password clickhouse_reader_password
 printf 'secrets ready in %s\n' "$SECRETS_DIR"

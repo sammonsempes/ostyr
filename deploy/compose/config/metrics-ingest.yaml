@@ -1,0 +1,15 @@
+ingest:
+  clickhouse_url: "https://clickhouse:8443"
+  clickhouse_database: ostyr
+  clickhouse_table: metric_samples
+  clickhouse_user: metrics
+  clickhouse_password_file: /run/secrets/clickhouse_metrics_password
+  clickhouse_ca_file: /run/secrets/pg_ca
+  nats_url: "tls://nats:4222"
+  nats_tls_first: true
+  nats_ca_file: /run/secrets/pg_ca
+  nats_user: metrics_ingest
+  nats_password_file: /run/secrets/nats_metrics_password
+  nats_stream: events
+  nats_consumer: metrics-ingest
+audit_file: /var/lib/ostyr-metrics/audit.log
