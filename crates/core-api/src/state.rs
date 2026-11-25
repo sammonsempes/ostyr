@@ -53,6 +53,14 @@ pub const MAX_DETACHED_WRITES: u16 = 64;
 pub const MAX_DETACHED_PER_SOURCE: usize = 8;
 
 
+/// Authenticated reads that may run past their client at once (the global pool of the detached reads, T883): at least `connection_demand()` of the platform.
+pub const MAX_DETACHED_READS: u16 = 128;
+
+
+/// Detached reads one folded source may hold at once: below `MAX_CONNECTIONS_PER_SOURCE`, so the cap can be reached live.
+pub const MAX_DETACHED_READS_PER_SOURCE: usize = 32;
+
+
 /// How long `run_module` waits at shutdown for the detached writes: above the handlers' own deadlines (about 75 s for a cases action).
 pub const DETACHED_DRAIN_SECONDS: u64 = 90;
 
@@ -141,6 +149,9 @@ pub fn build_state(
         detached: detached_pool(MAX_DETACHED_WRITES),
         detached_sources: ConnectionTable::default(),
         detached_refused: AtomicU64::new(0),
+        detached_reads: detached_pool(MAX_DETACHED_READS),
+        detached_read_sources: ConnectionTable::default(),
+        detached_reads_refused: AtomicU64::new(0),
     })
 }
 

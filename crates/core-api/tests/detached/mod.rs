@@ -1,6 +1,7 @@
 use crate::fixture::{config_in, keep, seed_reader, Fixture, PASSWORD, READER};
 use crate::http::{audit_lines, body_json, client, login_body, login_token, request, send_from};
 use crate::limits::with_limits;
+use crate::logging::capture_dispatch;
 use crate::types::{TestError, TestResult};
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
@@ -8,19 +9,22 @@ use axum::http::{Response, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use core_api::example::example_document;
-use core_api::middleware::{detaches, drain_detached, note_detached_refused};
+use core_api::middleware::{detaches, drain_detached, note_detached_read_refused, note_detached_refused};
 use core_api::model::{ApiState, Requirement, Rule};
 use core_api::routes::{build_router, BODY_LIMIT_BYTES};
 use core_api::server::serve;
-use core_api::state::{build_state_from_files, detached_pool, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_WRITES};
+use core_api::state::{
+    build_state_from_files, detached_pool, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_READS, MAX_DETACHED_READS_PER_SOURCE, MAX_DETACHED_WRITES,
+};
 use core_api::types::{AccessTable, ServerHandle, SharedState};
 use core_audit::log::append_declared;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use std::convert::Infallible;
+use std::fs::{self, File};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use time::OffsetDateTime;
@@ -31,6 +35,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tower::ServiceExt;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -51,13 +56,31 @@ const IDLE_REFERENCES: usize = 2;
 const QUEUED_REFERENCES: usize = 3;
 
 
+const RAISED_RATE: u32 = 1000;
+
+
+const TWO_STARTED: u32 = 2;
+
+
 const REFUSALS: u64 = 3;
+
+
+const READ_WARNING: &str = "detached read pool full, request refused";
+
+
+const WRITE_WARNING: &str = "detached write pool full, request refused";
 
 
 const ROUTE_HOLD: &str = "/example/hold";
 
 
 const ROUTE_HOLD_PERMISSION: &str = "/example/hold-permission";
+
+
+const ROUTE_PUBLIC_HOLD: &str = "/example/public-hold";
+
+
+const ROUTE_SENSITIVE_HOLD: &str = "/example/sensitive-hold";
 
 
 const ROUTE_PANIC: &str = "/example/hold-panic";
@@ -149,6 +172,7 @@ fn rule(requirement: Requirement) -> Rule {
 
 fn extra(holds: &Holds) -> Router<SharedState> {
     let (write, permission, safe, panic) = (holds.clone(), holds.clone(), holds.clone(), holds.clone());
+    let (public, sensitive) = (holds.clone(), holds.clone());
     Router::new()
         .route(
             ROUTE_HOLD,
@@ -158,6 +182,14 @@ fn extra(holds: &Holds) -> Router<SharedState> {
         .route(
             ROUTE_HOLD_PERMISSION,
             post(move |State(state): State<SharedState>| hold(permission.clone(), state)),
+        )
+        .route(
+            ROUTE_PUBLIC_HOLD,
+            get(move |State(state): State<SharedState>| hold(public.clone(), state)),
+        )
+        .route(
+            ROUTE_SENSITIVE_HOLD,
+            get(move |State(state): State<SharedState>| hold(sensitive.clone(), state)),
         )
         .route(ROUTE_PANIC, post(move || panicking(panic.clone())))
         .route(ROUTE_QUICK, post(quick))
@@ -172,6 +204,14 @@ fn access() -> AccessTable {
         (
             format!("POST {ROUTE_HOLD_PERMISSION}"),
             rule(Requirement::Permission("events.read".to_owned())),
+        ),
+        (format!("GET {ROUTE_PUBLIC_HOLD}"), rule(Requirement::Public)),
+        (
+            format!("GET {ROUTE_SENSITIVE_HOLD}"),
+            Rule {
+                requirement: Requirement::Session,
+                sensitive: true,
+            },
         ),
         (format!("POST {ROUTE_PANIC}"), rule(Requirement::Session)),
         (format!("POST {ROUTE_QUICK}"), rule(Requirement::Session)),
@@ -222,6 +262,13 @@ async fn arrived(holds: &Holds, count: u32) -> TestResult {
 
 async fn drained(fx: &Fixture) {
     assert!(drain_detached(&fx.state, HANG_GUARD).await);
+}
+
+
+async fn reads_idle(fx: &Fixture) -> TestResult {
+    let all = guarded(fx.state.detached_reads.permits.clone().acquire_many_owned(fx.state.detached_reads.size)).await??;
+    drop(all);
+    Ok(())
 }
 
 
@@ -304,22 +351,165 @@ async fn a_permission_write_survives_a_client_that_leaves() -> TestResult {
 
 
 #[tokio::test]
-async fn a_safe_request_that_is_dropped_is_not_continued() -> TestResult {
+async fn a_read_survives_a_client_that_leaves_and_frees_its_slot() -> TestResult {
     let holds = holds();
     let fx = fixture_over(&holds, keep)?;
     let token = login_token(&fx.router).await?;
     let idle = Arc::strong_count(&holds.token);
     let client = start_client(&fx, client(1), "GET", ROUTE_HOLD, &token)?;
     arrived(&holds, 1).await?;
+    assert_eq!(fx.state.detached_reads.permits.available_permits(), usize::from(MAX_DETACHED_READS) - 1);
+    abandon(client).await?;
     assert!(Arc::strong_count(&holds.token) > idle);
+    assert_eq!(holds.effect.load(Ordering::SeqCst), 0);
+    holds.gate.add_permits(1);
+    reads_idle(&fx).await?;
+    assert_eq!(holds.effect.load(Ordering::SeqCst), 1);
+    assert_eq!(Arc::strong_count(&holds.token), idle);
+    assert!(fx.state.detached_read_sources.lock().map_err(|_| "poisoned")?.is_empty());
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_public_read_is_still_cancelled_with_its_client() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, keep)?;
+    let idle = Arc::strong_count(&holds.token);
+    let client = start_client(&fx, client(1), "GET", ROUTE_PUBLIC_HOLD, "")?;
+    arrived(&holds, 1).await?;
+    assert_eq!(fx.state.detached_reads.permits.available_permits(), usize::from(MAX_DETACHED_READS));
     abandon(client).await?;
     assert_eq!(Arc::strong_count(&holds.token), idle);
     holds.gate.add_permits(1);
     yield_often().await;
     assert_eq!(holds.effect.load(Ordering::SeqCst), 0);
-    assert!(records(&fx, WRITE_ACTION, None)?.is_empty());
-    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     Ok(())
+}
+
+
+#[tokio::test]
+async fn a_sensitive_read_whose_client_left_still_writes_its_record() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, keep)?;
+    let token = login_token(&fx.router).await?;
+    let client = start_client(&fx, client(1), "GET", ROUTE_SENSITIVE_HOLD, &token)?;
+    arrived(&holds, 1).await?;
+    abandon(client).await?;
+    holds.gate.add_permits(1);
+    reads_idle(&fx).await?;
+    let exchange = records(&fx, REQUEST_ACTION, Some("GET /example/sensitive-hold"))?;
+    assert_eq!(exchange.len(), 1);
+    assert_eq!(exchange.first().and_then(|record| field(record, "outcome")), Some("success"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_read_flood_is_refused_at_its_own_cap_and_leaves_the_writes_alone() -> TestResult {
+    guarded(read_flood()).await?
+}
+
+
+async fn read_flood() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, |state| Ok(with_limits(state, |limits| limits.rate_max_requests = RAISED_RATE)))?;
+    let token = login_token(&fx.router).await?;
+    let share = u32::try_from(MAX_DETACHED_READS_PER_SOURCE)?;
+    let held = (0..MAX_DETACHED_READS_PER_SOURCE)
+        .map(|_| start_client(&fx, client(1), "GET", ROUTE_HOLD, &token))
+        .collect::<Result<Vec<_>, _>>()?;
+    arrived(&holds, share).await?;
+    let refused = start_client(&fx, client(1), "GET", ROUTE_HOLD, &token)?.await??;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fx.state.detached_reads_refused.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.state.detached_refused.load(Ordering::SeqCst), 0);
+    let other = start_client(&fx, client(OTHER_SOURCE), "GET", ROUTE_HOLD, &token)?;
+    let write = start_client(&fx, client(1), "POST", ROUTE_HOLD, &token)?;
+    arrived(&holds, TWO_STARTED).await?;
+    holds.gate.add_permits(MAX_DETACHED_READS_PER_SOURCE + usize::try_from(TWO_STARTED)?);
+    for waiting in held.into_iter().chain([other, write]) {
+        assert_eq!(waiting.await??.status(), StatusCode::OK);
+    }
+    assert_eq!(fx.state.detached_refused.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_global_read_pool_answers_busy_without_touching_the_writes() -> TestResult {
+    guarded(full_read_pool()).await?
+}
+
+
+async fn full_read_pool() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, |state| {
+        Ok(ApiState {
+            detached_reads: detached_pool(1),
+            ..state
+        })
+    })?;
+    let token = login_token(&fx.router).await?;
+    let first = start_client(&fx, client(1), "GET", ROUTE_HOLD, &token)?;
+    arrived(&holds, 1).await?;
+    let refused = start_client(&fx, client(OTHER_SOURCE), "GET", ROUTE_HOLD, &token)?.await??;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fx.state.detached_reads_refused.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.state.detached_refused.load(Ordering::SeqCst), 0);
+    holds.gate.add_permits(1);
+    assert_eq!(first.await??.status(), StatusCode::OK);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn shutdown_does_not_wait_for_a_detached_read() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, keep)?;
+    let token = login_token(&fx.router).await?;
+    let read = start_client(&fx, client(1), "GET", ROUTE_HOLD, &token)?;
+    arrived(&holds, 1).await?;
+    assert!(drain_detached(&fx.state, HANG_GUARD).await);
+    holds.gate.add_permits(1);
+    assert_eq!(read.await??.status(), StatusCode::OK);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn read_refusals_are_counted_apart_from_the_writes() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, keep)?;
+    (1..=REFUSALS).for_each(|expected| assert_eq!(note_detached_read_refused(&fx.state), expected));
+    assert_eq!(fx.state.detached_refused.load(Ordering::SeqCst), 0);
+    assert_eq!(note_detached_refused(&fx.state), 1);
+    assert_eq!(fx.state.detached_reads_refused.load(Ordering::SeqCst), REFUSALS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_read_refusal_warns_with_the_read_text_and_a_write_refusal_with_the_write_text() -> TestResult {
+    let read_log = refusal_log(note_detached_read_refused)?;
+    assert!(read_log.contains(READ_WARNING));
+    assert!(!read_log.contains(WRITE_WARNING));
+    let write_log = refusal_log(note_detached_refused)?;
+    assert!(write_log.contains(WRITE_WARNING));
+    assert!(!write_log.contains(READ_WARNING));
+    Ok(())
+}
+
+
+fn refusal_log(note: fn(&ApiState) -> u64) -> Result<String, TestError> {
+    let log_dir = tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = capture_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
+    let holds = holds();
+    let fx = fixture_over(&holds, |state| Ok(ApiState { dispatch, ..state }))?;
+    assert_eq!(note(&fx.state), 1);
+    Ok(fs::read_to_string(&log_path)?)
 }
 
 
@@ -462,15 +652,14 @@ async fn a_login_dropped_while_queued_is_not_continued() -> TestResult {
 
 
 #[test]
-fn only_session_and_permission_writes_are_detached() -> TestResult {
+fn only_session_and_permission_requests_are_detached() -> TestResult {
     let session = rule(Requirement::Session);
     let permission = rule(Requirement::Permission("events.read".to_owned()));
     let public = rule(Requirement::Public);
-    assert!(detaches(Some(&session), true));
-    assert!(detaches(Some(&permission), true));
-    assert!(!detaches(Some(&public), true));
-    assert!(!detaches(None, true));
-    assert!(!detaches(Some(&session), false));
+    assert!(detaches(Some(&session)));
+    assert!(detaches(Some(&permission)));
+    assert!(!detaches(Some(&public)));
+    assert!(!detaches(None));
     Ok(())
 }
 
