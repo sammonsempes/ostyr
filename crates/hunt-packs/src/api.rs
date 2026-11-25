@@ -115,6 +115,10 @@ pub fn findings_failure(error: &FindingsError) -> ApiError {
     match error {
         FindingsError::BadCursor | FindingsError::BadPageSize => ApiError::BadRequest,
         FindingsError::Busy => ApiError::TooManyRequests,
+        FindingsError::Join => {
+            tracing::warn!(category = "task", "hunt findings task failed");
+            ApiError::Internal
+        }
         FindingsError::Store(inner) => {
             let category = store_category(inner);
             tracing::warn!(category, "hunt findings store failure");
@@ -144,16 +148,17 @@ where
 }
 
 
-/// Takes one permit of the shared semaphore for the whole read, else the request is a 429 before any connection.
+/// Takes one permit before any task exists, else 429; the permit and the store call run in one spawned task that outlives a dropped route future.
 pub fn permit_backend(permits: Arc<Semaphore>, inner: FindingsFn) -> FindingsFn {
     Arc::new(move |scope, query| match Arc::clone(&permits).try_acquire_owned() {
         Ok(permit) => {
             let pending = inner(scope, query);
-            Box::pin(async move {
+            let handle = tokio::spawn(async move {
                 let outcome = pending.await;
                 drop(permit);
                 outcome
-            })
+            });
+            Box::pin(async move { handle.await.unwrap_or_else(|_join| Err(FindingsError::Join)) })
         }
         Err(_closed_or_full) => Box::pin(ready(Err(FindingsError::Busy))),
     })

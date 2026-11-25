@@ -2,7 +2,7 @@
 
 use crate::alerting::store_outage_alerts;
 use crate::error::ProbeError;
-use crate::load::load_checks;
+use crate::load::{icmp_host, load_checks};
 use crate::model::{Check, CheckFile, CheckKind};
 use crate::probe::{
     dns_probe, guarded_addresses, http_probe, icmp_probe, probe_limits, tcp_probe, tls_probe, with_nat64_prefix, HttpRequest, HttpTransports,
@@ -272,10 +272,7 @@ pub fn literal_target(check: &Check) -> Option<IpAddr> {
         CheckKind::Tcp | CheckKind::Tls => Url::parse(&format!("{URL_SCHEME}://{}", check.target))
             .ok()
             .and_then(|url| url.host().map(|found| found.to_owned())),
-        CheckKind::Icmp => check.target.parse::<IpAddr>().ok().map(|address| match address {
-            IpAddr::V4(v4) => Host::Ipv4(v4),
-            IpAddr::V6(v6) => Host::Ipv6(v6),
-        }),
+        CheckKind::Icmp => icmp_host(&check.target),
         CheckKind::Dns => None,
     };
     match host {
@@ -378,11 +375,11 @@ pub fn endpoint(check: &Check, live: &LiveConfig, tools: &ProbeTools) -> Result<
 
 /// The guarded first address of an ICMP target (an IP literal or a plain host name).
 pub fn icmp_address(check: &Check, live: &LiveConfig, tools: &ProbeTools) -> Result<crate::target::CheckedAddr, ProbeError> {
-    let literal = check.target.parse::<IpAddr>().ok();
-    let host = match literal {
-        Some(IpAddr::V4(address)) => Host::Ipv4(address),
-        Some(IpAddr::V6(address)) => Host::Ipv6(address),
-        None => Host::Domain(check.target.as_str()),
+    let parsed = icmp_host(&check.target).ok_or_else(bad_target)?;
+    let host = match &parsed {
+        Host::Ipv4(address) => Host::Ipv4(*address),
+        Host::Ipv6(address) => Host::Ipv6(*address),
+        Host::Domain(name) => Host::Domain(name.as_str()),
     };
     let timeout = Duration::from_secs(check.timeout_seconds);
     guarded_addresses(host, &live.checks.scope, check.nat64_prefix, tools.resolve, timeout)?

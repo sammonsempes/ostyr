@@ -17,16 +17,18 @@ use private::write_private;
 use rcgen::SanType;
 use std::cell::Cell;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use synthetic_checks::error::ProbeError;
 use synthetic_checks::load::load_checks;
-use synthetic_checks::model::Check;
+use synthetic_checks::model::{Check, CheckFile};
 use synthetic_checks::probe::{FetchCaps, HttpRequest, HttpResponse};
 use synthetic_checks::round::{new_runner, reload_checks, RoundReport};
 use synthetic_checks::serve::{
@@ -35,8 +37,27 @@ use synthetic_checks::serve::{
     store_alerts, system_resolve, validate_service, Applied, Finish, LiveConfig, ProbeTools, Refusals, RunControl, ServiceSettings,
     FAILURE_EXIT_CODE, IDLE_SUMMARY_ROUNDS, PAUSE_SLICE, ROUND_CAP_EXIT_CODE,
 };
+use synthetic_checks::target::METADATA_V4;
 use tempfile::tempdir;
 use types::TestResult;
+
+
+const CHILD_MARKER_GUARD: Duration = Duration::from_secs(600);
+
+
+const LAST_LINES_SHOWN: usize = 20;
+
+
+const WAIT_TEST_GUARD: Duration = Duration::from_millis(200);
+
+
+const WAIT_TEST_HANG_GUARD: Duration = Duration::from_secs(30);
+
+
+const WAIT_TEST_LINE_PERIOD: Duration = Duration::from_millis(5);
+
+
+const MAX_LINES_READ: usize = 1_000_000;
 
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_ostyr-synthetic");
@@ -172,7 +193,14 @@ async fn site(dir: &Path, checks: &str, failing: usize) -> Result<Site, Box<dyn 
 
 
 fn run_to_end(arguments: &[&Path]) -> Result<Output, Box<dyn std::error::Error>> {
-    Ok(Command::new(PROGRAM).args(arguments).stdin(Stdio::null()).output()?)
+    let mut running = spawn_child(Command::new(PROGRAM).args(arguments))?;
+    let lines = drain_lines(&running.lines, CHILD_MARKER_GUARD)?;
+    let status = running.child.wait()?;
+    Ok(Output {
+        status,
+        stdout: Vec::new(),
+        stderr: lines.iter().map(|line| format!("{line}\n")).collect::<String>().into_bytes(),
+    })
 }
 
 
@@ -184,20 +212,95 @@ fn refused_with(output: &Output, marker: &str) -> TestResult {
 }
 
 
-fn wait_for_either(reader: &mut BufReader<ChildStderr>, first: &str, second: &str) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(reader
-        .by_ref()
-        .lines()
-        .find_map(|line| {
-            line.map(|text| (text.contains(first) || text.contains(second)).then_some(text))
-                .transpose()
-        })
-        .ok_or("the child ended before a marker")??)
+fn last_lines(seen: &[String]) -> String {
+    seen.iter()
+        .skip(seen.len().saturating_sub(LAST_LINES_SHOWN))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 
-fn wait_for(reader: &mut BufReader<ChildStderr>, marker: &str) -> Result<String, Box<dyn std::error::Error>> {
-    wait_for_either(reader, marker, marker)
+fn wait_for_either_within(lines: &Receiver<String>, first: &str, second: &str, guard: Duration) -> Result<String, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + guard;
+    let mut seen: Vec<String> = Vec::new();
+    let outcome = std::iter::repeat_with(|| lines.recv_timeout(deadline.saturating_duration_since(Instant::now())))
+        .take(MAX_LINES_READ)
+        .find_map(|received| match received {
+            Ok(text) if text.contains(first) || text.contains(second) => Some(Ok(text)),
+            Ok(text) => {
+                seen.push(text);
+                None
+            }
+            Err(failure) => Some(Err(failure)),
+        });
+    match outcome {
+        Some(Ok(text)) => Ok(text),
+        Some(Err(RecvTimeoutError::Timeout)) => {
+            Err(format!("no marker {first:?} or {second:?} within {guard:?}; last lines:\n{}", last_lines(&seen)).into())
+        }
+        Some(Err(RecvTimeoutError::Disconnected)) => Err(format!("the child ended before a marker; last lines:\n{}", last_lines(&seen)).into()),
+        None => Err(format!("no marker in {MAX_LINES_READ} lines; last lines:\n{}", last_lines(&seen)).into()),
+    }
+}
+
+
+fn wait_for_either(lines: &Receiver<String>, first: &str, second: &str) -> Result<String, Box<dyn std::error::Error>> {
+    wait_for_either_within(lines, first, second, CHILD_MARKER_GUARD)
+}
+
+
+fn wait_for(lines: &Receiver<String>, marker: &str) -> Result<String, Box<dyn std::error::Error>> {
+    wait_for_either(lines, marker, marker)
+}
+
+
+fn drain_lines(lines: &Receiver<String>, guard: Duration) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + guard;
+    let mut seen: Vec<String> = Vec::new();
+    let end = std::iter::repeat_with(|| lines.recv_timeout(deadline.saturating_duration_since(Instant::now())))
+        .take(MAX_LINES_READ)
+        .find_map(|received| match received {
+            Ok(text) => {
+                seen.push(text);
+                None
+            }
+            Err(failure) => Some(failure),
+        });
+    match end {
+        Some(RecvTimeoutError::Disconnected) => Ok(seen),
+        Some(RecvTimeoutError::Timeout) => Err(format!("the child did not end within {guard:?}; last lines:\n{}", last_lines(&seen)).into()),
+        None => Err(format!("the child wrote more than {MAX_LINES_READ} lines; last lines:\n{}", last_lines(&seen)).into()),
+    }
+}
+
+
+#[test]
+fn a_wait_ends_at_one_deadline_while_the_child_never_stops_writing() -> TestResult {
+    let (sender, lines) = channel::<String>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let writer = thread::spawn(move || {
+        std::iter::repeat_with(|| {
+            thread::sleep(WAIT_TEST_LINE_PERIOD);
+            sender.send("round".to_owned())
+        })
+        .take(MAX_LINES_READ)
+        .take_while(|sent| sent.is_ok() && !writer_stop.load(Ordering::SeqCst))
+        .count()
+    });
+    let (outcome_sender, outcome) = channel();
+    let waiter = thread::spawn(move || {
+        let waited = wait_for_either_within(&lines, "never-a", "never-b", WAIT_TEST_GUARD).map_err(|failure| failure.to_string());
+        outcome_sender.send(waited)
+    });
+    let received = outcome.recv_timeout(WAIT_TEST_HANG_GUARD);
+    stop.store(true, Ordering::SeqCst);
+    let waited = received.map_err(|_| "the wait did not end at its deadline: the guard is applied per line")?;
+    assert!(waited.is_err_and(|text| text.contains("no marker") && text.contains("round")));
+    waiter.join().map_err(|_| "waiter panicked")??;
+    writer.join().map_err(|_| "writer panicked")?;
+    Ok(())
 }
 
 
@@ -210,7 +313,7 @@ fn signal(child: &Child, name: &str) -> TestResult {
 
 struct Running {
     child: Child,
-    reader: BufReader<ChildStderr>,
+    lines: Receiver<String>,
 }
 
 
@@ -219,28 +322,34 @@ impl Drop for Running {
         if let Err(failure) = self.child.kill() {
             tracing::warn!(%failure, "the test service could not be killed");
         }
+        if let Err(failure) = self.child.wait() {
+            tracing::warn!(%failure, "the test service could not be reaped");
+        }
     }
 }
 
 
-fn spawn_service(settings_file: &Path) -> Result<Running, Box<dyn std::error::Error>> {
-    let mut child = Command::new(PROGRAM)
-        .arg(settings_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+fn spawn_child(command: &mut Command) -> Result<Running, Box<dyn std::error::Error>> {
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
-    Ok(Running {
-        child,
-        reader: BufReader::new(stderr),
-    })
+    let (sender, lines) = channel();
+    thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .try_for_each(|line| sender.send(line))
+    });
+    Ok(Running { child, lines })
+}
+
+
+fn spawn_service(settings_file: &Path) -> Result<Running, Box<dyn std::error::Error>> {
+    spawn_child(Command::new(PROGRAM).arg(settings_file))
 }
 
 
 fn finish(running: &mut Running) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rest = String::new();
-    running.reader.read_to_string(&mut rest)?;
+    let rest = drain_lines(&running.lines, CHILD_MARKER_GUARD)?.join("\n");
     let exit = running.child.wait()?;
     assert_eq!(exit.code(), Some(0), "{rest}");
     Ok(rest)
@@ -276,6 +385,7 @@ struct Net {
     roots_seen: AtomicUsize,
     answers: Vec<IpAddr>,
     port_seen: AtomicU64,
+    resolves: AtomicUsize,
 }
 
 
@@ -285,12 +395,16 @@ fn net(answers: Vec<IpAddr>) -> Net {
         roots_seen: AtomicUsize::new(0),
         answers,
         port_seen: AtomicU64::new(0),
+        resolves: AtomicUsize::new(0),
     }
 }
 
 
 fn with_tools<Output>(fake: &Net, clock_seconds: &AtomicU64, body: impl FnOnce(&ProbeTools) -> Output) -> Output {
-    let resolve = |_name: &str, _left: Duration, _cap: usize| Ok(fake.answers.clone());
+    let resolve = |_name: &str, _left: Duration, _cap: usize| {
+        fake.resolves.fetch_add(1, Ordering::SeqCst);
+        Ok(fake.answers.clone())
+    };
     let fetch = |_request: &HttpRequest, _left: Duration, _caps: FetchCaps, roots: &[Vec<u8>]| {
         fake.roots_seen.store(roots.len(), Ordering::SeqCst);
         Ok(HttpResponse {
@@ -874,10 +988,10 @@ async fn a_served_round_alerts_once_for_the_refused_target_then_exits_on_sigint(
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let site = site(dir.path(), &served_checks(&listener)?, 0).await?;
     let mut running = spawn_service(&site.settings_file)?;
-    let named = wait_for(&mut running.reader, "check skipped")?;
+    let named = wait_for(&running.lines, "check skipped")?;
     assert!(named.contains("check_name=\"outside\""), "{named}");
-    wait_for(&mut running.reader, SERVING_MARKER)?;
-    let round = wait_for(&mut running.reader, ROUND_MARKER)?;
+    wait_for(&running.lines, SERVING_MARKER)?;
+    let round = wait_for(&running.lines, ROUND_MARKER)?;
     assert!(round.contains("probed=2"), "{round}");
     signal(&running.child, "-INT")?;
     let rest = finish(&mut running)?;
@@ -894,7 +1008,7 @@ async fn sigterm_stops_the_service_with_exit_zero() -> TestResult {
     let dir = tempdir()?;
     let site = site(dir.path(), &failing_tcp_checks(), 0).await?;
     let mut running = spawn_service(&site.settings_file)?;
-    wait_for(&mut running.reader, SERVING_MARKER)?;
+    wait_for(&running.lines, SERVING_MARKER)?;
     signal(&running.child, "-TERM")?;
     finish(&mut running)?;
     Ok(())
@@ -907,18 +1021,18 @@ async fn sighup_reloads_the_checks_and_a_start_only_change_is_refused_whole() ->
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let site = site(dir.path(), &served_checks(&listener)?, 0).await?;
     let mut running = spawn_service(&site.settings_file)?;
-    wait_for(&mut running.reader, ROUND_MARKER)?;
+    wait_for(&running.lines, ROUND_MARKER)?;
     let added = format!(
         "{}  - name: extra\n    kind: tcp\n    target: {SECRET_HOST}:80\n    locations: [paris]\n",
         served_checks(&listener)?
     );
     fs::write(dir.path().join("checks.yaml"), added)?;
     signal(&running.child, "-HUP")?;
-    wait_for(&mut running.reader, "checks reloaded")?;
+    wait_for(&running.lines, "checks reloaded")?;
     fs::write(dir.path().join("checks.yaml"), failing_tcp_checks())?;
     fs::write(&site.settings_file, service_text(dir.path(), "acme", "lyon"))?;
     signal(&running.child, "-HUP")?;
-    let verdict = wait_for_either(&mut running.reader, "reload refused", "checks reloaded")?;
+    let verdict = wait_for_either(&running.lines, "reload refused", "checks reloaded")?;
     assert!(verdict.contains("reload refused"), "{verdict}");
     signal(&running.child, "-INT")?;
     let rest = finish(&mut running)?;
@@ -969,7 +1083,7 @@ async fn a_name_resolving_outside_the_scope_alerts_with_the_refusal_reason() -> 
     let checks = "scope: [10.0.0.0/8]\nchecks:\n  - name: lo\n    kind: tcp\n    target: localhost:9\n    interval_seconds: 10\n    consecutive_failures: 1\n    locations: [paris]\n";
     let mut site = site(dir.path(), checks, 0).await?;
     let mut running = spawn_service(&site.settings_file)?;
-    let round = wait_for(&mut running.reader, ROUND_MARKER)?;
+    let round = wait_for(&running.lines, ROUND_MARKER)?;
     assert!(round.contains("probed=1"), "{round}");
     signal(&running.child, "-INT")?;
     let rest = finish(&mut running)?;
@@ -1067,5 +1181,184 @@ fn idle_rounds_are_counted_and_summarised_not_logged_each() -> TestResult {
     assert_eq!(log_round(&quiet, 0, 0), 1);
     assert_eq!(log_round(&quiet, 0, IDLE_SUMMARY_ROUNDS - 1), IDLE_SUMMARY_ROUNDS);
     assert_eq!(log_round(&busy, 0, IDLE_SUMMARY_ROUNDS), 0);
+    Ok(())
+}
+
+
+const GUARD_FOR_TESTS: Duration = Duration::from_millis(200);
+
+
+const EXTRA_LINES: usize = 5;
+
+
+const LINE_GAP: Duration = Duration::from_millis(5);
+
+
+const SPELLINGS_IN_SCOPE: [(&str, &str); 4] = [("icmp", "127.1"), ("icmp", "0x7f.1"), ("icmp", "2130706433"), ("icmp", "127.0.0.1.")];
+
+
+#[test]
+fn a_wait_without_the_marker_fails_at_one_deadline_with_the_last_lines() -> TestResult {
+    let (sender, lines) = channel();
+    sender.send("first".to_owned())?;
+    let failure = wait_for_either_within(&lines, "absent", "missing", GUARD_FOR_TESTS)
+        .err()
+        .ok_or("expected a timeout")?;
+    assert!(
+        failure.to_string().contains("within") && failure.to_string().contains("first"),
+        "{failure}"
+    );
+    let (chatty_sender, chatty) = channel();
+    let talker = thread::spawn(move || {
+        (0..MAX_LINES_READ).try_for_each(|index| {
+            thread::sleep(LINE_GAP);
+            chatty_sender.send(format!("line {index}"))
+        })
+    });
+    let chatty_failure = wait_for_either_within(&chatty, "absent", "absent", GUARD_FOR_TESTS)
+        .err()
+        .ok_or("expected a timeout")?;
+    assert!(chatty_failure.to_string().contains("line"), "{chatty_failure}");
+    drop(chatty);
+    assert!(talker.join().is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_wait_ends_when_the_child_closes_its_output() -> TestResult {
+    let (sender, lines) = channel();
+    sender.send("only".to_owned())?;
+    drop(sender);
+    let failure = wait_for(&lines, "absent").err().ok_or("expected an end")?;
+    assert!(failure.to_string().contains("ended") && failure.to_string().contains("only"), "{failure}");
+    Ok(())
+}
+
+
+#[test]
+fn a_drain_that_never_ends_fails_at_the_guard_and_a_closed_one_returns_its_lines() -> TestResult {
+    let (sender, lines) = channel();
+    sender.send("one".to_owned())?;
+    let failure = drain_lines(&lines, GUARD_FOR_TESTS).err().ok_or("expected a timeout")?;
+    assert!(
+        failure.to_string().contains("did not end") && failure.to_string().contains("one"),
+        "{failure}"
+    );
+    drop(sender);
+    assert_eq!(drain_lines(&lines, GUARD_FOR_TESTS)?, Vec::<String>::new());
+    Ok(())
+}
+
+
+#[test]
+fn the_last_lines_are_a_fixed_number() -> TestResult {
+    let many: Vec<String> = (0..LAST_LINES_SHOWN + EXTRA_LINES).map(|index| format!("n{index}")).collect();
+    let shown = last_lines(&many);
+    assert_eq!(shown.lines().count(), LAST_LINES_SHOWN);
+    assert!(
+        shown.starts_with(&format!("n{EXTRA_LINES}")) && shown.ends_with(&format!("n{}", LAST_LINES_SHOWN + EXTRA_LINES - 1)),
+        "{shown}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_dropped_service_is_killed_and_reaped() -> TestResult {
+    let mut child = Command::new("sleep").arg("600").stdin(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+    let id = child.id();
+    let stderr = child.stderr.take().ok_or("no stderr")?;
+    drop(stderr);
+    let (_sender, lines) = channel();
+    drop(Running { child, lines });
+    assert!(!Path::new(&format!("/proc/{id}")).exists());
+    Ok(())
+}
+
+
+#[test]
+fn every_literal_spelling_of_an_address_is_classified_without_a_lookup() -> TestResult {
+    let dir = tempdir()?;
+    let fake = net(vec![IpAddr::V4(Ipv4Addr::new(PRIVATE_OCTET, 1, SECOND, THIRD))]);
+    let inside: Vec<(&str, String)> = SPELLINGS_IN_SCOPE
+        .iter()
+        .map(|(kind, target)| (*kind, (*target).to_owned()))
+        .chain([
+            ("tcp", "127.1:80".to_owned()),
+            ("tcp", "0x7f.1:80".to_owned()),
+            ("tls", "2130706433".to_owned()),
+            ("tls", "127.1".to_owned()),
+        ])
+        .collect();
+    inside.iter().try_for_each(|(kind, target)| -> TestResult {
+        assert_eq!(probe_one(dir.path(), kind, target, &fake)?, Ok(true), "{kind} {target}");
+        Ok(())
+    })?;
+    let outside: Vec<(&str, String)> = [
+        ("icmp", "10.258"),
+        ("icmp", "10.1.2.3."),
+        ("icmp", "2852039166"),
+        ("icmp", "0xa9fea9fe"),
+        ("tcp", "10.258:80"),
+        ("tcp", "2852039166:80"),
+        ("tls", "10.258"),
+        ("tls", "2852039166"),
+    ]
+    .iter()
+    .map(|(kind, target)| (*kind, (*target).to_owned()))
+    .collect();
+    outside.iter().try_for_each(|(kind, target)| -> TestResult {
+        assert_eq!(probe_one(dir.path(), kind, target, &fake)?, Err("refused".to_owned()), "{kind} {target}");
+        Ok(())
+    })?;
+    assert_eq!(fake.resolves.load(Ordering::SeqCst), 0);
+    assert_eq!(probe_one(dir.path(), "icmp", "1.2.3.example", &fake)?, Err("refused".to_owned()));
+    assert_eq!(fake.resolves.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_icmp_spelling_is_read_as_the_literal_it_is_at_load_and_at_probe() -> TestResult {
+    let dir = tempdir()?;
+    let live = live_of(dir.path(), &one_check("icmp", "127.0.0.1"))?;
+    let base = live.checks.checks.first().ok_or("no check")?.clone();
+    let literal = |target: &str| {
+        literal_target(&Check {
+            target: target.to_owned(),
+            ..base.clone()
+        })
+    };
+    assert_eq!(literal("10.258"), Some(IpAddr::V4(Ipv4Addr::new(PRIVATE_OCTET, 0, 1, SECOND))));
+    assert_eq!(literal("2852039166"), Some(IpAddr::V4(METADATA_V4)));
+    assert_eq!(literal("::1"), Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+    assert_eq!(literal("1.2.3.example"), None);
+    assert_eq!(literal("1.2.3.256"), None);
+    let skipped = skip_refused_literals(CheckFile {
+        checks: vec![
+            Check {
+                name: "meta".to_owned(),
+                target: "2852039166".to_owned(),
+                ..base.clone()
+            },
+            Check {
+                name: "near".to_owned(),
+                target: "127.1".to_owned(),
+                ..base.clone()
+            },
+        ],
+        ..live.checks.clone()
+    });
+    assert_eq!(skipped.1, 1);
+    let fake = net(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    let clock = AtomicU64::new(0);
+    let unusable = Check {
+        target: "1.2.3.256".to_owned(),
+        ..base
+    };
+    let outcome = with_tools(&fake, &clock, |tools| run_probe(&unusable, &live, tools));
+    assert_eq!(outcome.err().map(|failure| failure_label(&failure).to_owned()), Some("failed".to_owned()));
+    assert_eq!(fake.resolves.load(Ordering::SeqCst), 0);
     Ok(())
 }

@@ -371,6 +371,7 @@ fn failures_map_to_stable_errors_and_categories() -> TestResult {
     assert_eq!(findings_failure(&FindingsError::BadCursor), ApiError::BadRequest);
     assert_eq!(findings_failure(&FindingsError::BadPageSize), ApiError::BadRequest);
     assert_eq!(findings_failure(&FindingsError::Busy), ApiError::TooManyRequests);
+    assert_eq!(findings_failure(&FindingsError::Join), ApiError::Internal);
     assert_eq!(findings_failure(&FindingsError::Store(StateError::InvalidPackId)), ApiError::Internal);
     assert_eq!(store_category(&StateError::Pg(marker_error())), "database");
     assert_eq!(store_category(&StateError::BadReply), "reply");
@@ -432,6 +433,69 @@ async fn a_flood_takes_one_permit_each_and_never_more_than_the_shared_pool() -> 
     assert_eq!(busy, FLOOD - PERMITS);
     assert_eq!(lock(&during).len(), PERMITS);
     assert_eq!(permits.available_permits(), PERMITS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_dropped_route_future_keeps_the_permit_until_the_store_call_ends() -> TestResult {
+    let permits = Arc::new(Semaphore::new(1));
+    let (started_sender, started) = tokio::sync::oneshot::channel::<()>();
+    let (release_sender, release) = tokio::sync::oneshot::channel::<()>();
+    let (finished_sender, finished) = tokio::sync::oneshot::channel::<()>();
+    let gates = Mutex::new(Some((started_sender, release, finished_sender)));
+    let inner: FindingsFn = Arc::new(move |_scope, _query| {
+        let taken = lock(&gates).take();
+        Box::pin(async move {
+            if let Some((started_tx, release_rx, finished_tx)) = taken {
+                started_tx.send(()).map_err(|_unsent| FindingsError::Busy)?;
+                release_rx.await.map_err(|_closed| FindingsError::Busy)?;
+                finished_tx.send(()).map_err(|_unsent| FindingsError::Busy)?;
+            }
+            Ok(FindingsReply {
+                page: FindingPage {
+                    rows: Vec::new(),
+                    skipped: 0,
+                    next: None,
+                },
+                oversized: 0,
+            })
+        })
+    });
+    let backend = permit_backend(Arc::clone(&permits), inner);
+    let query = FindingsQuery {
+        after: (FIRST_END, String::new()),
+        size: 1,
+    };
+    let route = tokio::spawn(backend(tenant_scope(TENANT)?, query.clone()));
+    started.await?;
+    route.abort();
+    assert!(route.await.is_err());
+    assert_eq!(permits.available_permits(), 0);
+    let refused = backend(tenant_scope(TENANT)?, query).await;
+    assert!(matches!(refused, Err(FindingsError::Busy)), "{refused:?}");
+    release_sender.send(()).map_err(|_unsent| "released twice")?;
+    finished.await?;
+    tokio::task::yield_now().await;
+    assert_eq!(permits.available_permits(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_panicking_store_task_is_a_fixed_error_and_frees_the_permit() -> TestResult {
+    let permits = Arc::new(Semaphore::new(1));
+    let inner: FindingsFn = Arc::new(|_scope, _query| Box::pin(async { std::panic::resume_unwind(Box::new(MARKER)) }));
+    let backend = permit_backend(Arc::clone(&permits), inner);
+    let query = FindingsQuery {
+        after: (FIRST_END, String::new()),
+        size: 1,
+    };
+    let outcome = backend(tenant_scope(TENANT)?, query).await;
+    let error = outcome.err().ok_or("no error")?;
+    assert!(matches!(error, FindingsError::Join), "{error:?}");
+    assert!(!format!("{error} {error:?}").contains(MARKER));
+    assert_eq!(permits.available_permits(), 1);
     Ok(())
 }
 
