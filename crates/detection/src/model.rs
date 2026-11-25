@@ -17,9 +17,6 @@ use tokio_postgres::Client;
 pub const MODULE: &str = "detection";
 
 
-pub const AUDIT_TENANT: &str = "all";
-
-
 pub const INGEST_REQUEST_ID: &str = "detection-ingest-reload";
 
 

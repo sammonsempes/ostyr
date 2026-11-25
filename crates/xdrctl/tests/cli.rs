@@ -1,3 +1,4 @@
+mod groups;
 mod reports;
 mod support;
 mod transport_text;
@@ -173,6 +174,7 @@ fn full_session_against_the_live_api() -> TestResult {
     let audited = fs::read_to_string(&audit)?;
     assert!(audited.contains("\"actor_id\":\"reader\""));
     assert!(audited.contains("ticket 1"));
+    assert!(audited.contains(&format!("\"tenant\":\"{}\"", core_audit::tenant::PLATFORM_TENANT)));
 
     let verified = invoke(&live_args(&live, &["audit", "verify", &audit_text]), "", &send_request)?;
     assert_eq!(verified.code, SUCCESS);
@@ -725,7 +727,7 @@ fn audit_declared_keys_kept_undeclared_redacted_and_long_values_cut() -> TestRes
             kind: core_audit::model::ActorKind::User,
             id: "reader".to_owned(),
         },
-        tenant: "default".to_owned(),
+        tenant: core_audit::tenant::PLATFORM_TENANT.to_owned(),
         module: "xdrctl".to_owned(),
         request_id: "r".to_owned(),
         justification: "j".to_owned(),
@@ -765,7 +767,7 @@ fn audit_diff_cut_once_and_target_and_justification_bounded() -> TestResult {
             kind: core_audit::model::ActorKind::User,
             id: "reader".to_owned(),
         },
-        tenant: "default".to_owned(),
+        tenant: core_audit::tenant::PLATFORM_TENANT.to_owned(),
         module: "xdrctl".to_owned(),
         request_id: "r".to_owned(),
         justification: "j".repeat(core_config::reload::MAX_VALUE_CHARS + EXTRA_CHARS),

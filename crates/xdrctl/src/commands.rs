@@ -5,6 +5,7 @@ use crate::session::{load_session, remove_session, save_session};
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Record};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_audit::verify::verify;
 use core_config::apply::{apply, ApplyContext, APPLY_DECLARED_KEYS};
 use core_config::apply_cli::{apply_to_dir, read_state, write_plan};
@@ -32,9 +33,6 @@ pub const PLATFORM_FILE: &str = "platform.yaml";
 
 
 pub const YAML_EXTENSIONS: [&str; 2] = ["yaml", "yml"];
-
-
-pub const APPLY_TENANT: &str = "default";
 
 
 pub const APPLY_MODULE: &str = "xdrctl";
@@ -305,7 +303,7 @@ pub fn apply_command(ctx: &Context, args: &ApplyArgs, input: &mut dyn BufRead, p
                 kind: ActorKind::User,
                 id: me.username,
             },
-            tenant: APPLY_TENANT.to_owned(),
+            tenant: PLATFORM_TENANT.to_owned(),
             module: APPLY_MODULE.to_owned(),
             request_id: APPLY_REQUEST_ID.to_owned(),
             justification: args.justification.clone(),

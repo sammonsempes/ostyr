@@ -2,8 +2,8 @@
 # Usage: crates/backup-monitor/tests/store-live.sh <lab-state-dir>   (env: MUTANT=<name> mutates migrations/backup_0002.sql, see the case list below)
 # Live check of the restore-test store on a datastore-pair lab (LAB_PROFILE=datastore-pair lab/up.sh <task>): psql runs on the client VM over TLS against two
 # scratch databases of the datastore VM. Database one holds the migration applied by psql: the function scenarios (two tenants with one key, the cap, the
-# newest result per key, the clamps, run errors, the CHECKs, a plan under stale statistics). Database two is migrated and written by the real backup_run
-# example with a fake restic script (a run, then a run whose `cat config` fails). Every line is a check; a mutant must make at least one fail.
+# newest result per key, the clamps, run errors, the CHECKs, a plan under stale statistics). Database two is migrated and written by the real ostyr-backup-monitor
+# service with a fake restic script (a run, then a run whose `cat config` fails). Every line is a check; a mutant must make at least one fail.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -12,8 +12,8 @@ read -r _ datastore_user datastore_address < <(awk '$1 == "datastore"' "$lab_sta
 read -r _ client_user client_address < <(awk '$1 == "client"' "$lab_state/vms.txt")
 [[ -n "$datastore_address" && -n "$client_address" ]] || { echo "datastore and client VMs are required in $lab_state/vms.txt" >&2; exit 2; }
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-binary="$here/target/x86_64-unknown-linux-musl/release/examples/backup_run"
-[[ -x "$binary" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p backup-monitor --example backup_run" >&2; exit 2; }
+binary="$here/target/x86_64-unknown-linux-musl/release/ostyr-backup-monitor"
+[[ -x "$binary" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p backup-monitor --bin ostyr-backup-monitor" >&2; exit 2; }
 
 suffix="$$"
 datastore_ssh() { ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "$@"; }
@@ -21,8 +21,7 @@ owner="$(datastore_ssh "sudo grep '^POSTGRES_USER=' /etc/ostyr-lab/datastore.env
 for database in "backup_live_f_$suffix" "backup_live_x_$suffix"; do datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"; done
 trap 'for database in backup_live_f_'"$suffix"' backup_live_x_'"$suffix"'; do datastore_ssh "sudo -u postgres dropdb --if-exists $database" || true; done' EXIT
 
-scp "${ssh_options[@]}" "$binary" "$client_user@$client_address:/tmp/backup_run"
-if [[ -n "${PUBLISHED_BINARY:-}" ]]; then scp "${ssh_options[@]}" "$PUBLISHED_BINARY" "$client_user@$client_address:/tmp/backup_run_published"; fi
+scp "${ssh_options[@]}" "$binary" "$client_user@$client_address:/tmp/ostyr-backup-monitor"
 scp "${ssh_options[@]}" "$here/crates/backup-monitor/migrations/backup_0001.sql" "$here/crates/backup-monitor/migrations/backup_0002.sql" \
     "$here/crates/backup-monitor/tests/fixtures/fake-restic-dump.sh" \
     "$client_user@$client_address:/tmp/"
@@ -179,38 +178,58 @@ printf 'hunter2\n' >"$fake/password"
 chmod 600 "$fake/password"
 chmod 700 "$fake"
 digest="$(sha256sum "$fake/canary" | cut -d' ' -f1)"
-for kind in current published; do
-    password="password"
-    [[ "$kind" == published ]] && password="$fake/password"
-    {
-        echo "tenant: live2"
-        echo "repositories:"
-        for name in main second; do
-            printf '  - repository: %s\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/%s\n      password_file: %s\n' "$name" "$name" "$password"
-            printf '    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: %s\n      max_bytes: 100\n' "$digest"
-        done
-    } >"$work/declarations-$kind.yaml"
-done
+{
+    echo "tenant: live2"
+    echo "repositories:"
+    for name in main second; do
+        printf '  - repository: %s\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/%s\n      password_file: password\n' "$name" "$name"
+        printf '    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: %s\n      max_bytes: 100\n' "$digest"
+    done
+} >"$work/declarations.yaml"
+mkdir -m 700 "$work/state"
+cat >"$work/service.yaml" <<YAML
+tenant: live2
+declarations_file: $work/declarations.yaml
+state_dir: $work/state
+secrets_dir: $fake
+pg_settings: $work/pg.yaml
+audit_file: $work/audit.log
+interval_seconds: 3600
+restore_interval_seconds: 3600
+YAML
+printf '#!/bin/sh\nexec %s/restic "$@"\n' "$fake" >"$work/restic-wrapper"
+if [[ -e /usr/bin/restic ]]; then sudo mv /usr/bin/restic /usr/bin/restic.real; fi
+trap 'sudo rm -f /usr/bin/restic; if [[ -e /usr/bin/restic.real ]]; then sudo mv /usr/bin/restic.real /usr/bin/restic; fi; rm -rf "$work"' EXIT
+sudo install -m 755 "$work/restic-wrapper" /usr/bin/restic
 X() { psql -X -q -tA -h "$DATASTORE_DOMAIN" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$XDB" -c "$1"; }
-if [[ -x /tmp/backup_run_published ]]; then
-    published="$(/tmp/backup_run_published restore-test "$work/declarations-published.yaml" "$fake/restic" --store "$work/pg.yaml" | tail -1)"
-    echo "$published"
-    check "published build migrated the database" "backup_0001" "$(X "SELECT string_agg(version, ',' ORDER BY version) FROM public.schema_migrations WHERE namespace = 'backup'")"
-    check "published build stored both tests" "2" "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'restored'")"
-fi
-first="$(/tmp/backup_run restore-test "$work/declarations-current.yaml" "$fake/restic" "$fake" --store "$work/pg.yaml" | tail -1)"
+service_round() {
+    rm -f "$work/audit.log"
+    timeout 120 /tmp/ostyr-backup-monitor "$work/service.yaml" 2>"$work/service.err" &
+    local pid=$!
+    for _ in $(seq 300); do
+        [[ "$(grep -c . "$work/audit.log" 2>/dev/null || true)" -ge 2 ]] && break
+        sleep 0.2
+    done
+    kill -INT "$pid"
+    local status=0
+    wait "$pid" || status=$?
+    check "service exits 0 on SIGINT" "0" "$status" >&2
+    python3 -I -c 'import json,sys
+for line in open(sys.argv[1]):
+    record = json.loads(line)
+    if record["action"] == "backup.restore_round":
+        keys = ["written", "stale_write", "config_changed", "pruned", "skipped_invalid", "run_error"]
+        print(json.dumps({"store": {key: int(record["parameters"][key]) for key in keys}}, sort_keys=True, separators=(",", ":")))' "$work/audit.log"
+}
+first="$(service_round)"
 echo "$first"
-check "example first run stores both tests" '{"store":{"config_changed":0,"pruned":0,"run_error":0,"skipped_invalid":0,"stale_write":0,"written":2}}' "$first"
-if [[ -x /tmp/backup_run_published ]]; then
-    check "this build applied backup_0002 after the published build" "backup_0001,backup_0002" \
-        "$(X "SELECT string_agg(version, ',' ORDER BY version) FROM public.schema_migrations WHERE namespace = 'backup'")"
-fi
-check "example rows restored" "2" "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'restored' AND restored_config_id IS NOT NULL")"
+check "service first run stores both tests" '{"store":{"config_changed":0,"pruned":0,"run_error":0,"skipped_invalid":0,"stale_write":0,"written":2}}' "$first"
+check "service rows restored" "2" "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'restored' AND restored_config_id IS NOT NULL")"
 touch "$fake/config.fail"
-second="$(/tmp/backup_run restore-test "$work/declarations-current.yaml" "$fake/restic" "$fake" --store "$work/pg.yaml" | tail -1)"
+second="$(service_round)"
 echo "$second"
-check "example config failure stores a run error per test" '{"store":{"config_changed":0,"pruned":0,"run_error":2,"skipped_invalid":0,"stale_write":0,"written":2}}' "$second"
-check "example rows are run errors that keep the last pass" "2" \
+check "service config failure stores a run error per test" '{"store":{"config_changed":0,"pruned":0,"run_error":2,"skipped_invalid":0,"stale_write":0,"written":2}}' "$second"
+check "service rows are run errors that keep the last pass" "2" \
     "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'run_error' AND category = 'failed' AND config_id IS NULL AND restored_config_id = '$C1' AND restored_tested_micros IS NOT NULL")"
 echo "failures: $failures"
 exit "$failures"

@@ -40,6 +40,8 @@ readonly SKIPS=(
     "sys-windows|a_reader_blocked_in_a_read_ends_with_the_close|Wine's pseudo-console delivers no output"
     "sys-windows|a_shell_computes_a_sum_and_the_result_is_read_back|Wine's pseudo-console delivers no output"
     "sys-windows|the_shell_environment_is_exactly_the_fixed_list|Wine's pseudo-console delivers no output"
+    "sys-windows|a_breakaway_from_inside_the_session_is_refused|Wine's pseudo-console delivers no output"
+    "sys-windows|the_shell_does_not_inherit_a_handle_of_its_parent|Wine's pseudo-console delivers no output"
     "sys-windows|sizes_and_inputs_outside_the_bounds_are_refused_by_name|Wine lacks ResizePseudoConsole (E_NOTIMPL)"
 )
 

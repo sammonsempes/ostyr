@@ -49,6 +49,8 @@ pub enum StoreError {
     Conflict,
     #[error("no such alert in this tenant")]
     NotFound,
+    #[error("the store task did not finish")]
+    TaskFailed,
     #[error("too many concurrent database requests")]
     Busy,
 }

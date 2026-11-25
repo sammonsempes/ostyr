@@ -1,12 +1,15 @@
 use crate::types::TestResult;
 use std::collections::BTreeSet;
-use std::process::Command;
+use std::io::Write;
+use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 use sys_windows::console::{session_environment, INPUT_CHUNK_BYTES};
 use sys_windows::session::{
-    close_console, job_limits, process_id, process_is_running, read_output, resize_console, shell_in_job, spawn_session, spawn_session_with,
-    write_input, Session, ACTIVE_PROCESS_LIMIT, INHERIT_HANDLES,
+    close_console, holds_inheritable_pipe, job_limits, process_id, process_is_running, read_output, resize_console, shell_in_job, spawn_session,
+    spawn_session_with, write_input, Session, ACTIVE_PROCESS_LIMIT, INHERIT_HANDLES,
 };
 use sys_windows::types::ConsoleError;
 
@@ -73,6 +76,18 @@ const SILENT_BREAKAWAY_OK: u32 = 0x1000;
 
 
 const FAULT_CODE_BASE: u32 = 0;
+
+
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+
+const BREAKAWAY_MARKER: &str = "breakaway-result=";
+
+
+const INHERIT_MARKER: &str = "inherit-probe=";
+
+
+const SPAWNER_MARKER: &str = "spawner-saw=";
 
 
 fn fault_with_the_process_id(process_id_value: u32) -> Result<(), u32> {
@@ -347,5 +362,100 @@ fn sizes_and_inputs_outside_the_bounds_are_refused_by_name() -> TestResult {
     resize_console(&session, COLUMNS + 1, ROWS + 1)?;
     let big = vec![b'a'; INPUT_CHUNK_BYTES + 1];
     assert!(matches!(write_input(&session, &big), Err(ConsoleError::InputTooLarge { .. })));
+    Ok(())
+}
+
+
+fn helper_command(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    Ok(format!("\"{}\" --ignored --exact session::{name} --nocapture", executable.display()))
+}
+
+
+fn marker_value(transcript: &str, marker: &str) -> Option<String> {
+    strip_escapes(transcript)
+        .lines()
+        .filter_map(|line| line.split_once(marker).map(|pair| pair.1.trim().to_string()))
+        .next()
+}
+
+
+#[test]
+#[ignore = "helper started by a_breakaway_from_inside_the_session_is_refused"]
+fn breakaway_probe() -> TestResult {
+    let started = Command::new("whoami.exe").creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn();
+    let verdict = match started {
+        Ok(mut child) => {
+            child.wait()?;
+            "started".to_string()
+        }
+        Err(error) => format!("refused-{}", error.raw_os_error().unwrap_or(0)),
+    };
+    writeln!(std::io::stdout(), "{BREAKAWAY_MARKER}{verdict}")?;
+    Ok(())
+}
+
+
+#[test]
+fn a_breakaway_from_inside_the_session_is_refused() -> TestResult {
+    let session = spawn_session(COLUMNS, ROWS, LABEL)?;
+    let verdict = std::thread::scope(|scope| -> Result<String, Box<dyn std::error::Error>> {
+        let receiver = start_reader(&session, scope);
+        write_input(&session, format!("{}\r\n", helper_command("breakaway_probe")?).as_bytes())?;
+        let mut seen = String::new();
+        read_until(&receiver, &mut seen, BREAKAWAY_MARKER)?;
+        read_until(&receiver, &mut seen, "\n")?;
+        close_console(&session)?;
+        Ok(seen)
+    })?;
+    let value = marker_value(&verdict, BREAKAWAY_MARKER).ok_or("no breakaway verdict")?;
+    assert_eq!(value, "refused-5");
+    Ok(())
+}
+
+
+#[test]
+#[ignore = "helper started by the_shell_does_not_inherit_a_handle_of_its_parent"]
+fn inheritance_spawner() -> TestResult {
+    let value = std::io::stdout().as_raw_handle().addr();
+    let session = spawn_session(COLUMNS, ROWS, LABEL)?;
+    let seen = std::thread::scope(|scope| -> Result<String, Box<dyn std::error::Error>> {
+        let receiver = start_reader(&session, scope);
+        write_input(&session, format!("{} {value}\r\n", helper_command("inheritance_probe")?).as_bytes())?;
+        let mut collected = String::new();
+        read_until(&receiver, &mut collected, INHERIT_MARKER)?;
+        read_until(&receiver, &mut collected, "\n")?;
+        close_console(&session)?;
+        Ok(collected)
+    })?;
+    let verdict = marker_value(&seen, INHERIT_MARKER).ok_or("no probe verdict")?;
+    writeln!(std::io::stdout(), "{SPAWNER_MARKER}{verdict}")?;
+    Ok(())
+}
+
+
+#[test]
+#[ignore = "helper started by inheritance_spawner inside the session"]
+fn inheritance_probe() -> TestResult {
+    let value = std::env::args()
+        .filter_map(|argument| argument.parse::<usize>().ok())
+        .next()
+        .ok_or("no handle value")?;
+    let verdict = if holds_inheritable_pipe(value) { "open" } else { "closed" };
+    writeln!(std::io::stdout(), "{INHERIT_MARKER}{verdict}")?;
+    Ok(())
+}
+
+
+#[test]
+fn the_shell_does_not_inherit_a_handle_of_its_parent() -> TestResult {
+    let output = Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", "session::inheritance_spawner", "--nocapture"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let verdict = marker_value(&text, SPAWNER_MARKER).ok_or_else(|| format!("no spawner verdict in {text:?}"))?;
+    assert_eq!(verdict, "closed", "{text}");
     Ok(())
 }

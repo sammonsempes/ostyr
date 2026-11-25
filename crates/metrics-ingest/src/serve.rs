@@ -17,6 +17,7 @@ use core_config::watch::watch_files;
 use siem_ingest::error::NatsError;
 use siem_ingest::logging::build_subscriber;
 use siem_ingest::nats::nats_wiring;
+use std::env::VarError;
 use std::fs::File;
 use std::io::{self, stderr};
 use std::path::Path;
@@ -139,9 +140,28 @@ pub fn register_stop() -> io::Result<StopFlag> {
 }
 
 
+/// The `RUST_LOG` text when it is readable.
+pub fn directives_of(variable: &Result<String, VarError>) -> Option<&str> {
+    match variable {
+        Ok(text) => Some(text.as_str()),
+        Err(_) => None,
+    }
+}
+
+
+/// Logs a `RUST_LOG` that is set but not unicode, once the subscriber is installed.
+pub fn warn_unreadable_directives(variable: &Result<String, VarError>) {
+    if matches!(variable, Err(VarError::NotUnicode(_))) {
+        warn!("RUST_LOG is not unicode, the default directives apply");
+    }
+}
+
+
 /// The whole service as the binary runs it: logging, signals, then the loop with the production cycle cap.
 pub fn service(arguments: &[String]) -> Result<Exit, ServeError> {
-    install_logging(std::env::var(RUST_LOG).ok().as_deref())?;
+    let variable = std::env::var(RUST_LOG);
+    install_logging(directives_of(&variable))?;
+    warn_unreadable_directives(&variable);
     let stop = register_stop()?;
     run(arguments, &stop, MAX_LOOP_CYCLES)
 }

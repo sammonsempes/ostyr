@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 mod unix {
     use core_audit::log::{append, open_file_log};
+    use core_audit::tenant::PLATFORM_TENANT;
     use core_config::reload::{current_config, ReloadContext};
     use core_config::types::SharedAuditFn;
     use core_config::watch::watch_files;
@@ -38,7 +39,7 @@ mod unix {
         });
         let context = ReloadContext {
             actor_id: "waf_apply".to_owned(),
-            tenant: "platform".to_owned(),
+            tenant: PLATFORM_TENANT.to_owned(),
             module: "waf".to_owned(),
             target: settings_file.clone(),
             request_id: "waf-reload".to_owned(),

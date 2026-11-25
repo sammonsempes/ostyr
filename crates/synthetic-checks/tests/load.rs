@@ -70,6 +70,23 @@ fn an_icmp_target_is_an_address_or_a_plain_name() -> TestResult {
 
 
 #[test]
+fn an_icmp_target_is_read_as_the_url_parser_reads_a_host() -> TestResult {
+    ["10.258", "10.1.2.3.", "2852039166", "1.2.3.example", "0xdead.beef", "09.a", "0x7f.1"]
+        .iter()
+        .try_for_each(|target| -> TestResult {
+            assert_eq!(parse(&icmp_with(target))?.checks.len(), 1, "{target}");
+            Ok(())
+        })?;
+    ["1.2.3.256", "08.1.1.1", "1.2.3.4.5", "example.123", "cafe.0x1", "4294967296"]
+        .iter()
+        .try_for_each(|target| -> TestResult {
+            assert!(message_of(&icmp_with(target))?.contains("`icmp` target"), "{target}");
+            Ok(())
+        })
+}
+
+
+#[test]
 fn an_icmp_target_with_a_port_a_path_or_a_leading_dash_is_refused() -> TestResult {
     [
         "192.0.2.1:80",

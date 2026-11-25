@@ -1,3 +1,4 @@
 target/
 lab/state/
 lab/tofu/.terraform/
+lab/tests/__pycache__/

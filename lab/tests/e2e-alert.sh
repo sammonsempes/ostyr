@@ -64,13 +64,13 @@ wait_for_stage() {
 }
 
 for ((attempt = 0; attempt < SERVICE_ATTEMPTS; attempt++)); do
-    if datastore_ssh "systemctl is-active --quiet ostyr-event-gateway ostyr-siem-ingest ostyr-detection ostyr-alerts-api ostyr-web-ui" 2>/dev/null &&
+    if datastore_ssh "systemctl is-active --quiet ostyr-event-gateway ostyr-relay ostyr-siem-ingest ostyr-detection ostyr-alerts-api ostyr-web-ui" 2>/dev/null &&
         client_ssh "systemctl is-active --quiet tetragon ostyr-linux-agent" 2>/dev/null; then
         break
     fi
     sleep "$SERVICE_DELAY_SECONDS"
 done
-datastore_ssh "systemctl is-active ostyr-event-gateway ostyr-siem-ingest ostyr-detection ostyr-alerts-api ostyr-web-ui" >/dev/null || die "an Ostyr service is not active on the datastore VM"
+datastore_ssh "systemctl is-active ostyr-event-gateway ostyr-relay ostyr-siem-ingest ostyr-detection ostyr-alerts-api ostyr-web-ui" >/dev/null || die "an Ostyr service is not active on the datastore VM"
 client_ssh "systemctl is-active tetragon ostyr-linux-agent" >/dev/null || die "Tetragon or the Linux agent is not active on the client VM"
 stage "services active"
 

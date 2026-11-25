@@ -273,10 +273,19 @@ name = "alert-grouping"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-auth",
  "core-config",
+ "core-pg",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "utoipa",
 ]
 
 [[package]]
@@ -754,13 +763,17 @@ dependencies = [
 name = "backup-monitor"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
  "core-config",
  "core-pg",
  "net-topology",
+ "pg-fake",
+ "rcgen",
  "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -5002,6 +5015,7 @@ dependencies = [
 name = "platform"
 version = "0.0.0"
 dependencies = [
+ "alert-grouping",
  "alerts",
  "attack-paths",
  "axum",

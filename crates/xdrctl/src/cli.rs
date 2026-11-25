@@ -3,6 +3,7 @@ use crate::assets::{assets_list, assets_show};
 use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
+use crate::groups::alert_groups;
 use crate::model::{
     AlertsCommand, AssetsCommand, AttackPathsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, GrcCommand, OutputFormat,
     Report, RiskCommand, VulnsCommand,
@@ -55,6 +56,9 @@ pub fn execute(
         Command::Alerts {
             action: AlertsCommand::Show { id },
         } => alerts_show(&ctx, id),
+        Command::Alerts {
+            action: AlertsCommand::Groups,
+        } => alert_groups(&ctx),
         Command::Cases {
             action: CasesCommand::List { limit, cursor },
         } => cases_list(&ctx, *limit, cursor.as_deref()),

@@ -6,6 +6,7 @@ mod private;
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::reload::{reload, ReloadOutcome};
 use nats_stub::{kill_connections, start_stub, wait_until, Queued, Stub};
 use private::write_private;
@@ -306,7 +307,7 @@ fn the_service_stores_two_tenants_reloads_on_sighup_and_exits_zero_on_sigterm() 
     signal(&child, "HUP")?;
     eventually(|| fs::read_to_string(&lab.audit).is_ok_and(|text| text.contains("max_batch_age_seconds")))?;
     let audit = fs::read_to_string(&lab.audit)?;
-    assert!(audit.contains(r#""tenant":"all""#), "{audit}");
+    assert!(audit.contains(&format!(r#""tenant":"{AUDIT_TENANT}""#)), "{audit}");
     signal(&child, "TERM")?;
     let mut out = String::new();
     child.stdout.take().ok_or("no stdout")?.read_to_string(&mut out)?;

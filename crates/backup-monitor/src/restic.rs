@@ -276,10 +276,17 @@ pub fn unchanged(checked: &File, path: &str) -> Result<(), ResticError> {
 
 
 /// Runs `cat config` then `snapshots` (cleared environment, own process group, capped stdout) within `deadline` in total.
-pub fn run_raw(program: &Path, secrets: &SecretsDir, source: &ResticSource, limits: &Limits, deadline: Duration) -> Result<RawRun, ResticError> {
+pub fn run_raw(
+    program: &Path,
+    secrets: &SecretsDir,
+    source: &ResticSource,
+    limits: &Limits,
+    deadline: Duration,
+    euid: u32,
+) -> Result<RawRun, ResticError> {
     let password_text = secret_path(secrets, &source.password_file).filter(|_| valid_source(source));
     if let Some(password) = password_text {
-        let checked = open_secret_in(secrets, &source.password_file, rustix::process::geteuid().as_raw()).map_err(password_failure)?;
+        let checked = open_secret_in(secrets, &source.password_file, euid).map_err(password_failure)?;
         let transport = sftp_transport(&source.location);
         let start = Instant::now();
         let config = run_command(
@@ -316,8 +323,9 @@ pub fn snapshot_listing(
     source: &ResticSource,
     limits: &Limits,
     deadline: Duration,
+    euid: u32,
 ) -> Result<Listing, ResticError> {
-    parse_run(&run_raw(program, secrets, source, limits, deadline)?, limits)
+    parse_run(&run_raw(program, secrets, source, limits, deadline, euid)?, limits)
 }
 
 

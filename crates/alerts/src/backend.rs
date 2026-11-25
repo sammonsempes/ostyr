@@ -6,6 +6,7 @@ use core_config::reload::{current_config, ReloadEngine};
 use core_pg::connect::connect;
 use core_pg::scope::TenantScope;
 use core_pg::settings::PgSettings;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -36,15 +37,37 @@ pub async fn lease(engine: &ReloadEngine<PgSettings>, permits: &Arc<Semaphore>) 
 }
 
 
+/// Runs the lease and the store call as a task: a client that leaves drops this future, the task goes on and holds its permit until the statement ends.
+pub async fn detached<Reply: Send + 'static>(work: impl Future<Output = Result<Reply, StoreError>> + Send + 'static) -> Result<Reply, StoreError> {
+    let joined = tokio::spawn(async move {
+        let outcome = work.await;
+        if let Err(error) = &outcome {
+            let category = error.to_string();
+            tracing::debug!(category, "alerts store call ended with an error");
+        }
+        outcome
+    })
+    .await;
+    joined.unwrap_or_else(|failure| {
+        let panicked = failure.is_panic();
+        tracing::warn!(panicked, "alerts store task failed");
+        Err(StoreError::TaskFailed)
+    })
+}
+
+
 pub async fn pg_list(
     engine: Arc<ReloadEngine<PgSettings>>,
     permits: Arc<Semaphore>,
     scope: TenantScope,
     page: Page,
 ) -> Result<AlertPage, StoreError> {
-    let held = lease(&engine, &permits).await?;
-    let executor = pg_executor(&held.client, held.deadline);
-    list_alerts(&executor, &scope, &page).await
+    detached(async move {
+        let held = lease(&engine, &permits).await?;
+        let executor = pg_executor(&held.client, held.deadline);
+        list_alerts(&executor, &scope, &page).await
+    })
+    .await
 }
 
 
@@ -54,9 +77,12 @@ pub async fn pg_get(
     scope: TenantScope,
     id: String,
 ) -> Result<Option<AlertDetail>, StoreError> {
-    let held = lease(&engine, &permits).await?;
-    let executor = pg_executor(&held.client, held.deadline);
-    get_detail(&executor, &scope, &id).await
+    detached(async move {
+        let held = lease(&engine, &permits).await?;
+        let executor = pg_executor(&held.client, held.deadline);
+        get_detail(&executor, &scope, &id).await
+    })
+    .await
 }
 
 

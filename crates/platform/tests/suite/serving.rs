@@ -9,8 +9,9 @@ const ALL_MODULES: &str =
     "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths";
 
 
-const ROUTES: [(&str, &str); 10] = [
+const ROUTES: [(&str, &str); 11] = [
     ("/alerts", "alerts"),
+    ("/alert-groups", "alerts"),
     ("/cases", "cases"),
     ("/assets", "cmdb"),
     ("/risk/entities", "risk"),
@@ -396,5 +397,26 @@ async fn the_grc_and_attack_path_routes_share_the_semaphore_and_answer_429_when_
             "{path}"
         );
     }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_alert_groups_route_follows_the_alerts_module() -> TestResult {
+    let selected = fixture("alerts")?;
+    let token = login(&selected.router, ANALYST).await?;
+    let code = status(&selected.router, "GET", "/alert-groups", Some(&token)).await?;
+    assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{code}");
+    let document = body_json(call(&selected.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    assert!(document.get("paths").and_then(|paths| paths.get("/alert-groups")).is_some());
+    let without = fixture("cases")?;
+    let other = login(&without.router, ANALYST).await?;
+    assert_eq!(
+        status(&without.router, "GET", "/alert-groups", Some(&other)).await?,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(status(&without.router, "GET", "/alert-groups", None).await?, StatusCode::UNAUTHORIZED);
+    let absent = body_json(call(&without.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    assert!(absent.get("paths").and_then(|paths| paths.get("/alert-groups")).is_none());
     Ok(())
 }

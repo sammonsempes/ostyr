@@ -11,7 +11,8 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use windows::core::BOOL;
 use windows::core::{Owned, HRESULT, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{GetHandleInformation, ERROR_INSUFFICIENT_BUFFER, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
 use windows::Win32::System::Console::{CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation,
@@ -125,8 +126,7 @@ impl Drop for Session {
 
 
 fn coord(columns: i16, rows: i16) -> COORD {
-    // SAFETY: COORD is two i16 fields in C layout, 4 bytes, and every bit pattern of it is valid.
-    unsafe { std::mem::transmute::<_, COORD>([columns, rows]) }
+    COORD { X: columns, Y: rows }
 }
 
 
@@ -399,6 +399,18 @@ pub fn process_is_running(process_id: u32) -> bool {
             waited == WAIT_TIMEOUT
         })
         .unwrap_or(false)
+}
+
+
+/// Whether this process holds an inheritable pipe handle with this numeric value (a probe only: nothing is read, written or kept).
+pub fn holds_inheritable_pipe(handle_value: usize) -> bool {
+    let handle = HANDLE(std::ptr::with_exposed_provenance_mut::<c_void>(handle_value));
+    let mut flags = 0;
+    // SAFETY: the call only reads the flags of a handle value of this process and writes the out pointer; an invalid value is an error.
+    let queried = unsafe { GetHandleInformation(handle, &mut flags) };
+    // SAFETY: the call only reads the type of a handle value of this process; an invalid value gives the unknown type.
+    let kind = unsafe { GetFileType(handle) };
+    queried.is_ok() && flags & HANDLE_FLAG_INHERIT.0 != 0 && kind == FILE_TYPE_PIPE
 }
 
 

@@ -184,9 +184,6 @@ pub const ROUND_FAILED_AUDIT_ACTION: &str = "dns-rpz.round_failed";
 pub const SERVICE_ACTOR: &str = "ostyr-dns-rpz";
 
 
-pub const SERVICE_TENANT: &str = "system";
-
-
 pub const SERVICE_MODULE: &str = "dns-rpz";
 
 

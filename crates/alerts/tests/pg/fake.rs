@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
 
 
@@ -36,6 +37,7 @@ pub enum Reply {
     IntRows(Vec<i32>),
     Error(&'static str),
     Hang,
+    Held(Arc<Notify>),
     Drop,
 }
 
@@ -275,6 +277,10 @@ pub async fn serve_messages<Channel: AsyncRead + AsyncWrite + Unpin>(
                     session.reply = handler(&sql);
                     if matches!(session.reply, Reply::Hang) {
                         std::future::pending::<()>().await;
+                    }
+                    if let Reply::Held(release) = session.reply.clone() {
+                        release.notified().await;
+                        session.reply = Reply::Done;
                     }
                 }
                 if tag == b'B' {

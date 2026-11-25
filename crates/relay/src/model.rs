@@ -115,9 +115,6 @@ pub const DEBOUNCE_MILLIS: u64 = 300;
 pub const MODULE: &str = "relay";
 
 
-pub const TENANT: &str = "platform";
-
-
 pub const SETTINGS_SECTION: &str = "relay";
 
 
