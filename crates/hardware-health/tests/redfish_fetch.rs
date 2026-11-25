@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use core_pg::scope::tenant_scope;
 use hardware_health::error::{DiscoverError, FetchError, GetError};
-use hardware_health::limits::{default_redfish_limits, DEFAULT_MAX_BYTES, MAX_ID_BYTES, MAX_MEMBERS};
+use hardware_health::limits::{default_redfish_limits, DEFAULT_MAX_BYTES, MAX_ID_BYTES, MAX_MEMBERS, MAX_TIMEOUT_MS};
 use hardware_health::model::{BlindReason, DeviceReport, FetchSession, Health, RedfishDevice, RoleCheck};
 use hardware_health::redfish::parse_redfish;
 use hardware_health::redfish_assess::assess_redfish;
@@ -76,7 +76,7 @@ const PASSWORD: &str = "hunter2-secret";
 const USER: &str = "monitor";
 
 
-const LONG_TIMEOUT_MS: u64 = 20_000;
+const LONG_TIMEOUT_MS: u64 = MAX_TIMEOUT_MS;
 
 
 const SHORT_TIMEOUT_MS: u64 = 300;
