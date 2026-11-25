@@ -154,7 +154,8 @@ clickhouse_serves_no_web_page() {
 }
 
 clickhouse_init_refuses_other_users() {
-    grep -qF 'names a user other than' "$CH_INIT_FILE"
+    grep -qF 'if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then' "$CH_INIT_FILE" \
+        && grep -qF 'is not the file init.sh renders from the four password files' "$CH_INIT_FILE"
 }
 
 nats_has() {
@@ -540,7 +541,7 @@ expect "ClickHouse has no default user, four hashed users on the compose subnet 
 expect "the ClickHouse schema file creates every object with IF NOT EXISTS" clickhouse_schema_is_idempotent
 expect "the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT" clickhouse_views_run_as_schema
 expect "ClickHouse answers only POST / and GET /ping, no web page" clickhouse_serves_no_web_page
-expect "init.sh refuses a users file that names another user" clickhouse_init_refuses_other_users
+expect "init.sh refuses a users file that differs from the rendered one" clickhouse_init_refuses_other_users
 expect "the chschema service keeps its data and log directories on tmpfs" chschema_has '^      - /var/lib/clickhouse$'
 expect "the ClickHouse certificate names DNS:clickhouse only" grep -qF 'make_leaf clickhouse_server clickhouse DNS:clickhouse "$scratch"' "$COMPOSE_DIR/init.sh"
 expect "init.sh bounds the JetStream file store" grep -qF 'max_file_store: $NATS_MAX_FILE_STORE' "$COMPOSE_DIR/init.sh"

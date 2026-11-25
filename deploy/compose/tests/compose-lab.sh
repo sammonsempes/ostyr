@@ -179,6 +179,13 @@ expect "init.sh refuses a symlink as the lock file" absent remote "cd plant && s
 expect "nothing was created through the lock symlink" absent remote "test -e /tmp/lock-leak"
 remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant/secrets"
 expect "init.sh refuses a secrets directory open to others" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo cp secrets/clickhouse_users /tmp/users-good"
+remote "cd plant && sudo sed 's|^    </users>\$|        <evil><networks><ip>::/0</ip></networks><grants><query>GRANT SELECT ON ostyr.*</query></grants></evil>\n&|' /tmp/users-good | sudo tee secrets/clickhouse_users >/dev/null"
+expect "init.sh refuses a users file with a one-line extra user, by name" remote "cd plant && sudo grep -q evil secrets/clickhouse_users && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'clickhouse_users is not the file init.sh renders'"
+remote "cd plant && sudo sed 's|GRANT INSERT ON ostyr.metric_samples|GRANT INSERT, SELECT ON ostyr.metric_samples|' /tmp/users-good | sudo tee secrets/clickhouse_users >/dev/null"
+expect "init.sh refuses the cycle 1 metrics SELECT grant, by name" remote "cd plant && sudo grep -q 'INSERT, SELECT ON ostyr.metric_samples' secrets/clickhouse_users && sudo ./init.sh plant.example 2>&1 | grep -q 'clickhouse_users is not the file init.sh renders'"
+remote "cd plant && sudo cp /tmp/users-good secrets/clickhouse_users"
+expect "init.sh accepts the file it rendered" remote "cd plant && sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready'"
 expect "the installed certificates verify against the CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/pg_server.crt secrets/api_tls.crt"
 remote "cd compose && sudo find secrets -exec stat -c '%a %u %n' {} +"
 

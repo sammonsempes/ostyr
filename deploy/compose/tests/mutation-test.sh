@@ -27,7 +27,7 @@ readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
 readonly CH_USERS="ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader"
 readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
 readonly CH_NO_PAGE="ClickHouse answers only POST / and GET /ping, no web page"
-readonly CH_REFUSES="init.sh refuses a users file that names another user"
+readonly CH_REFUSES="init.sh refuses a users file that differs from the rendered one"
 readonly PINNED="every image is pinned by digest or built locally"
 readonly HARDENED="every service is read-only, drops capabilities and sets no-new-privileges"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
@@ -148,7 +148,7 @@ file_static_runs() {
     file_static_run view_definer_removed STATIC_TEST_CH_SCHEMA_FILE "$schema" '0,/ DEFINER = schema SQL SECURITY DEFINER AS$/s// AS/' "$CH_DEFINER"
     file_static_run handlers_defaults_back STATIC_TEST_CH_CONFIG_FILE "$config" 's|<http_handlers>|<http_handlers><defaults/>|' "$CH_NO_PAGE"
     file_static_run handlers_play_added STATIC_TEST_CH_CONFIG_FILE "$config" 's|<url>/ping</url>|<url>/play</url>|' "$CH_NO_PAGE"
-    file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|names a user other than|names nothing|' "$CH_REFUSES"
+    file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
 }
 
 if [[ "$MODE" == static ]]; then
