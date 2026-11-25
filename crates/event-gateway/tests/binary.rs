@@ -16,11 +16,13 @@ use nats_stub::{kill_connections, lock, start_stub, wait_until};
 use rcgen::string::Ia5String;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::{channel, Receiver};
+use std::time::Duration;
 use tempfile::tempdir;
 
 
@@ -56,13 +58,13 @@ fn write_leaf(dir: &Path, name: &str, issuer: &Issuer<'static, KeyPair>, params:
 }
 
 
-const RELOAD_POLLS: u32 = 200;
-
-
-const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
-
 const SERVING_MARKER: &str = "serving";
+
+
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
+
+const SHORT_HANG_GUARD: Duration = Duration::from_millis(300);
 
 
 const ADDRESS_FIELD: &str = "address=";
@@ -70,7 +72,7 @@ const ADDRESS_FIELD: &str = "address=";
 
 struct Running {
     child: Child,
-    reader: BufReader<ChildStderr>,
+    lines: Receiver<String>,
     address: SocketAddr,
 }
 
@@ -152,6 +154,20 @@ fn address_of(line: &str) -> Option<SocketAddr> {
 }
 
 
+fn await_lines(lines: &Receiver<String>, marker: &str, count: usize, guard: Duration) -> Result<Vec<String>, Failure> {
+    let found: Vec<String> = std::iter::repeat_with(|| lines.recv_timeout(guard))
+        .map_while(Result::ok)
+        .filter(|line| line.contains(marker))
+        .take(count)
+        .collect();
+    if found.len() == count {
+        Ok(found)
+    } else {
+        Err(format!("hang guard: {} of {count} lines containing {marker:?} within {guard:?} each", found.len()).into())
+    }
+}
+
+
 fn start(site: &Site) -> Result<Running, Failure> {
     let mut child = Command::new(PROGRAM)
         .arg(&site.server_file)
@@ -161,14 +177,16 @@ fn start(site: &Site) -> Result<Running, Failure> {
         .stderr(Stdio::piped())
         .spawn()?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
-    let mut reader = BufReader::new(stderr);
-    let line = reader
-        .by_ref()
-        .lines()
-        .find_map(|line| line.map(|text| text.contains(SERVING_MARKER).then_some(text)).transpose())
-        .ok_or("the child ended before it served")??;
+    let (sender, lines) = channel();
+    std::thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .try_for_each(|line| sender.send(line))
+    });
+    let line = await_lines(&lines, SERVING_MARKER, 1, HANG_GUARD)?.pop().ok_or("no serving line")?;
     let address = address_of(&line).ok_or("no address in the serving line")?;
-    Ok(Running { child, reader, address })
+    Ok(Running { child, lines, address })
 }
 
 
@@ -181,10 +199,11 @@ fn send(running: &Running, signal: &str) -> TestResult {
 
 fn stop_with(mut running: Running, signal: &str) -> TestResult {
     send(&running, signal)?;
-    let mut rest = String::new();
-    running.reader.read_to_string(&mut rest)?;
+    let rest: Vec<String> = std::iter::repeat_with(|| running.lines.recv_timeout(HANG_GUARD))
+        .map_while(Result::ok)
+        .collect();
     let status = running.child.wait()?;
-    assert!(status.success(), "{status}: {rest}");
+    assert!(status.success(), "{status}: {rest:?}");
     Ok(())
 }
 
@@ -332,19 +351,62 @@ fn an_unwritable_server_audit_or_a_bad_revocation_file_refuses_the_start_without
 }
 
 
+const RELOAD_ENGINES: usize = 2;
+
+
+const RELOADED_MARKER: &str = "configuration reloaded";
+
+
 #[test]
 fn a_sighup_right_after_serving_reloads_and_keeps_the_gateway_up() -> TestResult {
     let dir = tempdir()?;
     let site = write_site(dir.path(), 1)?;
+    let elsewhere = tempdir()?;
+    let linked = ["gateway.yaml", "channel.yaml"].map(|name| (dir.path().join(name), elsewhere.path().join(name)));
+    linked.iter().try_for_each(|(link, target)| -> TestResult {
+        fs::rename(link, target)?;
+        Ok(std::os::unix::fs::symlink(target, link)?)
+    })?;
     let running = start(&site)?;
-    fs::write(dir.path().join("gateway.yaml"), "nats_url: \"nats://127.0.0.1:2\"\n")?;
+    let (_, gateway_target) = linked.first().ok_or("no gateway link")?;
+    fs::write(gateway_target, "nats_url: \"nats://127.0.0.1:2\"\n")?;
+    let (_, channel_target) = linked.last().ok_or("no channel link")?;
+    fs::write(channel_target, "max_message_bytes: 2000000\n")?;
     send(&running, "-HUP")?;
-    let audit = dir.path().join("gateway-audit.log");
-    (0..RELOAD_POLLS)
-        .find_map(|_| {
-            std::thread::sleep(RELOAD_POLL);
-            fs::read_to_string(&audit).ok().filter(|text| text.contains("config.reload"))
-        })
-        .ok_or("no reload audit line after SIGHUP")?;
+    await_lines(&running.lines, RELOADED_MARKER, RELOAD_ENGINES, HANG_GUARD)?;
+    assert!(fs::read_to_string(dir.path().join("gateway-audit.log"))?.contains("config.reload"));
     stop_with(running, "-TERM")
+}
+
+
+#[test]
+fn a_wait_for_a_line_that_never_comes_fails_by_name_not_by_hang() -> TestResult {
+    let dir = tempdir()?;
+    let site = write_site(dir.path(), 1)?;
+    let running = start(&site)?;
+    let error = await_lines(&running.lines, RELOADED_MARKER, 1, SHORT_HANG_GUARD)
+        .err()
+        .ok_or("a reload line came without a signal")?;
+    assert!(error.to_string().contains("hang guard: 0 of 1 lines"), "{error}");
+    stop_with(running, "-TERM")
+}
+
+
+#[test]
+fn an_audit_path_with_escapes_is_refused_on_one_escaped_line() -> TestResult {
+    let dir = tempdir()?;
+    let site = write_site(dir.path(), 1)?;
+    let gateway_file = dir.path().join("escaped.yaml");
+    fs::write(
+        &gateway_file,
+        format!(
+            "settings_file: {}\naudit_file: \"{}/none\\e[31m\\nsecond/audit.log\"\n",
+            dir.path().join("gateway.yaml").display(),
+            dir.path().display()
+        ),
+    )?;
+    let output = run_to_end(&[&site.server_file, &gateway_file], None)?;
+    let text = String::from_utf8(output.stderr.clone())?;
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    refused_without_serving(&output, "\\u{1b}")
 }
