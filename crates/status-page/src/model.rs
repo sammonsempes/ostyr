@@ -409,6 +409,7 @@ pub struct PageState {
     pub omitted_seen: AtomicUsize,
     pub omitted_ongoing_seen: AtomicUsize,
     pub omitted_size_seen: AtomicBool,
+    pub refused_seen: (AtomicUsize, AtomicUsize),
 }
 
 

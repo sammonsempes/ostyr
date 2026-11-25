@@ -12,6 +12,8 @@ pub enum StatusPageError {
     TooMany { what: &'static str, limit: usize },
     #[error("text `{field}` longer than {limit} bytes")]
     TextTooLong { field: &'static str, limit: usize },
+    #[error("text `{field}` is blank or holds a control, bidi or blank character")]
+    TextInvalid { field: &'static str },
     #[error("two components map to one service")]
     DuplicateService,
     #[error("invalid rule for service `{service}`: {reason}")]

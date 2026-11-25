@@ -91,8 +91,18 @@ pub fn omission_reason(size_cut: bool) -> &'static str {
 }
 
 
+/// As `omission_reason`, but `refused_text` when the only rows left out besides the size fit are incidents whose stored text was refused.
+pub fn fit_reason(size_cut: bool, refused: usize, beyond_limit: bool) -> &'static str {
+    if !size_cut && refused > 0 && !beyond_limit {
+        "refused_text"
+    } else {
+        omission_reason(size_cut)
+    }
+}
+
+
 /// Fits the page: unresolved stay, the resolved set is halved per attempt; returns what it leaves out, rows beyond the limit included.
-pub fn fit_page(config: &PageConfig, read: &PublishedRead, unread: bool) -> Result<(RenderedPage, Omitted), StatusPageError> {
+pub fn fit_page(config: &PageConfig, read: &PublishedRead, unread: bool, refused: usize) -> Result<(RenderedPage, Omitted), StatusPageError> {
     let (mut published, unpublished): (Vec<IncidentInput>, Vec<IncidentInput>) =
         read.incidents.iter().cloned().partition(|incident| incident.published);
     published.sort_by_key(|incident| {
@@ -106,6 +116,7 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead, unread: bool) -> Resu
     let resolved = published.len() - unresolved;
     let total = read.total.max(published.len());
     let ongoing = read.ongoing.max(unresolved);
+    let beyond_limit = read.total > published.len() + refused;
     let kept_counts = (0..MAX_FIT_ATTEMPTS)
         .map(|attempt| unresolved + (resolved >> attempt))
         .chain([unresolved, 0]);
@@ -115,7 +126,7 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead, unread: bool) -> Resu
             let omitted = Omitted {
                 all: total - kept,
                 ongoing: ongoing - kept.min(unresolved),
-                reason: omission_reason(kept < published.len()),
+                reason: fit_reason(kept < published.len(), refused, beyond_limit),
                 unread,
             };
             (render_omitting(config, &[], &subset, &[], 0, &DEFAULT_LIMITS, omitted), omitted)
@@ -179,10 +190,10 @@ pub fn publish_read(config: &PageConfig, state: &PageState, read: &PublishedRead
         Err(StatusPageError::TenantMismatch)?;
     }
     let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(read);
-    if incidents_refused + updates_refused > 0 {
+    if refusal_changed(state, (incidents_refused, updates_refused)) {
         tracing::warn!(incidents_refused, updates_refused, "unsafe stored text left out");
     }
-    let (rendered, omitted) = fit_page(config, &safe, unread)?;
+    let (rendered, omitted) = fit_page(config, &safe, unread, incidents_refused)?;
     publish(state, snapshot_of(&config.tenant, &rendered)).map(|()| omitted)
 }
 
@@ -234,6 +245,16 @@ pub fn omission_changed(state: &PageState, counts: (usize, usize), size_cut: boo
     );
     let size_seen = state.omitted_size_seen.swap(size_cut, Ordering::SeqCst);
     omitted > 0 && (seen != counts || size_seen != size_cut)
+}
+
+
+/// True when the refused counts differ from the previous tick and something is refused; remembers them.
+pub fn refusal_changed(state: &PageState, counts: (usize, usize)) -> bool {
+    let seen = (
+        state.refused_seen.0.swap(counts.0, Ordering::SeqCst),
+        state.refused_seen.1.swap(counts.1, Ordering::SeqCst),
+    );
+    counts != (0, 0) && seen != counts
 }
 
 

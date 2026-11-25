@@ -9,8 +9,9 @@ use status_page::error::{StatusPageError, StoreError};
 use status_page::limiter::new_state;
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
 use status_page::publish::{
-    declared_services, error_class, fetch, first_publish, fit_page, is_clean, omission_changed, omission_reason, publish_page, publisher,
-    read_within, refuse_unsafe_text, render_class, run_rounds, settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
+    declared_services, error_class, fetch, first_publish, fit_page, fit_reason, is_clean, omission_changed, omission_reason, publish_page,
+    publish_read, publisher, read_within, refusal_changed, refuse_unsafe_text, render_class, run_rounds, settings_cut, tick, MAX_RENDERS_PER_TICK,
+    READER_QUERIES, READ_DEADLINE,
 };
 use status_page::settings::{shared_settings, validate_settings};
 use status_page::store_model::PublishedRead;
@@ -847,6 +848,9 @@ async fn the_published_page_never_holds_refused_stored_text() -> TestResult {
 }
 
 
+const TWO: usize = 2;
+
+
 const MARK_RUN: usize = 12;
 
 
@@ -972,16 +976,62 @@ fn the_omission_reason_names_the_size_fit_or_the_read_limit() -> TestResult {
         total: HIDDEN_RESOLVED,
         ongoing: 1,
     };
-    let (_first, omitted) = fit_page(&config(), &read_limit, false)?;
+    let (_first, omitted) = fit_page(&config(), &read_limit, false, 0)?;
     assert_eq!((omitted.all, omitted.reason), (HIDDEN_RESOLVED - 1, "read_limit"));
     let sized = PublishedRead {
         incidents: resolved_set(),
         total: resolved_set().len(),
         ongoing: 0,
     };
-    let (_second, cut) = fit_page(&config(), &sized, false)?;
+    let (_second, cut) = fit_page(&config(), &sized, false, 0)?;
     assert!(cut.all > 0 && cut.reason == "size");
     assert_eq!(declared_services(&config()), vec![SERVICE.to_owned()]);
+    Ok(())
+}
+
+
+#[test]
+fn refused_stored_text_has_its_own_omission_reason() -> TestResult {
+    assert_eq!(fit_reason(false, 1, false), "refused_text");
+    assert_eq!(fit_reason(false, 0, false), "read_limit");
+    assert_eq!(fit_reason(false, 1, true), "read_limit");
+    assert_eq!(fit_reason(true, 1, false), "size");
+    let read = PublishedRead {
+        incidents: vec![incident(TENANT, CONTROL_TITLE), incident(TENANT, "Good title")],
+        total: TWO,
+        ongoing: TWO,
+    };
+    let (safe, refused, _first_updates) = refuse_unsafe_text(&read);
+    let (_first, omitted) = fit_page(&config(), &safe, false, refused)?;
+    assert_eq!((omitted.all, omitted.reason), (1, "refused_text"));
+    let beyond = PublishedRead {
+        total: HIDDEN_RESOLVED,
+        ..read
+    };
+    let (safe_beyond, refused_beyond, _second_updates) = refuse_unsafe_text(&beyond);
+    let (_second, beyond_omitted) = fit_page(&config(), &safe_beyond, false, refused_beyond)?;
+    assert_eq!(beyond_omitted.reason, "read_limit");
+    Ok(())
+}
+
+
+#[test]
+fn the_refusal_log_fires_once_per_change_of_the_counts() -> TestResult {
+    let (state, _clock) = state_with(PageSettings::default());
+    assert!(!refusal_changed(&state, (0, 0)));
+    assert!(refusal_changed(&state, (1, 0)));
+    assert!(!refusal_changed(&state, (1, 0)));
+    assert!(refusal_changed(&state, (1, TWO)));
+    assert!(!refusal_changed(&state, (1, TWO)));
+    assert!(!refusal_changed(&state, (0, 0)));
+    assert!(refusal_changed(&state, (1, TWO)));
+    let read = PublishedRead {
+        incidents: vec![incident(TENANT, CONTROL_TITLE), incident(TENANT, "Good title")],
+        total: TWO,
+        ongoing: TWO,
+    };
+    publish_read(&config(), &state, &read, false)?;
+    assert!(!refusal_changed(&state, (1, 0)));
     Ok(())
 }
 

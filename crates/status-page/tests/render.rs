@@ -399,7 +399,7 @@ fn a_cut_of_updates_and_of_incidents_is_stated_never_silent() -> TestResult {
     };
     let page = render_omitting(&config(), &[], &[cut], &[], NOW, &DEFAULT_LIMITS, omitted)?;
     assert!(page.json.contains("\"omitted_updates\":3"));
-    assert!(page.html.contains("3 older updates not shown."));
+    assert!(page.html.contains("3 updates not shown."));
     assert!(page.json.contains("\"omitted_incidents\":2"));
     Ok(())
 }

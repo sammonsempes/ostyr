@@ -104,3 +104,31 @@ fn bounds_and_duplicates_are_refused() -> TestResult {
     ));
     Ok(())
 }
+
+
+#[test]
+fn a_title_or_component_name_with_a_control_bidi_or_blank_character_is_refused() -> TestResult {
+    let bad = [
+        "bad\u{1b}title",
+        "evil \u{202e}text",
+        "blank \u{3164}",
+        "   ",
+        "\u{0301}\u{0301}",
+        "x\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}",
+        "a\nb",
+    ];
+    bad.iter().try_for_each(|text| -> TestResult {
+        let title = SAMPLE.replace("Acme status", &serde_json::to_string(text)?);
+        let named = SAMPLE.replace("name: Website", &format!("name: {}", serde_json::to_string(text)?));
+        let title_result = load_text(&title, &DEFAULT_LIMITS)?;
+        let name_result = load_text(&named, &DEFAULT_LIMITS)?;
+        assert!(matches!(title_result, Err(StatusPageError::TextInvalid { field: "title" })), "{text:?}");
+        assert!(
+            matches!(name_result, Err(StatusPageError::TextInvalid { field: "component name" })),
+            "{text:?}"
+        );
+        Ok(())
+    })?;
+    assert!(load_text(&SAMPLE.replace("Acme status", "Cafe\u{0301} status"), &DEFAULT_LIMITS)?.is_ok());
+    Ok(())
+}
