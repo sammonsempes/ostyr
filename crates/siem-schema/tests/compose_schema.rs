@@ -31,11 +31,10 @@ fn compose_schema_file_matches_the_renderer() -> Result<(), SchemaError> {
         .chain(metrics)
         .chain(std::iter::once(traces))
         .map(|statement| {
-            let guarded = statement.replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1).replacen(
-                "CREATE MATERIALIZED VIEW ",
-                "CREATE MATERIALIZED VIEW IF NOT EXISTS ",
-                1,
-            );
+            let guarded = statement
+                .replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                .replacen("CREATE MATERIALIZED VIEW ", "CREATE MATERIALIZED VIEW IF NOT EXISTS ", 1)
+                .replacen(" AS\nSELECT", " DEFINER = schema SQL SECURITY DEFINER AS\nSELECT", 1);
             format!("{guarded};\n")
         })
         .collect();

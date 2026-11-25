@@ -125,7 +125,7 @@ ORDER BY (`tenant`, `metric`, `unit`, `kind`, `labels`, `bucket`)
 TTL toDateTime(`bucket`) + toIntervalDay(1825)
 SETTINGS storage_policy = 'default'
 ;
-CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1m_mv` TO `metric_rollup_1m` AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1m_mv` TO `metric_rollup_1m` DEFINER = schema SQL SECURITY DEFINER AS
 SELECT `tenant`, `metric`, `unit`, `kind`, `labels`,
     toStartOfInterval(`@timestamp`, INTERVAL 1 MINUTE) AS `bucket`,
     min(`value`) AS `value_min`,
@@ -136,7 +136,7 @@ SELECT `tenant`, `metric`, `unit`, `kind`, `labels`,
 FROM `metric_samples`
 GROUP BY `tenant`, `metric`, `unit`, `kind`, `labels`, `bucket`
 ;
-CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1h_mv` TO `metric_rollup_1h` AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1h_mv` TO `metric_rollup_1h` DEFINER = schema SQL SECURITY DEFINER AS
 SELECT `tenant`, `metric`, `unit`, `kind`, `labels`,
     toStartOfInterval(`@timestamp`, INTERVAL 1 HOUR) AS `bucket`,
     min(`value`) AS `value_min`,
@@ -147,7 +147,7 @@ SELECT `tenant`, `metric`, `unit`, `kind`, `labels`,
 FROM `metric_samples`
 GROUP BY `tenant`, `metric`, `unit`, `kind`, `labels`, `bucket`
 ;
-CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1d_mv` TO `metric_rollup_1d` AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS `metric_rollup_1d_mv` TO `metric_rollup_1d` DEFINER = schema SQL SECURITY DEFINER AS
 SELECT `tenant`, `metric`, `unit`, `kind`, `labels`,
     toStartOfInterval(`@timestamp`, INTERVAL 1 DAY) AS `bucket`,
     min(`value`) AS `value_min`,

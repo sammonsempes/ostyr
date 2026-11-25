@@ -31,6 +31,27 @@
             <preferServerCiphers>true</preferServerCiphers>
         </server>
     </openSSL>
+    <http_handlers>
+        <rule>
+            <url>/ping</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>static</type>
+                <status>200</status>
+                <content_type>text/plain; charset=UTF-8</content_type>
+                <response_content>Ok.
+</response_content>
+            </handler>
+        </rule>
+        <rule>
+            <url>/</url>
+            <methods>POST</methods>
+            <handler>
+                <type>dynamic_query_handler</type>
+                <query_param_name>query</query_param_name>
+            </handler>
+        </rule>
+    </http_handlers>
     <user_directories>
         <users_xml>
             <path>/run/secrets/clickhouse_users</path>

@@ -181,6 +181,8 @@ services:
       - ./config/clickhouse-schema.sql:/etc/ostyr-schema/schema.sql:ro
     tmpfs:
       - /tmp
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
 networks:
   default:
     ipam:

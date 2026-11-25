@@ -443,6 +443,10 @@ expect "the ingest writer inserts into events" test "$(clickhouse_value ingest_i
 expect "the reader sees the ingested row" test "$(clickhouse_value reader_count_after_insert)" = 1
 expect "the ingest writer cannot read events (497)" test "$(clickhouse_value ingest_select_code)" = 497
 expect "the metrics writer inserts a sample and the rollup view fills" test "$(clickhouse_value metrics_insert)" = 0 -a "$(clickhouse_value rollup_rows)" = 1
+expect "the metrics writer cannot read samples and cannot write a rollup (497 and 497)" test "$(clickhouse_value metrics_select_code)/$(clickhouse_value metrics_rollup_insert_code)" = "497/497"
+expect "the refused rollup INSERT left the rollup at one row" test "$(clickhouse_value rollup_rows_after_forgery)" = 1
+expect "no ClickHouse web page answers (404 for /play, /dashboard, /js)" test "$(clickhouse_value page_play)/$(clickhouse_value page_dashboard)/$(clickhouse_value page_js)" = "404/404/404"
+expect "a GET query on / gets 404, only POST is served" test "$(clickhouse_value get_root_select)" = 404
 expect "the metrics writer cannot write events (497)" test "$(clickhouse_value metrics_events_code)" = 497
 expect "the ingest writer cannot write metrics (497)" test "$(clickhouse_value ingest_metrics_code)" = 497
 expect "neither the reader nor the ingest writer can DROP" test "$(clickhouse_value reader_ddl_code)/$(clickhouse_value ingest_ddl_code)" = "497/497"

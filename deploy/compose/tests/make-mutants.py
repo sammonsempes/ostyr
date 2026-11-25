@@ -161,6 +161,7 @@ MUTANTS = {
     "chschema_cap_add": lambda text: replace_once(text, CHSCHEMA_SECRETS, CHSCHEMA_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
     "chschema_secret_extra": lambda text: replace_once(text, CHSCHEMA_SECRETS, "    secrets: [pg_ca, clickhouse_schema_password, clickhouse_users]\n"),
     "chschema_bind_secrets": lambda text: replace_once(text, CHSCHEMA_VOLUME, CHSCHEMA_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "chschema_anonymous_volume": lambda text: replace_once(text, "      - /var/lib/clickhouse\n", ""),
     "chschema_root": lambda text: replace_once(text, "    user: 65530:65530\n", "    user: 0:0\n"),
     "chschema_image_other": lambda text: replace_in_service(text, "  chschema:\n", CH_IMAGE % DIGEST, CH_IMAGE % ("0" * 64)),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),

@@ -8,6 +8,9 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="$(dirname "$TESTS_DIR")"
 readonly TESTS_DIR COMPOSE_DIR
 readonly COMPOSE_FILE="${STATIC_TEST_COMPOSE_FILE:-$COMPOSE_DIR/compose.yaml}"
+readonly CH_INIT_FILE="${STATIC_TEST_INIT_FILE:-$COMPOSE_DIR/init.sh}"
+readonly CH_CONFIG_FILE="${STATIC_TEST_CH_CONFIG_FILE:-$COMPOSE_DIR/config/clickhouse-config.xml}"
+readonly CH_SCHEMA_FILE="${STATIC_TEST_CH_SCHEMA_FILE:-$COMPOSE_DIR/config/clickhouse-schema.sql}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
 readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
@@ -105,12 +108,12 @@ clickhouse_one_image() {
 }
 
 clickhouse_config_has() {
-    grep -qxF -- "$1" "$COMPOSE_DIR/config/clickhouse-config.xml"
+    grep -qxF -- "$1" "$CH_CONFIG_FILE"
 }
 
 clickhouse_serves_https_only() {
     clickhouse_config_has '    <https_port>8443</https_port>' && ! grep -q -e 'http_port' -e 'tcp_port' -e 'mysql_port' -e 'postgresql_port' -e 'interserver' \
-        -e 'grpc' -e 'prometheus' "$COMPOSE_DIR/config/clickhouse-config.xml" \
+        -e 'grpc' -e 'prometheus' "$CH_CONFIG_FILE" \
         && clickhouse_config_has '            <verificationMode>none</verificationMode>' && clickhouse_config_has '            <loadDefaultCAFile>false</loadDefaultCAFile>' \
         && clickhouse_config_has '            <certificateFile>/run/secrets/clickhouse_server_cert</certificateFile>' \
         && clickhouse_config_has '            <privateKeyFile>/run/secrets/clickhouse_server_key</privateKeyFile>' \
@@ -124,19 +127,34 @@ clickhouse_is_bounded() {
 
 clickhouse_users_are_least_privilege() {
     local users
-    users="$(sed -n '/^<clickhouse>$/,/^<\/clickhouse>$/p' "$COMPOSE_DIR/init.sh")"
+    users="$(sed -n '/^<clickhouse>$/,/^<\/clickhouse>$/p' "$CH_INIT_FILE")"
     ! grep -q -e '<default>' -e 'access_management' -e 'GRANT ALL' -e '<password></password>' -e '<password>' -e 'no_password' -e '::/0' -e '0.0.0.0/0' <<<"$users" \
         && grep -qF '<readonly>2</readonly>' <<<"$users" && [[ "$(grep -c '<password_sha256_hex>' <<<"$users")" -eq 4 ]] \
         && [[ "$(grep -c '<networks><ip>$CLICKHOUSE_SUBNET</ip></networks>' <<<"$users")" -eq 4 ]] \
-        && grep -qF 'readonly CLICKHOUSE_SUBNET=172.29.63.0/24' "$COMPOSE_DIR/init.sh" \
+        && grep -qF 'readonly CLICKHOUSE_SUBNET=172.29.63.0/24' "$CH_INIT_FILE" \
         && grep -qF '<query>GRANT SELECT ON $CLICKHOUSE_DATABASE.*</query>' <<<"$users" \
         && grep -qF '<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.events</query>' <<<"$users" \
-        && grep -qF '<query>GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples</query>' <<<"$users" \
-        && [[ "$(grep -c 'GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1[mhd]</query>' <<<"$users")" -eq 3 ]]
+        && grep -qF '<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>' <<<"$users" \
+        && [[ "$(grep -o 'GRANT ' <<<"$users" | wc -l)" -eq 4 ]] \
+        && grep -qF 'GRANT CREATE DATABASE, CREATE TABLE, CREATE VIEW, SELECT, INSERT ON $CLICKHOUSE_DATABASE.*' <<<"$users"
 }
 
 clickhouse_schema_is_idempotent() {
-    ! grep '^CREATE ' "$COMPOSE_DIR/config/clickhouse-schema.sql" | grep -q -v 'IF NOT EXISTS' && grep -q '^CREATE TABLE IF NOT EXISTS `events`$' "$COMPOSE_DIR/config/clickhouse-schema.sql"
+    ! grep '^CREATE ' "$CH_SCHEMA_FILE" | grep -q -v 'IF NOT EXISTS' && grep -q '^CREATE TABLE IF NOT EXISTS `events`$' "$CH_SCHEMA_FILE"
+}
+
+clickhouse_views_run_as_schema() {
+    [[ "$(grep -c '^CREATE MATERIALIZED VIEW ' "$CH_SCHEMA_FILE")" -eq 3 \
+        && "$(grep -c '^CREATE MATERIALIZED VIEW .* DEFINER = schema SQL SECURITY DEFINER AS$' "$CH_SCHEMA_FILE")" -eq 3 ]]
+}
+
+clickhouse_serves_no_web_page() {
+    [[ "$(grep -c '<url>' "$CH_CONFIG_FILE")" -eq 2 ]] && clickhouse_config_has '            <url>/ping</url>' && clickhouse_config_has '            <url>/</url>' \
+        && ! grep -q -e '<defaults' -e 'play' -e 'dashboard' -e 'binary' -e 'js' "$CH_CONFIG_FILE"
+}
+
+clickhouse_init_refuses_other_users() {
+    grep -qF 'names a user other than' "$CH_INIT_FILE"
 }
 
 nats_has() {
@@ -520,6 +538,10 @@ expect "ClickHouse serves HTTPS 8443 only, with its own certificate and users fi
 expect "ClickHouse bounds its memory and keeps free disk space" clickhouse_is_bounded
 expect "ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader" clickhouse_users_are_least_privilege
 expect "the ClickHouse schema file creates every object with IF NOT EXISTS" clickhouse_schema_is_idempotent
+expect "the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT" clickhouse_views_run_as_schema
+expect "ClickHouse answers only POST / and GET /ping, no web page" clickhouse_serves_no_web_page
+expect "init.sh refuses a users file that names another user" clickhouse_init_refuses_other_users
+expect "the chschema service keeps its data and log directories on tmpfs" chschema_has '^      - /var/lib/clickhouse$'
 expect "the ClickHouse certificate names DNS:clickhouse only" grep -qF 'make_leaf clickhouse_server clickhouse DNS:clickhouse "$scratch"' "$COMPOSE_DIR/init.sh"
 expect "init.sh bounds the JetStream file store" grep -qF 'max_file_store: $NATS_MAX_FILE_STORE' "$COMPOSE_DIR/init.sh"
 expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'

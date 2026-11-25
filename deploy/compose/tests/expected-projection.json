@@ -131,7 +131,9 @@
         "no-new-privileges:true"
       ],
       "tmpfs": [
-        "/tmp"
+        "/tmp",
+        "/var/lib/clickhouse",
+        "/var/log/clickhouse-server"
       ],
       "user": "65530:65530",
       "volumes": [

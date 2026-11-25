@@ -28,11 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chain(metrics)
         .chain(std::iter::once(traces))
         .map(|statement| {
-            statement.replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1).replacen(
-                "CREATE MATERIALIZED VIEW ",
-                "CREATE MATERIALIZED VIEW IF NOT EXISTS ",
-                1,
-            )
+            statement
+                .replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+                .replacen("CREATE MATERIALIZED VIEW ", "CREATE MATERIALIZED VIEW IF NOT EXISTS ", 1)
+                .replacen(" AS\nSELECT", " DEFINER = schema SQL SECURITY DEFINER AS\nSELECT", 1)
         })
         .try_for_each(|statement| writeln!(stdout, "{statement};"))?;
     Ok(())

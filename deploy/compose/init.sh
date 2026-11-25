@@ -261,6 +261,11 @@ make_clickhouse_users() {
     done
     if is_present "$SECRETS_DIR/$name"; then
         check_present "$name"
+        if [[ "$(sed -n '/^    <users>$/,/^    <\/users>$/p' "$SECRETS_DIR/$name" | sed -n 's/^        <\([a-z]*\)>$/\1/p' | sort | tr '\n' ' ')" \
+            != "$(printf '%s\n' "${CLICKHOUSE_USERS[@]}" | sort | tr '\n' ' ')" ]]; then
+            printf 'error: %s names a user other than %s, delete it and run init again\n' "$name" "${CLICKHOUSE_USERS[*]}" >&2
+            exit 1
+        fi
         for user in "${CLICKHOUSE_USERS[@]}"; do
             if ! grep -qF "<password_sha256_hex>${hashes[$user]}</password_sha256_hex>" "$SECRETS_DIR/$name"; then
                 printf 'error: %s does not hold the hash of clickhouse_%s_password, delete it and run init again\n' "$name" "$user" >&2
@@ -309,10 +314,7 @@ make_clickhouse_users() {
             <networks><ip>$CLICKHOUSE_SUBNET</ip></networks>
             <profile>readwrite</profile>
             <grants>
-                <query>GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples</query>
-                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1m</query>
-                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1h</query>
-                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1d</query>
+                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>
             </grants>
         </metrics>
     </users>
