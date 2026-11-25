@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Usage: relay-proxy-probe.py HOST PORT SERVER_NAME PLATFORM_CA [--forge] [--cert FILE --key FILE]
 Run on the client VM against the gateway relay port: optionally sends a PROXY v2 header (TCP over IPv4, forged source 10.9.9.9), then
-wraps the same socket in TLS 1.3 and prints `HANDSHAKE OK <version>` or the error."""
+wraps the same socket in TLS 1.3 and reads one byte (TLS 1.3 checks the client certificate after the handshake returns).
+Prints `ACCEPTED <version>` and exits 0 only when the server sends bytes, else `REFUSED <error class>` and exits 1."""
 import argparse
 import socket
 import ssl
 import struct
+import sys
 
 SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
 FORGED_SOURCE = "10.9.9.9"
@@ -13,8 +15,8 @@ FORGED_PORT = 40000
 TIMEOUT_SECONDS = 10
 
 
-def proxy_header(destination):
-    addresses = socket.inet_aton(FORGED_SOURCE) + socket.inet_aton(destination) + struct.pack("!HH", FORGED_PORT, 7443)
+def proxy_header(destination, port):
+    addresses = socket.inet_aton(FORGED_SOURCE) + socket.inet_aton(destination) + struct.pack("!HH", FORGED_PORT, port)
     return SIGNATURE + bytes([0x21, 0x11]) + struct.pack("!H", len(addresses)) + addresses
 
 
@@ -33,14 +35,20 @@ def main():
     context.load_verify_locations(args.platform_ca)
     if args.cert:
         context.load_cert_chain(args.cert, args.key)
+    status = 1
     try:
         with socket.create_connection((args.host, args.port), timeout=TIMEOUT_SECONDS) as plain:
             if args.forge:
-                plain.sendall(proxy_header(args.host))
+                plain.sendall(proxy_header(args.host, args.port))
             with context.wrap_socket(plain, server_hostname=args.server_name) as tls:
-                print("HANDSHAKE OK", tls.version())
+                if tls.recv(1):
+                    print("ACCEPTED", tls.version())
+                    status = 0
+                else:
+                    print("REFUSED", "EOF")
     except (OSError, ssl.SSLError) as error:
-        print("HANDSHAKE FAILED", type(error).__name__, error)
+        print("REFUSED", type(error).__name__, error)
+    sys.exit(status)
 
 
 main()
