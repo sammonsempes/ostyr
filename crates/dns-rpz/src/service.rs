@@ -7,7 +7,7 @@ use crate::limits::{
 };
 use crate::model::{CommandStatus, LoopEnd, RoundLoop, RoundOutcome, ServiceSettings};
 use crate::policy::Policy;
-use crate::types::WaitFn;
+use crate::types::{SnapshotFn, WaitFn};
 use crate::unbound::{run_readback, run_with_deadline};
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, AuditLog};
@@ -224,8 +224,8 @@ pub fn shared_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 
 
 /// One round, its failure audit, then the wait; `true` when the wait reported a stop.
-pub fn one_round(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, round: u64) -> Result<bool, ServiceError> {
-    let policy = current_config(session.engine);
+pub fn one_round(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, round: u64, snapshot: &SnapshotFn) -> Result<bool, ServiceError> {
+    let policy = snapshot(session.engine);
     let outcome = if zone_file_matches(&policy, session.output) {
         run_round_with(session, &policy)?
     } else {
@@ -242,7 +242,7 @@ pub fn one_round(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, r
 
 /// Rounds until `wait` reports a stop or `max_rounds` is reached; a failed round never ends the loop.
 pub fn serve_rounds(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn, max_rounds: u64) -> Result<LoopEnd, ServiceError> {
-    let flow = (1..=max_rounds).try_for_each(|round| match one_round(session, round_loop, wait, round) {
+    let flow = (1..=max_rounds).try_for_each(|round| match one_round(session, round_loop, wait, round, &current_config::<Policy>) {
         Ok(false) => ControlFlow::Continue(()),
         Ok(true) => ControlFlow::Break(Ok(LoopEnd::Stopped)),
         Err(failure) => ControlFlow::Break(Err(failure)),

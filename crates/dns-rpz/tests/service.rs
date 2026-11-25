@@ -27,8 +27,8 @@ use dns_rpz::error::ServiceError;
 use dns_rpz::model::{CommandStatus, LoopEnd, Reloader, RoundLoop, RoundOutcome, ServiceSettings};
 use dns_rpz::policy::Policy;
 use dns_rpz::service::{
-    changed_pinned, check_allowlist, exit_code, failed_stage, invalid_settings, open_settings_engine, read_service_settings, round_failed_entry,
-    serve_rounds, service_context, service_readback, service_runner, settings_state, validate_settings, zone_file_matches,
+    changed_pinned, check_allowlist, exit_code, failed_stage, invalid_settings, one_round, open_settings_engine, read_service_settings,
+    round_failed_entry, serve_rounds, service_context, service_readback, service_runner, settings_state, validate_settings, zone_file_matches,
 };
 use dns_rpz::source::open_source;
 use dns_rpz::types::{RunnerFn, WaitFn};
@@ -820,5 +820,58 @@ fn the_service_reads_back_only_through_its_own_control_program() -> TestResult {
     assert!(refused.err().is_some_and(|error| error.to_string().contains("another control program")));
     let arguments = ["--no-such-option".to_owned()];
     assert!(service_readback("unbound-control", &arguments, Duration::from_secs(INTERVAL)).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_round_takes_one_snapshot_for_the_zone_check_and_the_generation() -> TestResult {
+    logging::init_logging();
+    let dir = tempdir()?;
+    write_files(dir.path(), "first.example.com", INTERVAL)?;
+    let zone = dir.path().join("zone.db");
+    let policy = engine_for(&dir.path().join("policy.yaml"))?;
+    let mut draft = sample_policy();
+    draft.zone = "snapshot.example.net".to_owned();
+    draft.unbound.zonefile = zone.display().to_string();
+    let snapshot = Arc::new(draft);
+    let reads = AtomicUsize::new(0);
+    let reader = |_engine: &ReloadEngine<Policy>| {
+        reads.fetch_add(1, Ordering::SeqCst);
+        Arc::clone(&snapshot)
+    };
+    let rejected = AtomicU64::new(0);
+    let zone_context = context();
+    let sink = audit();
+    let counter = dir.path().join("counter");
+    let spec = dir.path().join("iocs.jsonl").display().to_string();
+    let open = open_source(&spec, &rejected);
+    let reloader = Reloader {
+        runner: &succeeding_runner,
+        readback: &|_: &str, _: &[String], _: Duration| zone_listing(&zone),
+        audit: &*sink,
+        context: &zone_context,
+    };
+    let mut report = Vec::new();
+    let mut session = Session {
+        engine: &policy,
+        clock: &now,
+        open: &*open,
+        rejected: &rejected,
+        counter: &counter,
+        output: &zone,
+        report: &mut report,
+        reloader: &reloader,
+    };
+    let settings = settings_engine(dir.path())?;
+    let failure_context = service_context("zone", "round");
+    let round_loop = RoundLoop {
+        settings: &settings,
+        audit: &*sink,
+        context: &failure_context,
+    };
+    assert!(one_round(&mut session, &round_loop, &|_interval: Duration| true, 1, &reader)?);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(fs::read_to_string(&zone)?.contains("$ORIGIN snapshot.example.net."));
     Ok(())
 }
