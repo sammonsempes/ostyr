@@ -55,9 +55,19 @@ pub enum CommandStatus {
 }
 
 
+/// What Unbound was read to serve after a reload attempt: the new serial, another serial, or no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadVerdict {
+    Applied,
+    Failed,
+    Unknown,
+}
+
+
 /// What a zone reload needs: the command runner, the audit sink and who is acting.
 pub struct Reloader<'a> {
     pub runner: &'a crate::types::RunnerFn<'a>,
+    pub readback: &'a crate::types::ReadbackFn<'a>,
     pub audit: &'a core_config::types::SharedAuditFn,
     pub context: &'a core_config::reload::ReloadContext,
 }
@@ -104,4 +114,43 @@ pub enum ConnectionClass {
     Closed,
     Failed,
     Deadline,
+}
+
+
+/// The service file: every path is absolute and read at start; only `interval_seconds` is live.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSettings {
+    pub policy_file: String,
+    pub audit_file: String,
+    pub ioc_source: String,
+    pub counter_file: String,
+    pub zone_file: String,
+    pub interval_seconds: u64,
+}
+
+
+/// How one round ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundOutcome {
+    Published,
+    GenerationFailed,
+    ZoneFileMismatch,
+    ReloadFailed,
+}
+
+
+/// Why the round loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopEnd {
+    Stopped,
+    RoundCap,
+}
+
+
+/// What the loop needs besides the session: the live service settings and the audit sink for failed rounds.
+pub struct RoundLoop<'a> {
+    pub settings: &'a core_config::reload::ReloadEngine<ServiceSettings>,
+    pub audit: &'a core_config::types::SharedAuditFn,
+    pub context: &'a core_config::reload::ReloadContext,
 }

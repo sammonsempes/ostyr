@@ -18,6 +18,9 @@ use broken::BrokenReader;
 use clock::now;
 use core_config::load::load_file;
 use dns_rpz::error::RpzError;
+use dns_rpz::limits::MAX_IOC_LINES;
+#[cfg(unix)]
+use dns_rpz::limits::MAX_IOC_SOURCE_BYTES;
 use dns_rpz::model::RunSummary;
 use dns_rpz::policy::{validate_policy, Policy};
 use dns_rpz::run::{count, generate, open_file};
@@ -30,7 +33,11 @@ use sample::sample_policy;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, Cursor};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
 use tempfile::tempdir;
 use types::TestResult;
 
@@ -249,5 +256,48 @@ fn counting_and_opening_files() -> TestResult {
     count(&mut tally, "a");
     assert_eq!(tally, counts(&[("a", TWO)]));
     assert!(open_file(Path::new("/nonexistent/iocs.jsonl")).is_err());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn only_a_regular_file_of_bounded_size_opens_as_a_source() -> TestResult {
+    let dir = tempdir()?;
+    let fifo = dir.path().join("fifo");
+    assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(open_file(&fifo).is_err());
+    let link = dir.path().join("zero");
+    symlink("/dev/zero", &link)?;
+    assert!(open_file(&link).is_err());
+    assert!(open_file(dir.path()).is_err());
+    let sparse = dir.path().join("sparse");
+    let file = fs::File::create(&sparse)?;
+    file.set_len(MAX_IOC_SOURCE_BYTES + 1)?;
+    assert!(open_file(&sparse).is_err_and(|error| error.to_string().contains("larger than")));
+    file.set_len(MAX_IOC_SOURCE_BYTES)?;
+    assert!(open_file(&sparse).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_source_with_more_lines_than_the_cap_fails_the_run_before_anything_is_written() -> TestResult {
+    init_logging();
+    let dir = tempdir()?;
+    let policy = sample_policy();
+    let counter = dir.path().join("counter");
+    let output = dir.path().join("zone.db");
+    let at_cap = vec![b'\n'; usize::try_from(MAX_IOC_LINES)?];
+    assert!(generate(&policy, &mut Cursor::new(at_cap), now(), &counter, &output).is_ok());
+    fs::remove_file(&output)?;
+    fs::remove_file(&counter)?;
+    let over_cap = vec![b'\n'; usize::try_from(MAX_IOC_LINES)? + 1];
+    let result = generate(&policy, &mut Cursor::new(over_cap), now(), &counter, &output);
+    assert!(
+        matches!(&result, Err(RpzError::Io(error)) if error.to_string().contains("more than")),
+        "{result:?}"
+    );
+    assert!(!output.exists() && !counter.exists());
     Ok(())
 }
