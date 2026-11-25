@@ -183,6 +183,60 @@ services:
       - /tmp
       - /var/lib/clickhouse
       - /var/log/clickhouse-server
+  siem:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65529:65529
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/ostyr-siem-ingest", "/etc/ostyr/siem-ingest.yaml"]
+    depends_on:
+      nats:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+    secrets: [pg_ca, clickhouse_ingest_password, nats_siem_password]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - siemstate:/var/lib/ostyr-siem
+  metrics:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65528:65528
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/ostyr-metrics-ingest", "/etc/ostyr/metrics-ingest.yaml"]
+    depends_on:
+      nats:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+    secrets: [pg_ca, clickhouse_metrics_password, nats_metrics_password]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - metricsstate:/var/lib/ostyr-metrics
+  metricalerts:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65527:65527
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/ostyr-metric-alerts", "/etc/ostyr/metric-alerts.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    secrets: [pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - alertsstate:/var/lib/ostyr-metric-alerts
 networks:
   default:
     ipam:
@@ -198,6 +252,9 @@ volumes:
   gatewaystate: {}
   relaystate: {}
   chdata: {}
+  siemstate: {}
+  metricsstate: {}
+  alertsstate: {}
 secrets:
   pg_password:
     file: ./secrets/pg_password
@@ -239,3 +296,15 @@ secrets:
     file: ./secrets/clickhouse_users
   clickhouse_schema_password:
     file: ./secrets/clickhouse_schema_password
+  clickhouse_ingest_password:
+    file: ./secrets/clickhouse_ingest_password
+  clickhouse_metrics_password:
+    file: ./secrets/clickhouse_metrics_password
+  nats_siem_password:
+    file: ./secrets/nats_siem_password
+  nats_metrics_password:
+    file: ./secrets/nats_metrics_password
+  metricalerts_pg_password:
+    file: ./secrets/metricalerts_pg_password
+  metricalerts_clickhouse_password:
+    file: ./secrets/metricalerts_clickhouse_password

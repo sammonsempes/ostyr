@@ -23,19 +23,19 @@ probe() {
 }
 
 printf 'objects %s\n' "$(ch schema "SELECT count() FROM system.tables WHERE database = 'ostyr'")"
-printf 'reader_select %s\n' "$(ch reader 'SELECT count() FROM events')"
+printf 'reader_select %s\n' "$(ch reader "SELECT count() FROM events WHERE tenant = 'proof'")"
 printf 'reader_insert_code %s\n' "$(ch reader "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | code_of)"
 printf 'reader_lift_readonly_code %s\n' "$(ch reader 'SELECT 1' '&readonly=0' | code_of)"
 printf 'reader_insert_text %s\n' "$(ch reader "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | head -n 1 | cut -c1-200)"
-printf 'reader_count_after_refused %s\n' "$(ch reader 'SELECT count() FROM events')"
+printf 'reader_count_after_refused %s\n' "$(ch reader "SELECT count() FROM events WHERE tenant = 'proof'")"
 printf 'ingest_insert %s\n' "$(ch ingest "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | wc -c)"
 printf 'ingest_select_code %s\n' "$(ch ingest 'SELECT count() FROM events' | code_of)"
-printf 'reader_count_after_insert %s\n' "$(ch reader 'SELECT count() FROM events')"
+printf 'reader_count_after_insert %s\n' "$(ch reader "SELECT count() FROM events WHERE tenant = 'proof'")"
 printf 'metrics_insert %s\n' "$(ch metrics "INSERT INTO metric_samples (tenant, metric, unit, kind, labels, \`@timestamp\`, value) VALUES ('proof', 'cpu', 'percent', 'gauge', map(), now(), 1.5)" | wc -c)"
-printf 'rollup_rows %s\n' "$(ch reader 'SELECT count() FROM metric_rollup_1m')"
+printf 'rollup_rows %s\n' "$(ch reader "SELECT count() FROM metric_rollup_1m WHERE tenant IN ('proof', 'forged')")"
 printf 'metrics_select_code %s\n' "$(ch metrics 'SELECT tenant, metric, value FROM metric_samples' | code_of)"
 printf 'metrics_rollup_insert_code %s\n' "$(ch metrics "INSERT INTO metric_rollup_1m (tenant, metric, unit, kind, labels, bucket, value_min, value_max, value_sum, value_count, value_last) VALUES ('forged', 'cpu', 'percent', 'gauge', map(), now(), 1, 1, 1, 1, 1)" | code_of)"
-printf 'rollup_rows_after_forgery %s\n' "$(ch reader 'SELECT count() FROM metric_rollup_1m')"
+printf 'rollup_rows_after_forgery %s\n' "$(ch reader "SELECT count() FROM metric_rollup_1m WHERE tenant IN ('proof', 'forged')")"
 for page in play dashboard js; do
     printf 'page_%s %s\n' "$page" "$(docker run --rm --network ostyr_default -v "$SECRETS:/s:ro" "$IMAGE" "${CURL_COMMON[@]}" -o /dev/null -w '%{http_code}' "https://clickhouse:8443/$page" 2>&1)"
 done

@@ -9,3 +9,9 @@
 !ostyr-relay
 !gateway-state
 !relay-state
+!ostyr-siem-ingest
+!ostyr-metrics-ingest
+!ostyr-metric-alerts
+!siem-state
+!metrics-state
+!metric-alerts-state
