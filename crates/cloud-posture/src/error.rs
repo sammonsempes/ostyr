@@ -46,6 +46,8 @@ pub enum DeclarationError {
 pub enum ScanError {
     #[error("the kubeconfig was refused ({fault:?})")]
     Kubeconfig { fault: KubeconfigFault },
+    #[error("the kubeconfig cannot be sealed: {0}")]
+    Seal(#[source] std::io::Error),
     #[error("cannot prepare the work directory: {0}")]
     Workdir(#[source] std::io::Error),
     #[cfg(unix)]
