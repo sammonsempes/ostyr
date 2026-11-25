@@ -1,8 +1,12 @@
 #![cfg(unix)]
 
 
+#[path = "common/ch_stub.rs"]
+mod ch_stub;
 #[path = "common/private.rs"]
 mod private;
+#[path = "serve_support/types.rs"]
+mod serve_types;
 #[path = "common/types.rs"]
 mod types;
 
@@ -10,11 +14,14 @@ mod types;
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use core_pg::scope::tenant_scope;
 use core_pg::settings::load_settings as load_pg_settings;
+use metrics_ingest::insert::Batch;
+use metrics_ingest::settings::MetricsSettings;
 use pg_fake::certs::{loopback, make_pki};
 use pg_fake::fake::{self, Fake, Mode, Reply};
 use pg_fake::types::Handler;
 use private::write_private;
 use rcgen::SanType;
+use serve_types::SentBatches;
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
@@ -31,6 +38,7 @@ use synthetic_checks::load::load_checks;
 use synthetic_checks::model::{Check, CheckFile};
 use synthetic_checks::probe::{FetchCaps, HttpRequest, HttpResponse};
 use synthetic_checks::round::{new_runner, reload_checks, RoundReport};
+use synthetic_checks::samples::{SampleTotals, SendFailure};
 use synthetic_checks::serve::{
     apply_live, boxed_reload_audit, explicit_port, failure_label, finish_code, last_refused, literal_target, live_state, load_service, log_round,
     open_live, pause, probe_check, run_probe, run_service, seconds_since_epoch, serve_rounds, skip_refused_literals, start_with, stop_on_signals,
@@ -38,6 +46,7 @@ use synthetic_checks::serve::{
     FAILURE_EXIT_CODE, IDLE_SUMMARY_ROUNDS, PAUSE_SLICE, ROUND_CAP_EXIT_CODE,
 };
 use synthetic_checks::target::METADATA_V4;
+use synthetic_checks::types::{Clock, SendBatches, WallNanos};
 use tempfile::tempdir;
 use types::TestResult;
 
@@ -366,6 +375,7 @@ fn live_of(dir: &Path, yaml: &str) -> Result<LiveConfig, Box<dyn std::error::Err
             checks_file: file.clone(),
             pg_settings: dir.join("pg.yaml"),
             audit_file: dir.join("audit.log"),
+            clickhouse_settings: None,
         },
         checks: load_checks(&file)?,
         roots: vec![vec![1]],
@@ -400,7 +410,30 @@ fn net(answers: Vec<IpAddr>) -> Net {
 }
 
 
+const WALL_NOW: u64 = 1_700_000_000_000_000_000;
+
+
+fn fixed_wall() -> Option<u64> {
+    Some(WALL_NOW)
+}
+
+
+fn no_send(_settings: &MetricsSettings, _elapsed: &Clock, batches: &[Batch]) -> Result<usize, SendFailure> {
+    Ok(batches.len())
+}
+
+
 fn with_tools<Output>(fake: &Net, clock_seconds: &AtomicU64, body: impl FnOnce(&ProbeTools) -> Output) -> Output {
+    with_sample_tools(fake, clock_seconds, (&fixed_wall, &no_send, &SampleTotals::default()), body)
+}
+
+
+fn with_sample_tools<Output>(
+    fake: &Net,
+    clock_seconds: &AtomicU64,
+    sampling: (&WallNanos, &SendBatches, &SampleTotals),
+    body: impl FnOnce(&ProbeTools) -> Output,
+) -> Output {
     let resolve = |_name: &str, _left: Duration, _cap: usize| {
         fake.resolves.fetch_add(1, Ordering::SeqCst);
         Ok(fake.answers.clone())
@@ -435,6 +468,9 @@ fn with_tools<Output>(fake: &Net, clock_seconds: &AtomicU64, body: impl FnOnce(&
         ping: &ping,
         handshake: &handshake,
         clock: &clock,
+        wall_nanos: sampling.0,
+        send: sampling.1,
+        samples: sampling.2,
     })
 }
 
@@ -536,6 +572,9 @@ fn a_status_that_is_not_a_success_fails_without_an_error() -> TestResult {
         ping: &ping,
         handshake: &handshake,
         clock: &clock,
+        wall_nanos: &fixed_wall,
+        send: &no_send,
+        samples: &SampleTotals::default(),
     };
     assert!(!probe_check(&check, &live, &tools, &Refusals::default()));
     assert_eq!(calls.get(), 1);
@@ -673,6 +712,7 @@ fn service_settings_need_absolute_paths_and_known_keys() -> TestResult {
         checks_file: PathBuf::from("/c"),
         pg_settings: PathBuf::from("/p"),
         audit_file: PathBuf::from("/a"),
+        clickhouse_settings: None,
     };
     assert!(validate_service(&settings).is_ok());
     Ok(())
@@ -889,7 +929,7 @@ fn serve_rounds_returns_at_the_cap_without_a_store_call_when_nothing_fails() -> 
             stop: &stop,
             sleep: &sleep,
         };
-        serve_rounds(&mut runner, &engine, &scope, &store, tools, &control)
+        serve_rounds(&mut runner, &engine, &scope, &store, tools, &control, None)
     });
     assert_eq!(finish, Finish::RoundCap);
     assert_eq!(stores.get(), 0);
@@ -1360,5 +1400,227 @@ fn an_icmp_spelling_is_read_as_the_literal_it_is_at_load_and_at_probe() -> TestR
     let outcome = with_tools(&fake, &clock, |tools| run_probe(&unusable, &live, tools));
     assert_eq!(outcome.err().map(|failure| failure_label(&failure).to_owned()), Some("failed".to_owned()));
     assert_eq!(fake.resolves.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+
+const SAMPLE_PASSWORD: &str = "SERVEPW-31c9";
+
+
+fn clickhouse_file(dir: &Path, port: u16) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    write_private(&dir.join("ch.pass"), SAMPLE_PASSWORD.as_bytes())?;
+    let file = dir.join("clickhouse.yaml");
+    fs::write(
+        &file,
+        format!(
+            "url: http://127.0.0.1:{port}\nuser: synthetic\npassword_file: {}\ndatabase: ostyr\ntable: metric_samples\n",
+            dir.join("ch.pass").display()
+        ),
+    )?;
+    Ok(file)
+}
+
+
+struct SamplePlan<'a> {
+    file: Option<&'a Path>,
+    failing: bool,
+}
+
+
+fn sampled_rounds(dir: &Path, plan: &SamplePlan, totals: &SampleTotals) -> Result<(SentBatches, usize), Box<dyn std::error::Error>> {
+    let settings_file = write_site(dir, CLOSED_PORT, "", &failing_tcp_checks())?;
+    let log = Arc::new(core_audit::log::open_file_log(&dir.join("audit.log"))?);
+    let engine = open_live(&settings_file, load_service(&settings_file)?, boxed_reload_audit(&log))?;
+    let scope = tenant_scope("acme")?;
+    let mut runner = new_runner(&scope, "paris")?;
+    let stored = Cell::new(0);
+    let store = |alerts: &[alerts::model::Alert]| {
+        stored.set(stored.get() + alerts.len());
+        Ok(alerts.len())
+    };
+    let sends: Mutex<SentBatches> = Mutex::new(Vec::new());
+    let send = |_settings: &MetricsSettings, _elapsed: &Clock, batches: &[Batch]| {
+        let bodies = batches
+            .iter()
+            .map(|batch| String::from_utf8_lossy(&batch.body).into_owned())
+            .collect::<Vec<String>>();
+        sends
+            .lock()
+            .map_err(|_poisoned| SendFailure { sent: 0, category: "lock" })?
+            .push((batches.len(), bodies));
+        if plan.failing {
+            Err(SendFailure { sent: 0, category: "send" })
+        } else {
+            Ok(batches.len())
+        }
+    };
+    let stop = AtomicBool::new(false);
+    let fake = net(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    fake.refuse_connect.store(true, Ordering::SeqCst);
+    let clock = AtomicU64::new(TEN_SECONDS);
+    let sleep = |_slice: Duration| {
+        clock.fetch_add(1, Ordering::SeqCst);
+    };
+    let finish = with_sample_tools(&fake, &clock, (&fixed_wall, &send, totals), |tools| {
+        let control = RunControl {
+            rounds: FOUR_ROUNDS,
+            stop: &stop,
+            sleep: &sleep,
+        };
+        serve_rounds(&mut runner, &engine, &scope, &store, tools, &control, plan.file)
+    });
+    assert_eq!(finish, Finish::RoundCap);
+    let seen = sends.lock().map_err(|_poisoned| "poisoned")?.clone();
+    Ok((seen, stored.get()))
+}
+
+
+#[test]
+fn every_probed_round_sends_its_rows_under_the_start_tenant() -> TestResult {
+    let dir = tempdir()?;
+    let file = clickhouse_file(dir.path(), CLOSED_PORT)?;
+    let totals = SampleTotals::default();
+    let (sends, stored) = sampled_rounds(
+        dir.path(),
+        &SamplePlan {
+            file: Some(&file),
+            failing: false,
+        },
+        &totals,
+    )?;
+    assert_eq!(sends.len(), FOUR_ROUNDS);
+    assert!(sends.iter().all(|(batches, _bodies)| *batches == 1));
+    assert!(sends
+        .iter()
+        .flat_map(|(_batches, bodies)| bodies)
+        .all(|body| body.contains("\"tenant\":\"acme\"")));
+    assert!(sends
+        .iter()
+        .flat_map(|(_batches, bodies)| bodies)
+        .all(|body| body.contains("\"value\":0.0") && !body.contains("127.0.0.1")));
+    assert!(sends
+        .iter()
+        .flat_map(|(_batches, bodies)| bodies)
+        .all(|body| body.contains("\"@timestamp\":\"2023-11-14")));
+    assert_eq!(totals.sent.load(Ordering::SeqCst), FOUR_ROUNDS as u64);
+    assert_eq!(totals.failed.load(Ordering::SeqCst), 0);
+    assert_eq!(stored, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_send_counts_the_lost_rows_and_the_alerts_are_still_stored() -> TestResult {
+    let dir = tempdir()?;
+    let file = clickhouse_file(dir.path(), CLOSED_PORT)?;
+    let totals = SampleTotals::default();
+    let (sends, stored) = sampled_rounds(
+        dir.path(),
+        &SamplePlan {
+            file: Some(&file),
+            failing: true,
+        },
+        &totals,
+    )?;
+    assert_eq!(sends.len(), FOUR_ROUNDS);
+    assert_eq!(totals.failed.load(Ordering::SeqCst), FOUR_ROUNDS as u64);
+    assert_eq!(totals.sent.load(Ordering::SeqCst), 0);
+    assert_eq!(stored, 1);
+    Ok(())
+}
+
+
+#[test]
+fn without_a_clickhouse_file_no_send_is_made() -> TestResult {
+    let dir = tempdir()?;
+    let totals = SampleTotals::default();
+    let (sends, stored) = sampled_rounds(dir.path(), &SamplePlan { file: None, failing: false }, &totals)?;
+    assert!(sends.is_empty());
+    assert_eq!(totals.sent.load(Ordering::SeqCst), 0);
+    assert_eq!(stored, 1);
+    Ok(())
+}
+
+
+fn with_clickhouse(settings_file: &Path, clickhouse_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(settings_file)?;
+    fs::write(settings_file, format!("{text}clickhouse_settings: {}\n", clickhouse_file.display()))?;
+    Ok(())
+}
+
+
+#[test]
+fn clickhouse_settings_are_absolute_and_start_only_like_the_tenant() -> TestResult {
+    let dir = tempdir()?;
+    let settings_file = write_site(dir.path(), CLOSED_PORT, "", &one_check("tcp", "127.0.0.1:80"))?;
+    let first = clickhouse_file(dir.path(), CLOSED_PORT)?;
+    with_clickhouse(&settings_file, &first)?;
+    let baseline = load_service(&settings_file)?;
+    assert_eq!(baseline.clickhouse_settings.as_deref(), Some(first.as_path()));
+    let log = Arc::new(core_audit::log::open_file_log(&dir.path().join("audit.log"))?);
+    let engine = open_live(&settings_file, baseline, boxed_reload_audit(&log))?;
+    let original = fs::read_to_string(&settings_file)?;
+    fs::write(&settings_file, original.replace("clickhouse.yaml", "other.yaml"))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("start-only")));
+    fs::write(&settings_file, original.replace("tenant: acme", "tenant: beta"))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("start-only")));
+    assert_eq!(current_config(&engine).settings.tenant, "acme");
+    assert_eq!(current_config(&engine).settings.clickhouse_settings.as_deref(), Some(first.as_path()));
+    let relative = original.replace(&first.display().to_string(), "clickhouse.yaml");
+    fs::write(&settings_file, relative)?;
+    assert!(load_service(&settings_file)
+        .err()
+        .ok_or("accepted")?
+        .to_string()
+        .contains("clickhouse_settings"));
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_service_without_clickhouse_settings_names_samples_disabled_once() -> TestResult {
+    let dir = tempdir()?;
+    let site = site(dir.path(), &failing_tcp_checks(), 0).await?;
+    let mut running = spawn_service(&site.settings_file)?;
+    let line = wait_for(&running.lines, "samples disabled")?;
+    assert!(line.contains("no clickhouse_settings"), "{line}");
+    wait_for(&running.lines, SERVING_MARKER)?;
+    signal(&running.child, "-INT")?;
+    let rest = finish(&mut running)?;
+    assert!(!rest.contains("samples disabled"), "{rest}");
+    drop(site.fake);
+    Ok(())
+}
+
+
+const SECRET_QUERY: &str = "token=SECRETQ-4f1d";
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_binary_writes_one_sample_per_probe_and_never_the_target_or_the_secret() -> TestResult {
+    let dir = tempdir()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let (handle, requests) = ch_stub::serve(listener, vec!["200 OK"]);
+    let checks = format!(
+        "scope: [127.0.0.0/8]\nchecks:\n  - name: web\n    kind: http\n    target: http://127.0.0.1:{CLOSED_PORT}/path?{SECRET_QUERY}\n    interval_seconds: 10\n    locations: [paris]\n"
+    );
+    let site = site(dir.path(), &checks, 0).await?;
+    with_clickhouse(&site.settings_file, &clickhouse_file(dir.path(), port)?)?;
+    let mut running = spawn_service(&site.settings_file)?;
+    wait_for(&running.lines, "samples enabled")?;
+    let request = tokio::task::spawn_blocking(move || requests.recv_timeout(CHILD_MARKER_GUARD)).await??;
+    signal(&running.child, "-INT")?;
+    let rest = finish(&mut running)?;
+    handle.join().map_err(|_panic| "stub panicked")??;
+    let body = request.split("\r\n\r\n").nth(1).ok_or("no body")?;
+    assert!(body.contains("\"metric\":\"ostyr.synthetic.check.up\""), "{body}");
+    assert!(
+        body.contains("\"tenant\":\"acme\"") && body.contains("\"check\":\"web\"") && body.contains("\"value\":0.0"),
+        "{body}"
+    );
+    assert!(!request.contains("SECRETQ") && !rest.contains("SECRETQ") && !body.contains(SAMPLE_PASSWORD));
+    assert!(!rest.contains(SAMPLE_PASSWORD));
+    drop(site.fake);
     Ok(())
 }

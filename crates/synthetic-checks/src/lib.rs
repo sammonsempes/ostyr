@@ -9,6 +9,7 @@ pub mod load;
 pub mod model;
 pub mod probe;
 pub mod round;
+pub mod samples;
 pub mod serve;
 pub mod target;
 pub mod transport;
