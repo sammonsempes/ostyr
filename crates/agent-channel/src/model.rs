@@ -1,8 +1,8 @@
 use crate::error::ChannelError;
 use crate::proto::{EventBatch, ShellCloseReason, ShellFrame};
 use crate::types::{
-    AuditSink, ClockFn, CommandSource, EventSink, IncomingConnections, NowFn, PendingRegistry, RevocationWatch, SharedSettings, SharedState,
-    ShellSink, ShellSource,
+    AuditSink, ClockFn, CommandSource, EventSink, ExecuteFn, IncomingConnections, NowFn, PendingRegistry, RevocationWatch, SharedSettings,
+    SharedState, ShellSink, ShellSource,
 };
 use agent_command::model::Command;
 use axum::Router;
@@ -147,7 +147,21 @@ pub const NO_SHELL_EXECUTOR_REASON: &str = "no shell executor, command not execu
 pub const SHELL_DISABLED_REASON: &str = "shell disabled, command not executed";
 
 
+pub const UNSUPPORTED_ACTION_REASON: &str = "action not supported by this agent, command not executed";
+
+
 pub const INVALID_COMMAND_REASON: &str = "command invalid for its executor, command not executed";
+
+
+/// The executors an agent run routes verified commands to; an absent one refuses its actions as unsupported. `restart` ends the run's streams when notified, so they redial.
+#[derive(Clone, Copy, Default)]
+pub struct Executors<'a> {
+    pub shell: Option<&'a ExecuteFn<'a>>,
+    pub ping: Option<&'a ExecuteFn<'a>>,
+    pub collect_status: Option<&'a ExecuteFn<'a>>,
+    pub isolate: Option<&'a ExecuteFn<'a>>,
+    pub restart: Option<&'a tokio::sync::Notify>,
+}
 
 
 /// Why an executor did not take an accepted command; each variant reports one fixed text, never peer text.
@@ -157,6 +171,7 @@ pub enum ExecuteRefusal {
     NoShellExecutor,
     ShellDisabled,
     Invalid,
+    Unsupported,
 }
 
 
@@ -167,6 +182,7 @@ impl std::fmt::Display for ExecuteRefusal {
             Self::NoShellExecutor => NO_SHELL_EXECUTOR_REASON,
             Self::ShellDisabled => SHELL_DISABLED_REASON,
             Self::Invalid => INVALID_COMMAND_REASON,
+            Self::Unsupported => UNSUPPORTED_ACTION_REASON,
         })
     }
 }

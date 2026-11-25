@@ -12,7 +12,7 @@ use agent_channel::app::{alerting_audit, append_bounded, read_bounded_line, relo
 use agent_channel::client::deliver_events;
 use agent_channel::commands::{agent_directory, command_source, paths_of, read_envelope, read_envelopes, MAX_COMMAND_FILES, MAX_ENVELOPE_FILE_BYTES};
 use agent_channel::error::{AppError, ChannelError, SinkError};
-use agent_channel::model::{ClientTlsPaths, Delivered, ExecuteRefusal, Identity, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_channel::model::{ClientTlsPaths, Delivered, ExecuteRefusal, Executors, Identity, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_channel::proto::EventBatch;
 use agent_channel::relay::HoldDown;
 use agent_channel::server_app::{bind_server, file_events, load_server_file, run_server, run_server_with_clock, ServerFile};
@@ -95,6 +95,9 @@ const THIRD: usize = 3;
 
 
 const THIRD_SEQUENCE: u64 = 3;
+
+
+const WORKER_ROOM: usize = 4;
 
 
 const FOURTH_SEQUENCE: u64 = 4;
@@ -370,8 +373,28 @@ async fn run_once(agent: &AgentFile) -> Result<agent_channel::agent_app::AgentOu
 }
 
 
+fn accept_command(_command: Command) -> Result<(), ExecuteRefusal> {
+    Ok(())
+}
+
+
+fn accepting_pings() -> Executors<'static> {
+    Executors {
+        ping: Some(&accept_command),
+        ..Executors::default()
+    }
+}
+
+
 async fn run_with(agent: &AgentFile, dirs: &SpoolDirs) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
-    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)), None, &HoldDown::default())).await??)
+    Ok(bounded(run_agent(
+        agent,
+        dirs,
+        &|delay| Box::pin(no_pause(delay)),
+        &accepting_pings(),
+        &HoldDown::default(),
+    ))
+    .await??)
 }
 
 
@@ -409,6 +432,57 @@ async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches
     bounded(handle).await???;
     let reopened = open_event_store(&server.events_file)?;
     assert_eq!(reopened.seen.len(), TWICE * TWICE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_restart_request_ends_the_run_without_failure_and_keeps_the_spool() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = long_tempdir()?;
+    let Fixture { server, mut agent } = fixture(dir.path())?;
+    let listener = bind_server(&server).await?;
+    agent.server = listener.local_addr()?.to_string();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let handle = tokio::spawn(run_server(
+        server.clone(),
+        listener,
+        None,
+        Box::pin(async move {
+            if let Err(error) = stopped.await {
+                tracing::warn!(%error, "stop sender dropped");
+            }
+        }),
+        file_events(&server)?,
+        None,
+    ));
+    let restart = tokio::sync::Notify::new();
+    restart.notify_one();
+    let executors = Executors {
+        restart: Some(&restart),
+        ..Executors::default()
+    };
+    let dirs = open_spool_dirs_with(&agent, accept_any_acl)?;
+    let outcome = bounded(run_agent(
+        &agent,
+        &dirs,
+        &|delay| Box::pin(no_pause(delay)),
+        &executors,
+        &HoldDown::default(),
+    ))
+    .await??;
+    assert_eq!((outcome.run.accepted, outcome.run.refused, outcome.event_failures), (0, 0, 1));
+    assert!(suffixed(&agent.spool_file, SENDING_SUFFIX).exists());
+    stop.send(()).map_err(|()| "server already stopped")?;
+    bounded(handle).await???;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn without_a_notify_a_restart_never_comes() -> TestResult {
+    let pending = agent_channel::agent_app::restart_requested(None);
+    assert!(tokio::time::timeout(std::time::Duration::ZERO, pending).await.is_err());
     Ok(())
 }
 
@@ -1380,17 +1454,28 @@ fn open_shell_command(sequence: u64) -> Command {
 }
 
 
+fn shell_only<'a>(shell: &'a ExecuteFn<'a>) -> Executors<'a> {
+    Executors {
+        shell: Some(shell),
+        ..Executors::default()
+    }
+}
+
+
+fn action_command(sequence: u64, action: Action) -> Command {
+    Command { action, ..command(sequence) }
+}
+
+
 #[test]
 fn a_shell_order_without_a_shell_executor_is_refused_and_never_recorded() -> TestResult {
     let _logging = scoped_logging();
     let (sender, mut receiver) = mpsc::channel(TWICE);
     assert_eq!(
-        dispatch_command(&sender, None, open_shell_command(FIRST)),
+        dispatch_command(&sender, &Executors::default(), open_shell_command(FIRST)),
         Err(ExecuteRefusal::NoShellExecutor)
     );
     assert!(receiver.try_recv().is_err());
-    assert_eq!(dispatch_command(&sender, None, command(SECOND)), Ok(()));
-    assert!(receiver.try_recv().is_ok());
     Ok(())
 }
 
@@ -1400,17 +1485,17 @@ fn a_shell_order_goes_to_the_shell_executor_and_is_recorded_only_after_it_admits
     let _logging = scoped_logging();
     let (sender, mut receiver) = mpsc::channel(TWICE);
     let admit: &ExecuteFn<'_> = &|_command| Ok(());
-    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(FIRST)), Ok(()));
+    assert_eq!(dispatch_command(&sender, &shell_only(admit), open_shell_command(FIRST)), Ok(()));
     assert_eq!(receiver.try_recv()?.sequence, FIRST);
     let refuse: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::Busy);
     assert_eq!(
-        dispatch_command(&sender, Some(refuse), open_shell_command(SECOND)),
+        dispatch_command(&sender, &shell_only(refuse), open_shell_command(SECOND)),
         Err(ExecuteRefusal::Busy)
     );
     assert!(receiver.try_recv().is_err());
     let disabled: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::ShellDisabled);
     assert_eq!(
-        dispatch_command(&sender, Some(disabled), open_shell_command(SECOND)),
+        dispatch_command(&sender, &shell_only(disabled), open_shell_command(SECOND)),
         Err(ExecuteRefusal::ShellDisabled)
     );
     Ok(())
@@ -1422,22 +1507,107 @@ fn other_actions_never_reach_the_shell_executor() -> TestResult {
     let _logging = scoped_logging();
     let (sender, mut receiver) = mpsc::channel(TWICE);
     let refuse: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::Invalid);
-    assert_eq!(dispatch_command(&sender, Some(refuse), command(FIRST)), Ok(()));
-    assert_eq!(receiver.try_recv()?.sequence, FIRST);
+    assert_eq!(
+        dispatch_command(&sender, &shell_only(refuse), command(FIRST)),
+        Err(ExecuteRefusal::Unsupported)
+    );
+    assert!(receiver.try_recv().is_err());
     Ok(())
 }
 
 
 #[test]
-fn a_failed_record_never_changes_the_verdict_of_an_admitted_shell_order() -> TestResult {
+fn each_supported_action_goes_to_its_own_executor_and_is_recorded_after_admission() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(WORKER_ROOM);
+    let calls = std::sync::Mutex::new(Vec::new());
+    let ping: &ExecuteFn<'_> = &|_command| {
+        calls.lock().map_err(|_| ExecuteRefusal::Busy)?.push("ping");
+        Ok(())
+    };
+    let collect: &ExecuteFn<'_> = &|_command| {
+        calls.lock().map_err(|_| ExecuteRefusal::Busy)?.push("collect");
+        Ok(())
+    };
+    let isolate: &ExecuteFn<'_> = &|_command| {
+        calls.lock().map_err(|_| ExecuteRefusal::Busy)?.push("isolate");
+        Err(ExecuteRefusal::Invalid)
+    };
+    let executors = Executors {
+        shell: None,
+        ping: Some(ping),
+        collect_status: Some(collect),
+        isolate: Some(isolate),
+        restart: None,
+    };
+    assert_eq!(dispatch_command(&sender, &executors, action_command(FIRST, Action::Ping)), Ok(()));
+    assert_eq!(
+        dispatch_command(&sender, &executors, action_command(SECOND, Action::CollectStatus)),
+        Ok(())
+    );
+    assert_eq!(
+        dispatch_command(&sender, &executors, action_command(THIRD_SEQUENCE, Action::Isolate)),
+        Err(ExecuteRefusal::Invalid)
+    );
+    assert_eq!(*calls.lock().map_err(|_| "poisoned")?, vec!["ping", "collect", "isolate"]);
+    assert_eq!((receiver.try_recv()?.sequence, receiver.try_recv()?.sequence), (FIRST, SECOND));
+    assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and_never_recorded() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(WORKER_ROOM);
+    let none = Executors::default();
+    let unsupported = [
+        Action::Ping,
+        Action::CollectStatus,
+        Action::Isolate,
+        Action::Kill { process_id: 1 },
+        Action::RunScript { script: "s".to_owned() },
+        Action::Update { version: "1".to_owned() },
+        Action::Uninstall,
+        Action::ChangePolicy { policy: "p".to_owned() },
+        Action::InstallUpdates {
+            packages: agent_command::model::PackageSelection::AllAllowed,
+            reboot: agent_command::model::RebootPolicy::Never,
+        },
+        Action::Reboot {
+            prompt_user: false,
+            deadline: 1,
+        },
+    ];
+    unsupported.into_iter().for_each(|action| {
+        assert_eq!(
+            dispatch_command(&sender, &none, action_command(FIRST, action)),
+            Err(ExecuteRefusal::Unsupported)
+        )
+    });
+    assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_kind_names_are_fixed_and_hold_no_field() -> TestResult {
+    assert_eq!(agent_channel::agent_app::action_kind(&Action::Kill { process_id: SEVEN as u32 }), "kill");
+    assert_eq!(agent_channel::agent_app::action_kind(&Action::Isolate), "isolate");
+    assert_eq!(agent_channel::agent_app::action_kind(&open_shell_command(FIRST).action), "open_shell");
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_record_never_changes_the_verdict_of_an_admitted_order() -> TestResult {
     let _logging = scoped_logging();
     let (sender, receiver) = mpsc::channel(1);
     sender.try_send(command(FIRST))?;
     let admit: &ExecuteFn<'_> = &|_command| Ok(());
-    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(SECOND)), Ok(()));
+    assert_eq!(dispatch_command(&sender, &shell_only(admit), open_shell_command(SECOND)), Ok(()));
     drop(receiver);
-    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(SECOND)), Ok(()));
-    assert_eq!(dispatch_command(&sender, None, command(FIRST)), Err(ExecuteRefusal::Busy));
+    assert_eq!(dispatch_command(&sender, &shell_only(admit), open_shell_command(SECOND)), Ok(()));
     Ok(())
 }
 
@@ -1449,6 +1619,7 @@ fn every_refusal_reports_its_own_fixed_text() -> TestResult {
         ExecuteRefusal::NoShellExecutor,
         ExecuteRefusal::ShellDisabled,
         ExecuteRefusal::Invalid,
+        ExecuteRefusal::Unsupported,
     ]
     .iter()
     .map(ToString::to_string)

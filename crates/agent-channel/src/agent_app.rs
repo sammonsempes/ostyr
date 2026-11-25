@@ -1,7 +1,7 @@
 use crate::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, run_commands_until};
 use crate::error::{AppError, ChannelError};
-use crate::model::{ClientTlsPaths, CommandRun, Delivered, ExecuteRefusal};
+use crate::model::{ClientTlsPaths, CommandRun, Delivered, ExecuteRefusal, Executors};
 use crate::proto::EventBatch;
 use crate::relay::{
     endpoint_addresses, error_text, hold_internal, is_rate_refusal, pinned_dialer, select_endpoint, stop_at, tripped, EndpointKind, HoldDown,
@@ -149,34 +149,72 @@ pub fn execute_fn(sender: mpsc::Sender<Command>) -> Box<ExecuteFn<'static>> {
 }
 
 
-/// Routes `OpenShell` to the shell executor alone (its verdict decides, the record is best effort afterwards); every other action is recorded.
-pub fn dispatch_command(sender: &mpsc::Sender<Command>, shell: Option<&ExecuteFn<'_>>, command: Command) -> Result<(), ExecuteRefusal> {
-    match (&command.action, shell) {
-        (Action::OpenShell { .. }, Some(executor)) => {
-            let copy = command.clone();
-            executor(command).inspect(|()| {
-                if sender.try_send(copy).is_err() {
-                    tracing::warn!("open-shell admitted, not recorded");
-                }
-            })
+/// The action's name for logs: the kind only, never its fields.
+pub fn action_kind(action: &Action) -> &'static str {
+    match action {
+        Action::Ping => "ping",
+        Action::CollectStatus => "collect_status",
+        Action::Isolate => "isolate",
+        Action::Kill { .. } => "kill",
+        Action::RunScript { .. } => "run_script",
+        Action::Update { .. } => "update",
+        Action::Uninstall => "uninstall",
+        Action::ChangePolicy { .. } => "change_policy",
+        Action::InstallUpdates { .. } => "install_updates",
+        Action::Reboot { .. } => "reboot",
+        Action::OpenShell { .. } => "open_shell",
+    }
+}
+
+
+/// The executor's verdict decides; the record in `executed_file` follows only an admitted command and is best effort.
+pub fn admit_and_record(sender: &mpsc::Sender<Command>, executor: &ExecuteFn<'_>, command: Command) -> Result<(), ExecuteRefusal> {
+    let copy = command.clone();
+    executor(command).inspect(|()| {
+        if sender.try_send(copy).is_err() {
+            tracing::warn!("command admitted, not recorded");
         }
-        (Action::OpenShell { .. }, None) => {
-            tracing::warn!("shell command refused: no shell executor");
-            Err(ExecuteRefusal::NoShellExecutor)
-        }
-        (
-            Action::Ping
-            | Action::CollectStatus
-            | Action::Isolate
-            | Action::Kill { .. }
-            | Action::RunScript { .. }
-            | Action::Update { .. }
-            | Action::Uninstall
-            | Action::ChangePolicy { .. }
-            | Action::InstallUpdates { .. }
-            | Action::Reboot { .. },
-            _,
-        ) => record_command(sender, command),
+    })
+}
+
+
+/// A supported action goes to its executor alone; without one it is refused as unsupported, never recorded.
+pub fn route_supported(sender: &mpsc::Sender<Command>, executor: Option<&ExecuteFn<'_>>, command: Command) -> Result<(), ExecuteRefusal> {
+    match executor {
+        Some(admit) => admit_and_record(sender, admit, command),
+        None => refuse_unsupported(&command),
+    }
+}
+
+
+pub fn refuse_unsupported(command: &Command) -> Result<(), ExecuteRefusal> {
+    let kind = action_kind(&command.action);
+    let sequence = command.sequence;
+    tracing::warn!(kind, sequence, "command refused: action not supported");
+    Err(ExecuteRefusal::Unsupported)
+}
+
+
+/// Routes each action to its own executor; an action nobody executes is refused by name, never recorded as done.
+pub fn dispatch_command(sender: &mpsc::Sender<Command>, executors: &Executors<'_>, command: Command) -> Result<(), ExecuteRefusal> {
+    match &command.action {
+        Action::OpenShell { .. } => match executors.shell {
+            Some(executor) => admit_and_record(sender, executor, command),
+            None => {
+                tracing::warn!("shell command refused: no shell executor");
+                Err(ExecuteRefusal::NoShellExecutor)
+            }
+        },
+        Action::Ping => route_supported(sender, executors.ping, command),
+        Action::CollectStatus => route_supported(sender, executors.collect_status, command),
+        Action::Isolate => route_supported(sender, executors.isolate, command),
+        Action::Kill { .. }
+        | Action::RunScript { .. }
+        | Action::Update { .. }
+        | Action::Uninstall
+        | Action::ChangePolicy { .. }
+        | Action::InstallUpdates { .. }
+        | Action::Reboot { .. } => refuse_unsupported(&command),
     }
 }
 
@@ -260,6 +298,21 @@ pub fn lost_streams() -> (Result<Delivered, ChannelError>, Result<CommandRun, Ap
 }
 
 
+/// What a run ended on request (an executor changed the host's network) settles with: no failure, the claimed spool is kept, the next run redials.
+pub fn restarted_streams() -> (Result<Delivered, ChannelError>, Result<CommandRun, AppError>) {
+    (Err(ChannelError::EndpointLost), Ok(CommandRun::default()))
+}
+
+
+/// Completes when the executors ask for a redial; without a `Notify` it never completes.
+pub async fn restart_requested(restart: Option<&tokio::sync::Notify>) {
+    match restart {
+        Some(notify) => notify.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
+
 /// A run that ended because the server refused on rate: the server answered, so nothing is held down.
 pub fn ended_on_rate(run: &Result<CommandRun, AppError>) -> bool {
     matches!(run, Err(AppError::AttemptsExhausted { rate_refused: true, .. }))
@@ -328,7 +381,7 @@ pub async fn run_agent(
     file: &AgentFile,
     _checked: &SpoolDirs,
     pause: &PauseFn,
-    shell: Option<&ExecuteFn<'_>>,
+    executors: &Executors<'_>,
     hold: &HoldDown,
 ) -> Result<AgentOutcome, AppError> {
     let addresses = endpoint_addresses(file)?;
@@ -357,7 +410,7 @@ pub async fn run_agent(
     let verifier = open_verifier(&file.agent_id, &file.tenant, keys, &file.state_file)?;
     let worker = start_worker(&file.executed_file)?;
     let sender = worker.sender;
-    let execute = |command: Command| dispatch_command(&sender, shell, command);
+    let execute = |command: Command| dispatch_command(&sender, executors, command);
     let streams = run_streams(
         dial.as_ref(),
         dial.as_ref(),
@@ -370,6 +423,7 @@ pub async fn run_agent(
     let (delivery, run) = tokio::select! {
         outcome = streams => outcome,
         () = tripped(trip_receiver) => lost_streams(),
+        () = restart_requested(executors.restart) => restarted_streams(),
     };
     drop(sender);
     note_run(hold, &selected, &run);
