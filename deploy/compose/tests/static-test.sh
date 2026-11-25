@@ -9,7 +9,7 @@ COMPOSE_DIR="$(dirname "$TESTS_DIR")"
 readonly TESTS_DIR COMPOSE_DIR
 readonly COMPOSE_FILE="${STATIC_TEST_COMPOSE_FILE:-$COMPOSE_DIR/compose.yaml}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
 readonly BLOCK_KEYS="ports volumes services networks"
 failures=0
@@ -62,6 +62,81 @@ gateway_service() {
 
 relay_service() {
     awk '/^  relay:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+clickhouse_service() {
+    awk '/^  clickhouse:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+chschema_service() {
+    awk '/^  chschema:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+clickhouse_has() {
+    clickhouse_service | grep -q -- "$1"
+}
+
+chschema_has() {
+    chschema_service | grep -q -- "$1"
+}
+
+clickhouse_is_hardened() {
+    clickhouse_has '^    read_only: true$' && clickhouse_has '^    cap_drop: \[ALL\]$' && clickhouse_has 'no-new-privileges:true' \
+        && clickhouse_has '^    user: 101:101$' \
+        && clickhouse_has '^    image: clickhouse/clickhouse-server:26.8.46@sha256:[0-9a-f]\{64\}$' \
+        && clickhouse_has '^    secrets: \[clickhouse_server_key, clickhouse_server_cert, clickhouse_users\]$' \
+        && clickhouse_has '^    command: \["clickhouse-server", "--config-file=/etc/clickhouse-server/ostyr-config.xml"\]$' \
+        && ! clickhouse_has '^    ports:' && ! clickhouse_has 'cap_add' && ! clickhouse_has 'store_key' && ! clickhouse_has 'pg_service_password' \
+        && ! clickhouse_has 'pg_ca' && ! clickhouse_has 'network_mode' && ! clickhouse_has 'schema_password'
+}
+
+chschema_is_hardened() {
+    chschema_has '^    read_only: true$' && chschema_has '^    cap_drop: \[ALL\]$' && chschema_has 'no-new-privileges:true' \
+        && chschema_has '^    user: 65530:65530$' && chschema_has '^    restart: on-failure:5$' \
+        && chschema_has '^    image: clickhouse/clickhouse-server:26.8.46@sha256:[0-9a-f]\{64\}$' \
+        && chschema_has '^    secrets: \[pg_ca, clickhouse_schema_password\]$' \
+        && chschema_has '^    command: \["/bin/bash", "/etc/ostyr-schema/apply.sh"\]$' \
+        && ! chschema_has '^    ports:' && ! chschema_has 'cap_add' && ! chschema_has 'clickhouse_users' && ! chschema_has 'clickhouse_server' \
+        && ! chschema_has 'network_mode'
+}
+
+clickhouse_one_image() {
+    [[ "$(grep '^    image: clickhouse/' "$COMPOSE_FILE" | sort -u | wc -l)" -eq 1 ]]
+}
+
+clickhouse_config_has() {
+    grep -qxF -- "$1" "$COMPOSE_DIR/config/clickhouse-config.xml"
+}
+
+clickhouse_serves_https_only() {
+    clickhouse_config_has '    <https_port>8443</https_port>' && ! grep -q -e 'http_port' -e 'tcp_port' -e 'mysql_port' -e 'postgresql_port' -e 'interserver' \
+        -e 'grpc' -e 'prometheus' "$COMPOSE_DIR/config/clickhouse-config.xml" \
+        && clickhouse_config_has '            <verificationMode>none</verificationMode>' && clickhouse_config_has '            <loadDefaultCAFile>false</loadDefaultCAFile>' \
+        && clickhouse_config_has '            <certificateFile>/run/secrets/clickhouse_server_cert</certificateFile>' \
+        && clickhouse_config_has '            <privateKeyFile>/run/secrets/clickhouse_server_key</privateKeyFile>' \
+        && clickhouse_config_has '            <path>/run/secrets/clickhouse_users</path>'
+}
+
+clickhouse_is_bounded() {
+    clickhouse_config_has '    <max_server_memory_usage>2147483648</max_server_memory_usage>' \
+        && clickhouse_config_has '                <keep_free_space_bytes>2147483648</keep_free_space_bytes>'
+}
+
+clickhouse_users_are_least_privilege() {
+    local users
+    users="$(sed -n '/^<clickhouse>$/,/^<\/clickhouse>$/p' "$COMPOSE_DIR/init.sh")"
+    ! grep -q -e '<default>' -e 'access_management' -e 'GRANT ALL' -e '<password></password>' -e '<password>' -e 'no_password' -e '::/0' -e '0.0.0.0/0' <<<"$users" \
+        && grep -qF '<readonly>2</readonly>' <<<"$users" && [[ "$(grep -c '<password_sha256_hex>' <<<"$users")" -eq 4 ]] \
+        && [[ "$(grep -c '<networks><ip>$CLICKHOUSE_SUBNET</ip></networks>' <<<"$users")" -eq 4 ]] \
+        && grep -qF 'readonly CLICKHOUSE_SUBNET=172.29.63.0/24' "$COMPOSE_DIR/init.sh" \
+        && grep -qF '<query>GRANT SELECT ON $CLICKHOUSE_DATABASE.*</query>' <<<"$users" \
+        && grep -qF '<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.events</query>' <<<"$users" \
+        && grep -qF '<query>GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples</query>' <<<"$users" \
+        && [[ "$(grep -c 'GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1[mhd]</query>' <<<"$users")" -eq 3 ]]
+}
+
+clickhouse_schema_is_idempotent() {
+    ! grep '^CREATE ' "$COMPOSE_DIR/config/clickhouse-schema.sql" | grep -q -v 'IF NOT EXISTS' && grep -q '^CREATE TABLE IF NOT EXISTS `events`$' "$COMPOSE_DIR/config/clickhouse-schema.sql"
 }
 
 nats_has() {
@@ -303,23 +378,31 @@ each_service_publishes_only_its_port() {
 every_service_mounts_only_its_volumes() {
     [[ "$(service_items postgres volumes)" == '      - pgdata:/var/lib/postgresql/data'$'\n''      - ./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro'$'\n''      - ./config/pg-init-service-role.sh:/docker-entrypoint-initdb.d/10-service-role.sh:ro' \
         && "$(service_items platform volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - state:/var/lib/ostyr' ]] && web_mounts_only_settings_and_state \
-        && playbooks_mounts_only_settings_and_its_state && agent_path_mounts_only_its_volumes
+        && playbooks_mounts_only_settings_and_its_state && agent_path_mounts_only_its_volumes && clickhouse_mounts_only_its_volumes
+}
+
+clickhouse_mounts_only_its_volumes() {
+    [[ "$(service_items clickhouse volumes)" == '      - chdata:/var/lib/clickhouse'$'\n''      - ./config/clickhouse-config.xml:/etc/clickhouse-server/ostyr-config.xml:ro' \
+        && "$(service_items chschema volumes)" == '      - ./config/clickhouse-apply.sh:/etc/ostyr-schema/apply.sh:ro'$'\n''      - ./config/clickhouse-schema.sql:/etc/ostyr-schema/schema.sql:ro' ]]
 }
 
 only_postgres_adds_capabilities() {
     [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add && ! service_has_key playbooks cap_add \
-        && ! service_has_key nats cap_add && ! service_has_key gateway cap_add && ! service_has_key relay cap_add
+        && ! service_has_key nats cap_add && ! service_has_key gateway cap_add && ! service_has_key relay cap_add \
+        && ! service_has_key clickhouse cap_add && ! service_has_key chschema cap_add
 }
 
 definitions_are_pinned() {
     local expected
-    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' '  natsdata: {}' '  gatewaystate: {}' '  relaystate: {}' 'secrets:' \
+    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' '  natsdata: {}' '  gatewaystate: {}' '  relaystate: {}' '  chdata: {}' 'secrets:' \
         '  pg_password:' '    file: ./secrets/pg_password' '  pg_service_password:' '    file: ./secrets/pg_service_password' \
         '  pg_server_key:' '    file: ./secrets/pg_server.key' '  pg_server_cert:' '    file: ./secrets/pg_server.crt' \
         '  pg_ca:' '    file: ./secrets/ca.crt' '  playbooks_pg_password:' '    file: ./secrets/playbooks_pg_password' '  api_tls_key:' '    file: ./secrets/api_tls.key' '  api_tls_cert:' '    file: ./secrets/api_tls.crt' \
         '  store_key:' '    file: ./secrets/store.key' '  gateway_tls_key:' '    file: ./secrets/gateway_tls.key' '  gateway_tls_cert:' '    file: ./secrets/gateway_tls.crt' \
         '  nats_server_key:' '    file: ./secrets/nats_server.key' '  nats_server_cert:' '    file: ./secrets/nats_server.crt' '  nats_conf:' '    file: ./secrets/nats.conf' \
-        '  agent_ca:' '    file: ./secrets/agent_ca.crt' '  nats_gateway_password:' '    file: ./secrets/nats_gateway_password')"
+        '  agent_ca:' '    file: ./secrets/agent_ca.crt' '  nats_gateway_password:' '    file: ./secrets/nats_gateway_password' \
+        '  clickhouse_server_key:' '    file: ./secrets/clickhouse_server.key' '  clickhouse_server_cert:' '    file: ./secrets/clickhouse_server.crt' \
+        '  clickhouse_users:' '    file: ./secrets/clickhouse_users' '  clickhouse_schema_password:' '    file: ./secrets/clickhouse_schema_password')"
     [[ "$(sed -n '/^volumes:$/,$p' "$COMPOSE_FILE")" == "$expected" && "$(count_lines '^ *name:')" -eq 1 && "$(count_lines '^name: ostyr$')" -eq 1 ]]
 }
 
@@ -349,7 +432,7 @@ compose_config_accepts() {
     local scratch name
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -362,7 +445,7 @@ parsed_config_passes() {
     local scratch name status=0
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -393,7 +476,7 @@ else
     printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
-    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/mutation-test.sh"
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$COMPOSE_DIR/config/clickhouse-apply.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/clickhouse-proof.sh" "$TESTS_DIR/mutation-test.sh"
 else
     printf 'info shellcheck is not installed: skipped\n'
 fi
@@ -429,7 +512,15 @@ expect "the NATS user gateway publishes events.* only and subscribes to its own 
     grep -qF 'permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }' "$COMPOSE_DIR/init.sh"
 expect "the gateway certificate names DNS:gateway only" grep -qF 'make_leaf gateway_tls ostyr-gateway DNS:gateway "$scratch"' "$COMPOSE_DIR/init.sh"
 expect "init.sh refuses every compose service name as the public host name" \
-    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay)' "$COMPOSE_DIR/init.sh"
+    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)' "$COMPOSE_DIR/init.sh"
+expect "the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets" clickhouse_is_hardened
+expect "the chschema service is hardened, runs as 65530 and holds only the CA and its password" chschema_is_hardened
+expect "both ClickHouse services use one pinned image" clickhouse_one_image
+expect "ClickHouse serves HTTPS 8443 only, with its own certificate and users file" clickhouse_serves_https_only
+expect "ClickHouse bounds its memory and keeps free disk space" clickhouse_is_bounded
+expect "ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader" clickhouse_users_are_least_privilege
+expect "the ClickHouse schema file creates every object with IF NOT EXISTS" clickhouse_schema_is_idempotent
+expect "the ClickHouse certificate names DNS:clickhouse only" grep -qF 'make_leaf clickhouse_server clickhouse DNS:clickhouse "$scratch"' "$COMPOSE_DIR/init.sh"
 expect "init.sh bounds the JetStream file store" grep -qF 'max_file_store: $NATS_MAX_FILE_STORE' "$COMPOSE_DIR/init.sh"
 expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'
 expect "web-ui.yaml serves TLS and verifies the API against the CA" web_yaml_serves_tls_and_verifies_api

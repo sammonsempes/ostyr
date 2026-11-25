@@ -21,6 +21,9 @@ readonly PLAYBOOKS="the playbooks service is hardened, runs as 65533 and holds o
 readonly NATS_HARD="the nats service is hardened, pinned by digest, publishes no port and holds only its three secrets"
 readonly GATEWAY_HARD="the gateway service is hardened, runs as 65534 and holds only its five secrets"
 readonly RELAY_HARD="the relay service is hardened, runs as 65531 and holds no secret"
+readonly CH_HARD="the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets"
+readonly CHSCHEMA_HARD="the chschema service is hardened, runs as 65530 and holds only the CA and its password"
+readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
 readonly PINNED="every image is pinned by digest or built locally"
 readonly HARDENED="every service is read-only, drops capabilities and sets no-new-privileges"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
@@ -55,6 +58,10 @@ declare -A STATIC_REFUSAL=(
     [gateway_bind_secrets]="$BINDS" [gateway_state_shared]="$BINDS" [gateway_log_debug]="$GATEWAY_HARD" [gateway_root]="$GATEWAY_HARD" [gateway_ip_moved]="$GATEWAY_HARD"
     [relay_cap_add]="$CAPS" [relay_secret_extra]="$RELAY_HARD" [relay_publish_extra]="$PORTS" [relay_bind_secrets]="$BINDS"
     [relay_state_shared]="$BINDS" [relay_root]="$RELAY_HARD" [relay_ip_moved]="$RELAY_HARD"
+    [clickhouse_cap_add]="$CAPS" [clickhouse_publish]="$CH_HARD" [clickhouse_secret_extra]="$CH_HARD" [clickhouse_bind_secrets]="$BINDS"
+    [clickhouse_state_shared]="$BINDS" [clickhouse_unpinned]="$PINNED" [clickhouse_root]="$CH_HARD" [clickhouse_writable]="$HARDENED"
+    [chschema_cap_add]="$CAPS" [chschema_secret_extra]="$CHSCHEMA_HARD" [chschema_bind_secrets]="$BINDS" [chschema_root]="$CHSCHEMA_HARD"
+    [chschema_image_other]="$CH_ONE_IMAGE"
 )
 declare -A STRAY_REFUSAL=([override_file]="$STRAY" [dotenv_compose_file]="$STRAY")
 declare -A PARSED_REFUSAL=()
