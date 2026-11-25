@@ -47,8 +47,8 @@ ssh_options=(-i "$key" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnown
 build_dir="$repo_dir/target/$MUSL_TARGET/release/examples"
 log "building the release examples for $MUSL_TARGET"
 (cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --examples \
-    -p siem-ingest -p detection -p alerts -p agent-linux) >&2
-(cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --bin ostyr-web-ui --bin ostyr-auth --bin ostyr-event-gateway --bin ostyr-siem-ingest --bin ostyr-relay -p web-ui -p core-auth -p event-gateway -p siem-ingest -p relay) >&2
+    -p siem-ingest -p detection -p alerts) >&2
+(cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --bin ostyr-web-ui --bin ostyr-auth --bin ostyr-event-gateway --bin ostyr-siem-ingest --bin ostyr-relay --bin ostyr-agent-linux -p agent-linux -p web-ui -p core-auth -p event-gateway -p siem-ingest -p relay) >&2
 bin_dir="$repo_dir/target/$MUSL_TARGET/release"
 
 stage="$lab_state/e2e-stage"
@@ -107,7 +107,7 @@ install -m 755 "$bin_dir/ostyr-web-ui" "$stage/datastore/usr/local/bin/ostyr-web
 install -m 755 "$bin_dir/ostyr-siem-ingest" "$stage/datastore/usr/local/bin/ostyr-siem-ingest"
 install -m 755 "$bin_dir/ostyr-event-gateway" "$stage/datastore/usr/local/bin/ostyr-event-gateway"
 install -m 755 "$bin_dir/ostyr-relay" "$stage/datastore/usr/local/bin/ostyr-relay"
-install -m 755 "$build_dir/linux_agent" "$stage/client/usr/local/bin/linux_agent"
+install -m 755 "$bin_dir/ostyr-agent-linux" "$stage/client/usr/local/bin/ostyr-agent-linux"
 
 cat >"$datastore_etc/gateway-server.yaml" <<YAML
 listen: "127.0.0.1:$GATEWAY_DIRECT_PORT"
@@ -316,7 +316,7 @@ sensor:
   interval_seconds: 30
   max_restarts_per_hour: 0
 YAML
-unit linux-agent "/usr/local/bin/linux_agent /etc/ostyr/linux.yaml" >"$stage/client/etc/systemd/system/ostyr-linux-agent.service"
+unit linux-agent "/usr/local/bin/ostyr-agent-linux /etc/ostyr/linux.yaml" >"$stage/client/etc/systemd/system/ostyr-linux-agent.service"
 
 tetragon_tarball="$("$repo_dir/lab/tetragon-fetch.sh")"
 
