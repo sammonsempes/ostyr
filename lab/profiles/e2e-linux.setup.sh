@@ -353,16 +353,18 @@ stream_die() {
     exit 1
 }
 stream_check() {
-    nats stream info "$1" --json | python3 -I -c '
+    nats request "\$JS.API.STREAM.INFO.$1" '' --raw | python3 -I -c '
 import json, sys
 config = json.load(sys.stdin)["config"]
 subject, max_msgs, max_bytes, max_msg_size, per_subject, window = sys.argv[1:]
 expected = {"subjects": [subject], "retention": "limits", "max_consumers": -1, "max_msgs_per_subject": int(per_subject),
             "max_msgs": int(max_msgs), "max_bytes": int(max_bytes), "max_age": 0, "max_msg_size": int(max_msg_size), "storage": "file",
             "discard": "old", "num_replicas": 1, "duplicate_window": int(window), "sealed": False, "deny_delete": False, "deny_purge": False,
-            "allow_rollup_hdrs": False, "allow_direct": True, "mirror_direct": False, "consumer_limits": {}}
+            "allow_rollup_hdrs": False, "allow_direct": True, "mirror_direct": False, "consumer_limits": {},
+            "compression": "none", "allow_msg_ttl": False}
 actual = {key: value for key, value in config.items() if key != "name"}
-operator_metadata = {key: value for key, value in actual.pop("metadata", {}).items() if not key.startswith("_nats.")}
+server_metadata = ("_nats.ver", "_nats.level", "_nats.req.level")
+operator_metadata = {key: value for key, value in actual.pop("metadata", {}).items() if key not in server_metadata}
 if operator_metadata:
     actual["metadata"] = operator_metadata
 def dump(table, key):
@@ -370,7 +372,7 @@ def dump(table, key):
 bad = sorted(key for key in set(actual) | set(expected) if dump(actual, key) != dump(expected, key))
 if bad:
     sys.exit(" ".join(bad))
-' "${@:2}" || stream_die "$1" "the stored configuration differs from the expected one on the fields above (the script never deletes letters: delete and recreate the stream)"
+' "${@:2}" || stream_die "$1" "the stored configuration differs from the expected one on the fields above (the script never deletes data: delete and recreate the stream)"
 }
 add_stream() {
     nats stream info "$1" >/dev/null 2>&1 || nats stream add "$1" --subjects "$2" --storage file --retention limits --discard old \
@@ -381,6 +383,24 @@ add_stream() {
 add_durable() {
     nats consumer info events "$1" >/dev/null 2>&1 || nats consumer add events "$1" --pull --deliver all --ack explicit --filter 'events.>' --replay instant \
         --max-deliver=-1 --max-pending 1000 --no-headers-only --wait "$ACK_WAIT" --defaults >/dev/null
+    nats request "\$JS.API.CONSUMER.INFO.events.$1" '' --raw | python3 -I -c '
+import json, sys
+config = json.load(sys.stdin)["config"]
+durable, ack_wait = sys.argv[1:]
+expected = {"durable_name": durable, "deliver_policy": "all", "ack_policy": "explicit", "ack_wait": int(ack_wait.rstrip("s")) * 1000000000,
+            "max_deliver": -1, "filter_subject": "events.>", "replay_policy": "instant", "max_waiting": 512, "max_ack_pending": 1000,
+            "num_replicas": 0, "pause_until": "0001-01-01T00:00:00Z"}
+actual = {key: value for key, value in config.items() if key != "name"}
+server_metadata = ("_nats.ver", "_nats.level", "_nats.req.level")
+operator_metadata = {key: value for key, value in actual.pop("metadata", {}).items() if key not in server_metadata}
+if operator_metadata:
+    actual["metadata"] = operator_metadata
+def dump(table, key):
+    return json.dumps(table[key], sort_keys=True) if key in table else None
+bad = sorted(key for key in set(actual) | set(expected) if dump(actual, key) != dump(expected, key))
+if bad:
+    sys.exit(" ".join(bad))
+' "$1" "$ACK_WAIT" || stream_die events "durable $1 differs from the expected configuration on the fields above (delete and recreate the durable)"
 }
 add_stream events 'events.>'
 readonly DEAD_TENANT_BUDGET=16 DEAD_MAX_MSGS_PER_TENANT=1000 DEAD_MAX_MSG_SIZE=8192 DEAD_MAX_MSGS=16000 DEAD_MAX_BYTES=134217728
