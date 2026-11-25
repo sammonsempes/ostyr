@@ -17,9 +17,9 @@ use backup_monitor::serve::{
     exit_code, interrupt_wait, production_options, refuse_root, reload_audit, run_job, run_main, run_with_euid, start, Cursor, StartOptions,
 };
 use backup_monitor::service::{
-    check_outcome, check_parameters, check_round, declarations_refusal, declarations_state, failure_category, load_settings, may_start_after,
-    next_due, open_declarations_engine, open_service_settings_from, production_programs, production_timing, restore_outcome, restore_round,
-    settings_state, start_only_changed, state_identity, validate_settings, Programs, ServiceSettings, Shared, StoreFailure, Timing,
+    check_outcome, check_parameters, check_round, declarations_loader, declarations_refusal, declarations_state, failure_category, load_settings,
+    may_start_after, next_due, open_declarations_engine, open_service_settings_from, production_programs, production_timing, restore_outcome,
+    restore_round, settings_state, start_only_changed, state_identity, validate_settings, Programs, ServiceSettings, Shared, StoreFailure, Timing,
     MAX_INTERVAL_SECONDS, MAX_ROUND_SECONDS, MIN_INTERVAL_SECONDS, TENANT_SWAP_REASON,
 };
 use backup_monitor::store::{category_label, run_error_category};
@@ -431,6 +431,21 @@ fn a_declarations_swap_to_another_tenant_is_refused_whole_and_audited_denied_und
 
 
 #[test]
+fn a_declarations_tenant_swap_is_refused_under_the_declarations_file_name() -> TestResult {
+    let site = plain_site(&["alpha"], 0)?;
+    fs::write(&site.declarations, declarations_text("victim", &["alpha"], 0))?;
+    let refusal = declarations_loader(site.declarations.clone(), "acme".to_owned())()
+        .err()
+        .ok_or("accepted")?;
+    assert!(
+        matches!(&refusal, ConfigError::WatchedFile { file, reason } if file == "declarations" && reason == TENANT_SWAP_REASON),
+        "{refusal:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
 fn a_declarations_start_with_another_tenant_is_refused() -> TestResult {
     let site = plain_site(&["alpha"], 0)?;
     let log = audit_for(&site)?;
@@ -562,6 +577,7 @@ fn a_failing_repository_is_its_own_failure_and_the_others_still_run() -> TestRes
     fs::write(site.bin.join("fail_config"), "")?;
     let restore = restore_round(&shared, &declarations, FIRST, &stop)?;
     assert_eq!(restore.errors.len(), TWO);
+    assert!(restore.errors.iter().all(|(_, record)| record.tested_at == NOW));
     assert!(restore.results.is_empty());
     let check = check_round(&shared, &declarations, FIRST, &stop)?;
     assert!(check.repositories.iter().all(|(_, result)| result.is_err()));
@@ -903,7 +919,7 @@ async fn the_production_entry_checks_the_arguments_then_refuses_root() -> TestRe
     assert!(root.to_string().contains("refusing to run as root"));
     let missing = run_with_euid(&[format!("{file}.absent")], never(), 1).await.err().ok_or("missing")?;
     assert!(missing.to_string().contains("absent"));
-    assert_eq!(production_options(1).rounds, usize::MAX);
+    assert_eq!(production_options(1).rounds, usize::try_from(u32::MAX)?);
     Ok(())
 }
 

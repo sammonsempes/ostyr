@@ -44,10 +44,7 @@ const ROOT_REFUSED: &str = "refusing to run as root: use a dedicated user with i
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const FOREVER: usize = usize::MAX;
-
-
-const NO_EXTRA_ROUNDS: usize = 0;
+const MAX_PASSES: usize = u32::MAX as usize;
 
 
 /// What `start` needs besides the settings file: the programs, the timing, the one reader of the settings file, the loop bound, the user and the clock.
@@ -111,7 +108,7 @@ pub fn production_options(euid: u32) -> StartOptions {
         programs: production_programs(),
         timing: production_timing(),
         read: Arc::new(|file: &Path| load_settings(file)),
-        rounds: FOREVER,
+        rounds: MAX_PASSES,
         euid,
         clock: OffsetDateTime::now_utc,
     }
@@ -348,7 +345,7 @@ pub async fn serve(service: &Service, rounds: usize, interrupt: &mut InterruptWa
     let mut cursor = Cursor::default();
     let mut stopped = false;
     let mut done = 0;
-    while !stopped && done < rounds.saturating_add(NO_EXTRA_ROUNDS) {
+    while !stopped && done < rounds.min(MAX_PASSES) {
         let live = current_config(&service.settings);
         if elapsed_seconds(started) >= cursor.check_due {
             stopped = check_turn(service, &mut cursor, &live, started, interrupt).await?;
