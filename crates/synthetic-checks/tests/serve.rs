@@ -48,6 +48,15 @@ const CHILD_MARKER_GUARD: Duration = Duration::from_secs(600);
 const LAST_LINES_SHOWN: usize = 20;
 
 
+const WAIT_TEST_GUARD: Duration = Duration::from_millis(200);
+
+
+const WAIT_TEST_HANG_GUARD: Duration = Duration::from_secs(30);
+
+
+const WAIT_TEST_LINE_PERIOD: Duration = Duration::from_millis(5);
+
+
 const MAX_LINES_READ: usize = 1_000_000;
 
 
@@ -263,6 +272,35 @@ fn drain_lines(lines: &Receiver<String>, guard: Duration) -> Result<Vec<String>,
         Some(RecvTimeoutError::Timeout) => Err(format!("the child did not end within {guard:?}; last lines:\n{}", last_lines(&seen)).into()),
         None => Err(format!("the child wrote more than {MAX_LINES_READ} lines; last lines:\n{}", last_lines(&seen)).into()),
     }
+}
+
+
+#[test]
+fn a_wait_ends_at_one_deadline_while_the_child_never_stops_writing() -> TestResult {
+    let (sender, lines) = channel::<String>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let writer = thread::spawn(move || {
+        std::iter::repeat_with(|| {
+            thread::sleep(WAIT_TEST_LINE_PERIOD);
+            sender.send("round".to_owned())
+        })
+        .take(MAX_LINES_READ)
+        .take_while(|sent| sent.is_ok() && !writer_stop.load(Ordering::SeqCst))
+        .count()
+    });
+    let (outcome_sender, outcome) = channel();
+    let waiter = thread::spawn(move || {
+        let waited = wait_for_either_within(&lines, "never-a", "never-b", WAIT_TEST_GUARD).map_err(|failure| failure.to_string());
+        outcome_sender.send(waited)
+    });
+    let received = outcome.recv_timeout(WAIT_TEST_HANG_GUARD);
+    stop.store(true, Ordering::SeqCst);
+    let waited = received.map_err(|_| "the wait did not end at its deadline: the guard is applied per line")?;
+    assert!(waited.is_err_and(|text| text.contains("no marker") && text.contains("round")));
+    waiter.join().map_err(|_| "waiter panicked")??;
+    writer.join().map_err(|_| "writer panicked")?;
+    Ok(())
 }
 
 
