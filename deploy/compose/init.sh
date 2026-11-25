@@ -216,6 +216,10 @@ make_nats_conf() {
             printf 'error: %s does not hold nats_gateway_password and nats_admin_password, delete it and run init again\n' "$name" >&2
             exit 1
         fi
+        if ! grep -qE '^[[:space:]]*max_file_store:' "$SECRETS_DIR/$name"; then
+            printf 'warning: %s has no max_file_store, so JetStream may fill the disk\n' "$name" >&2
+            printf 'to fix it, delete %s and rerun init.sh (the NATS passwords are kept); nothing was changed\n' "$name" >&2
+        fi
     else
         temporary="$(mktemp "$scratch/$name.XXXXXX")"
         cat >"$temporary" <<CONF
@@ -473,6 +477,10 @@ else
 fi
 if ! openssl x509 -in "$SECRETS_DIR/api_tls.crt" -noout -ext subjectAltName | grep -Eq 'DNS:platform(,|$)'; then
     printf 'warning: api_tls.crt has no DNS:platform name, so the web service cannot verify the API\n' >&2
+    printf 'to fix it, remove every TLS file (%s) from %s and rerun init.sh; nothing was changed\n' "${TLS_FILES[*]}" "$SECRETS_DIR" >&2
+fi
+if [[ "$(openssl x509 -in "$SECRETS_DIR/gateway_tls.crt" -noout -ext subjectAltName | grep -v 'Subject Alternative Name' | tr -d ' \n')" != DNS:gateway ]]; then
+    printf 'warning: gateway_tls.crt names more than DNS:gateway, so the API key could stand in for the gateway\n' >&2
     printf 'to fix it, remove every TLS file (%s) from %s and rerun init.sh; nothing was changed\n' "${TLS_FILES[*]}" "$SECRETS_DIR" >&2
 fi
 make_random_file pg_password base64

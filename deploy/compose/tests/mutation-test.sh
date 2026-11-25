@@ -28,6 +28,9 @@ readonly CH_USERS="ClickHouse has no default user, four hashed users on the comp
 readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
 readonly CH_NO_PAGE="ClickHouse answers only POST / and GET /ping, no web page"
 readonly CH_REFUSES="init.sh refuses a users file that differs from the rendered one"
+readonly GATEWAY_SAN="the gateway certificate names DNS:gateway only"
+readonly INIT_SERVICES="init.sh lists exactly the services of compose.yaml"
+readonly INIT_WARNS="init.sh warns by name about a nats.conf without max_file_store and a gateway certificate with more names"
 readonly PINNED="every image is pinned by digest or built locally"
 readonly HARDENED="every service is read-only, drops capabilities and sets no-new-privileges"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
@@ -142,12 +145,16 @@ file_static_run() {
 }
 
 file_static_runs() {
-    local init="$COMPOSE_DIR/init.sh" config="$COMPOSE_DIR/config/clickhouse-config.xml" schema="$COMPOSE_DIR/config/clickhouse-schema.sql"
+    local init="$COMPOSE_DIR/init.sh" compose="$COMPOSE_DIR/compose.yaml" config="$COMPOSE_DIR/config/clickhouse-config.xml" schema="$COMPOSE_DIR/config/clickhouse-schema.sql"
     file_static_run metrics_select_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples|GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples|' "$CH_USERS"
     file_static_run metrics_rollup_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>|&<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1m</query>|' "$CH_USERS"
     file_static_run view_definer_removed STATIC_TEST_CH_SCHEMA_FILE "$schema" '0,/ DEFINER = schema SQL SECURITY DEFINER AS$/s// AS/' "$CH_DEFINER"
     file_static_run handlers_defaults_back STATIC_TEST_CH_CONFIG_FILE "$config" 's|<http_handlers>|<http_handlers><defaults/>|' "$CH_NO_PAGE"
     file_static_run handlers_play_added STATIC_TEST_CH_CONFIG_FILE "$config" 's|<url>/ping</url>|<url>/play</url>|' "$CH_NO_PAGE"
+    file_static_run gateway_san_widened STATIC_TEST_INIT_FILE "$init" 's|DNS:gateway "$scratch"|DNS:gateway,DNS:platform "$scratch"|' "$GATEWAY_SAN"
+    file_static_run service_name_dropped STATIC_TEST_INIT_FILE "$init" '/^readonly SERVICE_NAMES=/s| chschema)|)|' "$INIT_SERVICES"
+    file_static_run compose_service_added STATIC_TEST_COMPOSE_FILE "$compose" 's|^  chschema:$|  state:\n    image: x\n&|' "$INIT_SERVICES"
+    file_static_run nats_warning_removed STATIC_TEST_INIT_FILE "$init" 's|has no max_file_store, so JetStream|has no bound, so JetStream|' "$INIT_WARNS"
     file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
 }
 

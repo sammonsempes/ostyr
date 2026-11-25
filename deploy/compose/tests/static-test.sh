@@ -425,6 +425,22 @@ definitions_are_pinned() {
     [[ "$(sed -n '/^volumes:$/,$p' "$COMPOSE_FILE")" == "$expected" && "$(count_lines '^ *name:')" -eq 1 && "$(count_lines '^name: ostyr$')" -eq 1 ]]
 }
 
+compose_service_names() {
+    sed -n '/^services:$/,/^[a-z]/{s/^  \([a-z]*\):$/\1/p}' "$COMPOSE_FILE" | sort | tr '\n' ' '
+}
+
+init_service_names() {
+    sed -n 's/^readonly SERVICE_NAMES=(\(.*\))$/\1/p' "$CH_INIT_FILE" | tr ' ' '\n' | sort | tr '\n' ' '
+}
+
+init_lists_compose_services() {
+    [[ -n "$(compose_service_names)" && "$(compose_service_names)" == "$(init_service_names)" ]]
+}
+
+init_warns_on_old_files() {
+    grep -qF "has no max_file_store, so JetStream may fill the disk" "$CH_INIT_FILE" && grep -qF 'gateway_tls.crt names more than DNS:gateway' "$CH_INIT_FILE"
+}
+
 web_has() {
     web_service | grep -q -- "$1"
 }
@@ -529,9 +545,11 @@ expect "the gateway, relay and channel settings name the same addresses and port
 expect "the gateway files name only its own secrets and state" gateway_files_use_only_its_secrets_and_state
 expect "the NATS user gateway publishes events.* only and subscribes to its own inbox" \
     grep -qF 'permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }' "$COMPOSE_DIR/init.sh"
-expect "the gateway certificate names DNS:gateway only" grep -qF 'make_leaf gateway_tls ostyr-gateway DNS:gateway "$scratch"' "$COMPOSE_DIR/init.sh"
+expect "the gateway certificate names DNS:gateway only" grep -qF 'make_leaf gateway_tls ostyr-gateway DNS:gateway "$scratch"' "$CH_INIT_FILE"
 expect "init.sh refuses every compose service name as the public host name" \
-    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)' "$COMPOSE_DIR/init.sh"
+    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)' "$CH_INIT_FILE"
+expect "init.sh lists exactly the services of compose.yaml" init_lists_compose_services
+expect "init.sh warns by name about a nats.conf without max_file_store and a gateway certificate with more names" init_warns_on_old_files
 expect "the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets" clickhouse_is_hardened
 expect "the chschema service is hardened, runs as 65530 and holds only the CA and its password" chschema_is_hardened
 expect "both ClickHouse services use one pinned image" clickhouse_one_image
