@@ -2,7 +2,7 @@
 
 use crate::fetch::{agent_for, fetch_points, load_fetch_settings, read_key, FetchError};
 use crate::service::{load_settings, open_rules, open_service_settings_from, run_pass, serve, Live, PassReport, ServeEnd, MAX_ROUNDS};
-use crate::types::{InterruptWait, NowFn, PassFuture, TenantStates, Timestamp, WaitFn};
+use crate::types::{InterruptWait, NowFn, PassFuture, StartRead, TenantStates, Timestamp, WaitFn};
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_audit::log::{append_declared, open_file_log, AuditLog};
@@ -204,7 +204,20 @@ pub async fn serving(
     wait: &WaitFn<'_>,
     interrupt: InterruptWait,
 ) -> Result<Stop, Box<dyn Error>> {
-    let start_settings = load_settings(settings_file)?;
+    serving_with(load_settings, settings_file, max_rounds, now, wait, interrupt).await
+}
+
+
+/// `first_read` is the one start read; a test swaps the file inside it to show where the audit path and the baseline come from.
+pub async fn serving_with(
+    first_read: StartRead,
+    settings_file: &Path,
+    max_rounds: u64,
+    now: &NowFn<'_>,
+    wait: &WaitFn<'_>,
+    interrupt: InterruptWait,
+) -> Result<Stop, Box<dyn Error>> {
+    let start_settings = first_read(settings_file)?;
     let log = Arc::new(open_file_log(&start_settings.audit_file)?);
     let settings_engine = Arc::new(open_service_settings_from(settings_file, start_settings, boxed_reload_audit(&log))?);
     let first = current_config(&settings_engine);

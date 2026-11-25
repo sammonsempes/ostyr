@@ -12,8 +12,8 @@ use metric_alerts::query::MetricQuery;
 use metric_alerts::round::RoundStates;
 use metric_alerts::serve::{boxed_reload_audit, exit_code, seconds_since_epoch, ServeError};
 use metric_alerts::service::{
-    load_settings, next_now, open_rules, open_service_settings, open_service_settings_from, run_pass, serve, tenant_round, tenants_of, Live,
-    PassReport, ServeEnd, ServiceSettings, MAX_TENANTS,
+    load_settings, next_now, open_rules, open_service_settings_from, run_pass, serve, tenant_round, tenants_of, Live, PassReport, ServeEnd,
+    ServiceSettings, MAX_TENANTS,
 };
 use metric_alerts::types::{FetchResult, PassFuture, TenantStates, Timestamp};
 use serde_json::Value;
@@ -82,22 +82,38 @@ const MORE_RULES: &str = "rules:\n  - id: disk\n    metric: disk.used\n    condi
 const DUPLICATE_RULES: &str = "rules:\n  - id: disk\n    metric: disk.used\n    condition: {kind: threshold, direction: above, threshold: 90}\n    close_after: 60\n    severity: high\n    runbook: https://r.example.org\n  - id: disk\n    metric: cpu.used\n    condition: {kind: threshold, direction: above, threshold: 90}\n    close_after: 60\n    severity: high\n    runbook: https://r.example.org\n";
 
 
-fn settings_text(round_seconds: u64, max_tenants: usize, tenants: &str, audit: &str, pg: &str) -> String {
+const ABSOLUTE_ROOT: &str = if cfg!(windows) { "C:" } else { "" };
+
+
+fn absolute(path: &str) -> String {
+    if path.starts_with('/') {
+        format!("{ABSOLUTE_ROOT}{path}")
+    } else {
+        path.to_owned()
+    }
+}
+
+
+fn settings_text(round_seconds: u64, max_tenants: usize, tenants: &str, audit_path: &str, pg_path: &str) -> String {
+    let audit = absolute(audit_path);
+    let pg = absolute(pg_path);
+    let fetch = absolute("/f.yaml");
+    let rules = absolute("/r.yaml");
     format!(
-        "fetch_settings: /f.yaml\nrules_file: /r.yaml\npg_settings: {pg}\ntenants: {tenants}\nround_seconds: {round_seconds}\nmax_tenants: {max_tenants}\naudit_file: {audit}\n"
+        "fetch_settings: {fetch}\nrules_file: {rules}\npg_settings: {pg}\ntenants: {tenants}\nround_seconds: {round_seconds}\nmax_tenants: {max_tenants}\naudit_file: {audit}\n"
     )
 }
 
 
 fn settings_of(tenants: &[&str]) -> ServiceSettings {
     ServiceSettings {
-        fetch_settings: "/f.yaml".into(),
-        rules_file: "/r.yaml".into(),
-        pg_settings: "/p.yaml".into(),
+        fetch_settings: absolute("/f.yaml").into(),
+        rules_file: absolute("/r.yaml").into(),
+        pg_settings: absolute("/p.yaml").into(),
         tenants: tenants.iter().map(|name| (*name).to_owned()).collect(),
         round_seconds: ROUND_SECONDS,
         max_tenants: MAX_TENANTS,
-        audit_file: "/a.log".into(),
+        audit_file: absolute("/a.log").into(),
     }
 }
 
@@ -270,7 +286,7 @@ fn a_live_settings_change_is_applied_and_audited() -> TestResult {
         "s.yaml",
         &settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"),
     )?;
-    let engine = open_service_settings(&file, boxed_reload_audit(&log))?;
+    let engine = open_service_settings_from(&file, load_settings(&file)?, boxed_reload_audit(&log))?;
     fs::write(&file, settings_text(OTHER_ROUND_SECONDS, MAX_TENANTS, "[a, b]", "/a.log", "/p.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
     assert_eq!(current_config(&engine).round_seconds, OTHER_ROUND_SECONDS);
@@ -312,13 +328,13 @@ fn a_start_only_or_invalid_settings_change_is_refused_audited_and_the_old_file_k
         "s.yaml",
         &settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"),
     )?;
-    let engine = open_service_settings(&file, boxed_reload_audit(&log))?;
+    let engine = open_service_settings_from(&file, load_settings(&file)?, boxed_reload_audit(&log))?;
     fs::write(&file, settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/other.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     fs::write(&file, settings_text(1, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).round_seconds, ROUND_SECONDS);
-    assert_eq!(current_config(&engine).pg_settings, Path::new("/p.yaml"));
+    assert_eq!(current_config(&engine).pg_settings, Path::new(&absolute("/p.yaml")));
     let audit = fs::read_to_string(&audit_path)?;
     assert_eq!(audit.lines().count(), TWO, "{audit}");
     assert_eq!(audit.matches("\"outcome\":\"denied\"").count(), TWO, "{audit}");
