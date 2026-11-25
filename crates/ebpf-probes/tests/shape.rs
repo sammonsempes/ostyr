@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use ebpf_probes::shape::{
-    check_object_bytes, check_object_bytes_for, AttachKind, ProbeSpec, ShapeError, DROPS_NAME, EXEC_PROBE, PROBE_TABLE, PROGRAM_NAME, RING_NAME,
-    RODATA_NAME,
+    check_object_bytes, check_object_bytes_for, AttachKind, ProbeSpec, RecordKind, ShapeError, DROPS_NAME, EXEC_PROBE, FILE_DROPS_NAME, FILE_PROBE,
+    FILE_PROGRAM_NAME, FILE_RING_NAME, PROBE_TABLE, PROGRAM_NAME, RING_NAME, RODATA_NAME,
 };
 use std::error::Error;
 
@@ -312,7 +312,7 @@ fn elf_of(spec: &Spec) -> Result<Vec<u8>, Box<dyn Error>> {
 
 
 fn verdict(spec: &Spec) -> Result<Result<(), ShapeError>, Box<dyn Error>> {
-    Ok(check_object_bytes(&elf_of(spec)?))
+    Ok(check_object_bytes_for(&elf_of(spec)?, &[EXEC_PROBE]))
 }
 
 
@@ -460,6 +460,7 @@ const SECOND_SECTION: &str = "tracepoint/sched/other_program";
 fn second_probe() -> ProbeSpec {
     ProbeSpec {
         name: "other",
+        kind: RecordKind::Exec,
         program: SECOND_PROGRAM,
         ring: SECOND_RING,
         drops: SECOND_DROPS,
@@ -472,9 +473,60 @@ fn second_probe() -> ProbeSpec {
 
 
 #[test]
-fn the_production_table_is_the_exec_probe_alone() -> Result<(), Box<dyn Error>> {
-    assert_eq!(PROBE_TABLE, [EXEC_PROBE]);
+fn the_production_table_is_the_exec_and_file_probes() -> Result<(), Box<dyn Error>> {
+    assert_eq!(PROBE_TABLE, [EXEC_PROBE, FILE_PROBE]);
     assert_eq!(EXEC_PROBE.program, PROGRAM_NAME);
+    assert_eq!(
+        (FILE_PROBE.program, FILE_PROBE.ring, FILE_PROBE.drops),
+        (FILE_PROGRAM_NAME, FILE_RING_NAME, FILE_DROPS_NAME)
+    );
+    assert_eq!((EXEC_PROBE.kind, FILE_PROBE.kind), (RecordKind::Exec, RecordKind::File));
+    assert_eq!(
+        FILE_PROBE.attach,
+        AttachKind::TracePoint {
+            category: "syscalls",
+            name: "sys_enter_openat"
+        }
+    );
+    Ok(())
+}
+
+
+const FILE_SECTION: &str = "tracepoint/syscalls/sys_enter_openat";
+
+
+fn both_spec() -> Spec {
+    let mut both = good_spec();
+    both.maps.push((FILE_RING_NAME.to_string(), MAP_TYPE_RINGBUF, 0));
+    both.maps.push((FILE_DROPS_NAME.to_string(), MAP_TYPE_PERCPU_ARRAY, 0));
+    both.programs.push((FILE_SECTION.to_string(), FILE_PROGRAM_NAME.to_string()));
+    both
+}
+
+
+#[test]
+fn the_production_object_needs_both_probes() -> Result<(), Box<dyn Error>> {
+    assert_eq!(check_object_bytes(&elf_of(&both_spec())?), Ok(()));
+    assert_eq!(check_object_bytes(&elf_of(&good_spec())?), Err(ShapeError::MissingMap(FILE_RING_NAME)));
+    let mut no_program = both_spec();
+    no_program.programs.pop();
+    assert_eq!(
+        check_object_bytes(&elf_of(&no_program)?),
+        Err(ShapeError::MissingProgram(FILE_PROGRAM_NAME))
+    );
+    let mut wrong_map = both_spec();
+    wrong_map.maps.pop();
+    wrong_map.maps.push((FILE_DROPS_NAME.to_string(), MAP_TYPE_HASH, 0));
+    assert_eq!(check_object_bytes(&elf_of(&wrong_map)?), Err(ShapeError::WrongMapType(FILE_DROPS_NAME)));
+    let mut wrong_type = both_spec();
+    wrong_type.programs.pop();
+    wrong_type
+        .programs
+        .push(("kprobe/sys_enter_openat".to_string(), FILE_PROGRAM_NAME.to_string()));
+    assert_eq!(
+        check_object_bytes(&elf_of(&wrong_type)?),
+        Err(ShapeError::WrongProgramType(FILE_PROGRAM_NAME))
+    );
     Ok(())
 }
 

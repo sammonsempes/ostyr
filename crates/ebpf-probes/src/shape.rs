@@ -17,6 +17,15 @@ pub const RING_NAME: &str = "EXEC_EVENTS";
 pub const DROPS_NAME: &str = "EXEC_DROPS";
 
 
+pub const FILE_PROGRAM_NAME: &str = "sys_enter_openat";
+
+
+pub const FILE_RING_NAME: &str = "FILE_EVENTS";
+
+
+pub const FILE_DROPS_NAME: &str = "FILE_DROPS";
+
+
 pub const RODATA_NAME: &str = ".rodata";
 
 
@@ -27,8 +36,16 @@ pub enum AttachKind {
 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordKind {
+    Exec,
+    File,
+}
+
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProbeSpec {
     pub name: &'static str,
+    pub kind: RecordKind,
     pub program: &'static str,
     pub ring: &'static str,
     pub drops: &'static str,
@@ -38,6 +55,7 @@ pub struct ProbeSpec {
 
 pub const EXEC_PROBE: ProbeSpec = ProbeSpec {
     name: "exec",
+    kind: RecordKind::Exec,
     program: PROGRAM_NAME,
     ring: RING_NAME,
     drops: DROPS_NAME,
@@ -48,7 +66,20 @@ pub const EXEC_PROBE: ProbeSpec = ProbeSpec {
 };
 
 
-pub const PROBE_TABLE: [ProbeSpec; 1] = [EXEC_PROBE];
+pub const FILE_PROBE: ProbeSpec = ProbeSpec {
+    name: "file",
+    kind: RecordKind::File,
+    program: FILE_PROGRAM_NAME,
+    ring: FILE_RING_NAME,
+    drops: FILE_DROPS_NAME,
+    attach: AttachKind::TracePoint {
+        category: "syscalls",
+        name: FILE_PROGRAM_NAME,
+    },
+};
+
+
+pub const PROBE_TABLE: [ProbeSpec; 2] = [EXEC_PROBE, FILE_PROBE];
 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,7 +1,8 @@
 //! Decisions of one drain of the exec ring: decode, refuse, rate limit, count and report.
 
-use crate::limiter::{admit, take_dropped, Limiter};
-use crate::record::{decode_exec, DecodeError, ExecRecord};
+use crate::limiter::{admit, take_dropped, Limiter, MAX_EXEC_EVENTS_PER_SECOND, MAX_FILE_EVENTS_PER_SECOND};
+use crate::record::{decode_exec, decode_file, exec_time, file_time, ExecRecord, FileRecord};
+use crate::types::{DecodeFn, TimeFn};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -19,13 +20,48 @@ pub const REASON_UNKNOWN: &str = "kernel_dropped_unknown";
 pub const REASON_WENT_DOWN: &str = "counter_went_down";
 
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Batch {
-    pub records: Vec<ExecRecord>,
+#[derive(Clone, Copy, Debug)]
+pub struct Decoder<Item> {
+    pub decode: DecodeFn<Item>,
+    pub time_of: TimeFn<Item>,
+    pub per_second: u32,
+}
+
+
+pub const EXEC_DECODER: Decoder<ExecRecord> = Decoder {
+    decode: decode_exec,
+    time_of: exec_time,
+    per_second: MAX_EXEC_EVENTS_PER_SECOND,
+};
+
+
+pub const FILE_DECODER: Decoder<FileRecord> = Decoder {
+    decode: decode_file,
+    time_of: file_time,
+    per_second: MAX_FILE_EVENTS_PER_SECOND,
+};
+
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Batch<Item = ExecRecord> {
+    pub records: Vec<Item>,
     pub read: usize,
     pub refused: u64,
     pub first_refused_len: Option<usize>,
     pub limited: u64,
+}
+
+
+impl<Item> Default for Batch<Item> {
+    fn default() -> Self {
+        Batch {
+            records: Vec::new(),
+            read: 0,
+            refused: 0,
+            first_refused_len: None,
+            limited: 0,
+        }
+    }
 }
 
 
@@ -71,17 +107,17 @@ pub fn may_proceed(stop: &AtomicBool) -> bool {
 }
 
 
-/// Reads at most `max_records` raw records, decodes each (a refused one is counted with its length only) and rate limits by the record's own kernel time.
-pub fn decode_batch(raw: &mut dyn Iterator<Item = Vec<u8>>, limiter: &mut Limiter, max_records: usize) -> Batch {
+/// Reads at most `max_records` raw records, decodes each with `decoder` (a refused one is counted with its length only) and rate limits by the record's own kernel time and the decoder's own budget.
+pub fn decode_batch<Item>(raw: &mut dyn Iterator<Item = Vec<u8>>, limiter: &mut Limiter, max_records: usize, decoder: &Decoder<Item>) -> Batch<Item> {
     let mut batch = raw.take(max_records).fold(Batch::default(), |mut batch, bytes| {
         batch.read = batch.read.saturating_add(1);
-        match decode_exec(&bytes) {
-            Err(DecodeError::WrongSize { got }) => {
+        match (decoder.decode)(&bytes) {
+            Err(_) => {
                 batch.refused = batch.refused.saturating_add(1);
-                batch.first_refused_len = batch.first_refused_len.or(Some(got));
+                batch.first_refused_len = batch.first_refused_len.or(Some(bytes.len()));
             }
             Ok(record) => {
-                if admit(limiter, record.monotonic_ns) {
+                if admit(limiter, (decoder.time_of)(&record), decoder.per_second) {
                     batch.records.push(record);
                 }
             }
@@ -111,7 +147,7 @@ pub fn kernel_dropped(baseline: &mut u64, current: Option<u64>) -> KernelDropped
 
 
 /// Builds the report; `more_pending` is only information, the caller never polls again at once.
-pub fn report_of(batch: &Batch, max_records: usize, kernel: KernelDropped) -> DrainReport {
+pub fn report_of<Item>(batch: &Batch<Item>, max_records: usize, kernel: KernelDropped) -> DrainReport {
     DrainReport {
         delivered: batch.records.len(),
         refused: batch.refused,
@@ -123,15 +159,15 @@ pub fn report_of(batch: &Batch, max_records: usize, kernel: KernelDropped) -> Dr
 }
 
 
-/// One line of counts when anything was lost, refused or unknown.
-pub fn warning_text(report: &DrainReport) -> Option<String> {
+/// One line of counts for the probe `name` when anything was lost, refused or unknown.
+pub fn warning_text(name: &str, report: &DrainReport) -> Option<String> {
     let kernel_lost = report.kernel_dropped != KernelDropped::Counted(0);
     let lossy = report.limited > 0 || report.refused > 0 || kernel_lost;
     let first_refused = report.first_refused_len.map_or_else(|| "none".to_string(), |length| length.to_string());
     lossy.then(|| {
         format!(
-            "exec drain lost events: delivered={} refused={} first_refused_len={} limited={} kernel_dropped={} more_pending={}",
-            report.delivered, report.refused, first_refused, report.limited, report.kernel_dropped, report.more_pending
+            "{} drain lost events: delivered={} refused={} first_refused_len={} limited={} kernel_dropped={} more_pending={}",
+            name, report.delivered, report.refused, first_refused, report.limited, report.kernel_dropped, report.more_pending
         )
     })
 }
@@ -144,17 +180,23 @@ pub fn wait_after(_report: &DrainReport) -> Duration {
 
 
 #[derive(Clone, Debug)]
-pub struct Drained {
-    pub records: Vec<ExecRecord>,
+pub struct Drained<Item = ExecRecord> {
+    pub records: Vec<Item>,
     pub report: DrainReport,
 }
 
 
 /// Finishes one drain: the delta against the baseline, the report and the single warn text (none when nothing was lost, refused or unknown).
-pub fn finish_drain(batch: Batch, max_records: usize, baseline: &mut u64, current: Option<u64>) -> (Drained, Option<String>) {
+pub fn finish_drain<Item>(
+    name: &str,
+    batch: Batch<Item>,
+    max_records: usize,
+    baseline: &mut u64,
+    current: Option<u64>,
+) -> (Drained<Item>, Option<String>) {
     let kernel = kernel_dropped(baseline, current);
     let report = report_of(&batch, max_records, kernel);
-    let warning = warning_text(&report);
+    let warning = warning_text(name, &report);
     (
         Drained {
             records: batch.records,

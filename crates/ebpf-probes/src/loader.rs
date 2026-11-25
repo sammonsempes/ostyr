@@ -2,11 +2,14 @@
 //! The production loader: load the exec probe from checked bytes, attach it, drain its ring. Proved by the `ebpf` workflow and the lab only.
 
 use crate::btf::{read_task_offsets, require_64_bit, VMLINUX_BTF_PATH};
-use crate::drain::{decode_batch, finish_drain, may_proceed, poll_loop, sum_per_cpu, Batch, Drained, MAX_DRAIN_PER_POLL};
+use crate::drain::{
+    decode_batch, finish_drain, may_proceed, poll_loop, sum_per_cpu, Batch, Decoder, Drained, EXEC_DECODER, FILE_DECODER, MAX_DRAIN_PER_POLL,
+};
 use crate::error::{attach_error, ebpf_error, program_load_error, LoadError};
 use crate::limiter::Limiter;
 use crate::object::{read_object, EXEC_OBJECT_PATH};
-use crate::shape::{check_object_bytes_for, AttachKind, ProbeSpec, EXEC_PROBE, PROBE_TABLE};
+use crate::record::{ExecRecord, FileRecord};
+use crate::shape::{check_object_bytes_for, AttachKind, ProbeSpec, RecordKind, EXEC_PROBE, PROBE_TABLE};
 use aya::maps::{MapData, MapError, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader};
@@ -32,9 +35,15 @@ pub struct Probe {
 }
 
 
+pub enum ProbeDrained {
+    Exec(Drained<ExecRecord>),
+    File(Drained<FileRecord>),
+}
+
+
 pub struct ProbeDrain {
     pub name: &'static str,
-    pub drained: Drained,
+    pub drained: ProbeDrained,
 }
 
 
@@ -104,9 +113,15 @@ pub fn attach_probes(probe: &mut Probe) -> Result<(), LoadError> {
 }
 
 
-/// Attaches the loaded programs; dropping the probe detaches them.
+/// Attaches the exec program alone (the agent drains no other ring yet); every other loaded program stays unattached, so it costs nothing. Dropping the probe detaches it.
 pub fn attach_exec_probe(probe: &mut Probe) -> Result<(), LoadError> {
-    attach_probes(probe)
+    let specs: Vec<ProbeSpec> = probe
+        .states
+        .iter()
+        .map(|state| state.spec)
+        .filter(|spec| spec.kind == RecordKind::Exec)
+        .collect();
+    specs.iter().try_for_each(|spec| attach_state(&mut probe.ebpf, spec))
 }
 
 
@@ -133,15 +148,23 @@ pub fn read_dropped(drops: &PerCpuArray<MapData, u64>) -> Result<u64, MapError> 
 
 
 /// Drains one probe without waiting; every decision is in `drain.rs`, this only reads the ring and the counter and logs the one warn line.
-fn drain_state(state: &mut ProbeState, max_records: usize) -> Drained {
+fn drain_ring<Item>(state: &mut ProbeState, max_records: usize, decoder: &Decoder<Item>) -> Drained<Item> {
     let ring = &mut state.ring;
     let mut raw = std::iter::from_fn(|| ring.next().map(|item| item.to_vec()));
-    let batch = decode_batch(&mut raw, &mut state.limiter, max_records);
+    let batch = decode_batch(&mut raw, &mut state.limiter, max_records, decoder);
     let current = read_dropped(&state.drops).ok();
-    let (drained, warning) = finish_drain(batch, max_records, &mut state.baseline, current);
     let name = state.spec.name;
+    let (drained, warning) = finish_drain(name, batch, max_records, &mut state.baseline, current);
     warning.iter().for_each(|text| tracing::warn!("{name}: {text}"));
     drained
+}
+
+
+fn drain_state(state: &mut ProbeState, max_records: usize) -> ProbeDrained {
+    match state.spec.kind {
+        RecordKind::Exec => ProbeDrained::Exec(drain_ring(state, max_records, &EXEC_DECODER)),
+        RecordKind::File => ProbeDrained::File(drain_ring(state, max_records, &FILE_DECODER)),
+    }
 }
 
 
@@ -161,8 +184,8 @@ pub fn drain_probes(probe: &mut Probe, max_records: usize) -> Vec<ProbeDrain> {
 /// Drains the exec probe alone; an exec probe missing from the table is a loud unknown kernel drop count, never an empty success.
 pub fn drain_exec(probe: &mut Probe, max_records: usize) -> Drained {
     match probe.states.iter_mut().find(|state| state.spec.name == EXEC_PROBE.name) {
-        Some(state) => drain_state(state, max_records),
-        None => finish_drain(Batch::default(), max_records, &mut 0, None).0,
+        Some(state) => drain_ring(state, max_records, &EXEC_DECODER),
+        None => finish_drain(EXEC_PROBE.name, Batch::default(), max_records, &mut 0, None).0,
     }
 }
 

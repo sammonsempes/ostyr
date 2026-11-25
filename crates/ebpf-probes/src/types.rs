@@ -3,6 +3,7 @@
 use crate::btf::{TaskStruct, MEMBER_WORDS};
 #[cfg(target_os = "linux")]
 use crate::object::Meta;
+use crate::record::DecodeError;
 #[cfg(target_os = "linux")]
 use rustix::fs::OFlags;
 #[cfg(target_os = "linux")]
@@ -11,6 +12,12 @@ use rustix::io::Errno;
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
 use std::os::fd::{BorrowedFd, OwnedFd};
+
+
+pub type DecodeFn<Item> = fn(&[u8]) -> Result<Item, DecodeError>;
+
+
+pub type TimeFn<Item> = fn(&Item) -> u64;
 
 
 pub type Walked = (usize, Option<TaskStruct>);
