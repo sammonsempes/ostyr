@@ -11,7 +11,7 @@ use crate::services::channel_router;
 use crate::settings::{open_settings_engine, settings_of};
 use crate::sink::{file_sink, open_event_store};
 use crate::tls::server_config;
-use crate::types::{EventSink, IncomingConnections, NowFn, ShutdownSignal};
+use crate::types::{EventSink, IncomingConnections, NowFn, ReadySender, ShutdownSignal};
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
@@ -97,8 +97,9 @@ pub async fn run_server(
     relay: Option<TcpListener>,
     shutdown: ShutdownSignal,
     events: EventSink,
+    ready: Option<ReadySender>,
 ) -> Result<(), AppError> {
-    run_server_with_clock(file, (listener, relay), shutdown, events, Box::new(system_now)).await
+    run_server_with_clock(file, (listener, relay), shutdown, events, Box::new(system_now), ready).await
 }
 
 
@@ -122,6 +123,14 @@ pub fn file_events(file: &ServerFile) -> Result<EventSink, AppError> {
 }
 
 
+/// Tells the waiting caller, if any, that the server is about to accept; a caller that stopped waiting is logged.
+pub fn announce_ready(ready: Option<ReadySender>) {
+    if ready.map(|sender| sender.send(())).is_some_and(|sent| sent.is_err()) {
+        tracing::warn!("nobody waits for the ready signal");
+    }
+}
+
+
 /// `run_server` with the limiter clock injected.
 pub async fn run_server_with_clock(
     file: ServerFile,
@@ -129,8 +138,12 @@ pub async fn run_server_with_clock(
     shutdown: ShutdownSignal,
     events: EventSink,
     now: Box<NowFn>,
+    ready: Option<ReadySender>,
 ) -> Result<(), AppError> {
-    let log = Arc::new(open_file_log(&file.audit_file)?);
+    let log = Arc::new(open_file_log(&file.audit_file).map_err(|source| AppError::AuditFile {
+        path: file.audit_file.clone(),
+        source,
+    })?);
     let (opened_settings, settings) = open_settings_engine(
         file.settings_file.clone(),
         shared_log_audit(&log),
@@ -170,6 +183,7 @@ pub async fn run_server_with_clock(
     };
     let stop = shutdown.shared();
     let silence = tokio::spawn(watch_silence(Arc::clone(&state), stop.clone()));
+    announce_ready(ready);
     serve_with_relay(
         Box::pin(TcpListenerStream::new(listener)),
         relay_listener,

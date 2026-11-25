@@ -21,6 +21,7 @@ pub mod render;
 pub mod rows;
 pub mod schedule;
 pub mod secret;
+pub mod serve;
 pub mod settings;
 pub mod silence;
 pub mod smtp;
