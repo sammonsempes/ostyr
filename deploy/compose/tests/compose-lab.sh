@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Usage: deploy/compose/tests/compose-lab.sh <task-id>
+# Build the agent first: cargo build --release --target x86_64-unknown-linux-musl -p agent-channel --example channel_agent
 # Live proof inside a booted ubuntu-docker lab (LAB_PROFILE=ubuntu-docker lab/up.sh <task-id>), never on the host: the image holds Docker, the compose
 # plugin and openssl (the daemon is restarted to read the proxy drop-in cloud-init writes after it started); on another profile they are installed from the Ubuntu archive through the lab proxy. Needs target/deploy-compose/image from deploy/compose/build.sh.
 set -euo pipefail
@@ -11,6 +12,13 @@ readonly TESTS_DIR COMPOSE_DIR REPO_DIR
 readonly IMAGE_DIR="$REPO_DIR/target/deploy-compose/image"
 readonly READY_ATTEMPTS=90
 readonly API_PORT=8443
+readonly RELAY_PORT=7443
+readonly NATS_PORT=4222
+readonly NATS_BOX_IMAGE="natsio/nats-box:0.19.7@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c"
+readonly AGENT_BINARY="$REPO_DIR/target/x86_64-unknown-linux-musl/release/examples/channel_agent"
+readonly VM_AGENT_BINARY=/srv/ostyr-lab/channel_agent
+readonly VM_AGENT_DIR=/srv/ostyr-lab/agent-proof
+readonly LOG_ATTEMPTS=30
 PG_IMAGE="$(sed -n 's/^    image: \(postgres:.*\)$/\1/p' "$COMPOSE_DIR/compose.yaml")"
 readonly PG_IMAGE
 readonly ADMIN_PASSWORD="a-long-admin-passphrase-for-the-lab"
@@ -215,7 +223,7 @@ expect "the platform root filesystem is read-only" test "$(remote "sudo docker i
 expect "the platform drops every capability" test "$(remote "sudo docker inspect --format '{{.HostConfig.CapDrop}}' $platform_container")" = "[ALL]"
 expect "the platform has no-new-privileges" test "$(remote "sudo docker inspect --format '{{.HostConfig.SecurityOpt}}' $platform_container")" = "[no-new-privileges:true]"
 expect "no secret value is in the platform environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $platform_container | grep -i -e password -e BEGIN"
-expect "only the API and web ports are published on the host" test "$(remote "sudo ss -ltnp | grep docker-proxy | awk '{print \$4}' | sed 's/.*://' | sort -un | xargs")" = "8443 9443"
+expect "only the API, web and relay ports are published on the host" test "$(remote "sudo ss -ltnp | grep docker-proxy | awk '{print \$4}' | sed 's/.*://' | sort -un | xargs")" = "7443 8443 9443"
 project_listing="$(remote "find compose -mindepth 1 -maxdepth 1 ! -name secrets -printf '%f\\n' | sort | xargs")"
 host_listing="$(find "$COMPOSE_DIR" -mindepth 1 -maxdepth 1 ! -name secrets -printf '%f\n' | sort | xargs)"
 expect "the lab project directory holds only the committed files plus the generated secrets" test "$project_listing" = "$host_listing"
@@ -321,6 +329,99 @@ expect "the playbooks service logs a round that read and simulated the alert" re
 remote "cd compose && sudo docker compose logs playbooks 2>&1 | tail -n 20"
 expect "the round deleted the alert from the feed" test "$(query_migrations "select count(*) from playbook_outbox")" = 0
 expect "the playbooks service is still running after the round" test "$(inspect_playbooks '{{.State.Running}} {{.RestartCount}}')" = "true 0"
+
+nats_box() {
+    local user="$1" password_file="$2"
+    shift 2
+    remote "pw=\$(sudo cat compose/secrets/$password_file) && sudo docker run --rm ${NATS_BOX_TTY:-} --network ostyr_default -v $VM_WORK_DIR/compose/secrets/ca.crt:/ca.crt:ro \
+        $NATS_BOX_IMAGE nats --server tls://nats:$NATS_PORT --tlsfirst --tlsca /ca.crt --user $user --password \"\$pw\" $*"
+}
+
+service_container() {
+    remote "cd compose && sudo docker compose ps -q $1"
+}
+
+inspect_service() {
+    remote "sudo docker inspect --format '$2' $(service_container "$1")"
+}
+
+service_secret_files() {
+    remote "sudo docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' $(service_container "$1") | tr ' ' '\n' | grep '/secrets' | xargs -r -n1 basename | sort | xargs"
+}
+
+published_ports() {
+    inspect_service "$1" '{{range $port, $bindings := .NetworkSettings.Ports}}{{if $bindings}}{{$port}} {{end}}{{end}}'
+}
+
+for service in nats gateway relay; do
+    expect "the $service service is running and has not restarted" test "$(inspect_service "$service" '{{.State.Running}} {{.RestartCount}}')" = "true 0"
+    expect "the $service root filesystem is read-only" test "$(inspect_service "$service" '{{.HostConfig.ReadonlyRootfs}}')" = true
+    expect "the $service service drops every capability" test "$(inspect_service "$service" '{{.HostConfig.CapDrop}}')" = "[ALL]"
+    expect "the $service service has no-new-privileges" test "$(inspect_service "$service" '{{.HostConfig.SecurityOpt}}')" = "[no-new-privileges:true]"
+    expect "no secret value is in the $service environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $(service_container "$service") | grep -i -e password -e BEGIN"
+done
+expect "the gateway runs as user 65534" test "$(inspect_service gateway '{{.Config.User}}')" = 65534:65534
+expect "the relay runs as user 65531" test "$(inspect_service relay '{{.Config.User}}')" = 65531:65531
+expect "the nats service has no capability in its process (CapEff 0)" test "$(remote "sudo docker exec $(service_container nats) /nats-server --version >/dev/null 2>&1; sudo grep CapEff /proc/\$(sudo docker inspect --format '{{.State.Pid}}' $(service_container nats))/status | awk '{print \$2}'")" = 0000000000000000
+expect "nats publishes no port" test -z "$(published_ports nats)"
+expect "the gateway publishes no port" test -z "$(published_ports gateway)"
+expect "the relay publishes exactly $RELAY_PORT" test "$(published_ports relay)" = "$RELAY_PORT/tcp "
+expect "nats mounts exactly its configuration and its TLS pair" test "$(service_secret_files nats)" = "nats.conf nats_server.crt nats_server.key"
+expect "the gateway mounts exactly its five secrets" test "$(service_secret_files gateway)" = "agent_ca.crt ca.crt gateway_tls.crt gateway_tls.key nats_gateway_password"
+expect "the relay mounts no secret" test -z "$(service_secret_files relay)"
+expect "the gateway sits at the address the relay forwards to" test "$(inspect_service gateway '{{(index .NetworkSettings.Networks "ostyr_default").IPAddress}}')" = 172.29.63.11
+expect "the relay sits at the address the gateway admits" test "$(inspect_service relay '{{(index .NetworkSettings.Networks "ostyr_default").IPAddress}}')" = 172.29.63.12
+expect "the secret files have the expected owners and modes" test "$(remote "cd compose && sudo stat -c '%n %a %u:%g' secrets/gateway_tls.key secrets/nats_gateway_password secrets/nats_admin_password secrets/nats.conf secrets/nats_server.key secrets/agent.key secrets/agent_ca.crt | sed 's#secrets/##' | xargs")" \
+    = "gateway_tls.key 600 65534:65534 nats_gateway_password 600 65534:65534 nats_admin_password 600 0:0 nats.conf 600 0:0 nats_server.key 600 0:0 agent.key 600 0:0 agent_ca.crt 644 0:0"
+expect "init.sh refuses a nats.conf that lacks the gateway password" remote "sudo rm -rf natsplant && sudo mkdir natsplant && sudo cp -a compose/init.sh natsplant/ && sudo cp -a compose/secrets natsplant/secrets \
+    && sudo sh -c 'echo x >natsplant/secrets/nats.conf' && sudo chmod 0600 natsplant/secrets/nats.conf && cd natsplant && ! sudo ./init.sh lab.example 2>&1 | grep -q 'secrets ready' \
+    && sudo ./init.sh lab.example 2>&1 | grep -q 'nats.conf does not hold'"
+remote "sudo rm -rf natsplant"
+expect "the gateway logs that it serves" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do sudo docker compose logs gateway 2>&1 | grep -q 'serving' && exit 0; sleep 2; done; exit 1"
+expect "the relay logs no start error" absent remote "cd compose && sudo docker compose logs relay 2>&1 | grep -e ERROR -e WARN"
+
+nats_box admin nats_admin_password stream add events --subjects "'events.>'" --storage file --retention limits --discard old --max-msgs=-1 --max-bytes=1073741824 \
+    --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+expect "the events stream exists in the events account" nats_box admin nats_admin_password stream info events
+expect "the gateway user cannot publish outside events.*" test "$(nats_box gateway nats_gateway_password pub other.subject x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "the gateway user cannot call the JetStream API" test "$(nats_box gateway nats_gateway_password pub "'\$JS.API.STREAM.LIST'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "the gateway user cannot publish on a nested events subject" test "$(nats_box gateway nats_gateway_password pub events.a.b x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+
+remote_bare "sudo mkdir -p $VM_WORK_DIR"
+remote_stdin "sudo tee $VM_AGENT_BINARY >/dev/null && sudo chmod 0755 $VM_AGENT_BINARY" <"$AGENT_BINARY"
+agent_proofs="$(remote_stdin "cd compose && sudo bash -s -- $VM_AGENT_BINARY secrets $VM_AGENT_DIR" <"$TESTS_DIR/agent-proof.sh")"
+printf '%s\n' "$agent_proofs"
+agent_value() {
+    printf '%s\n' "$agent_proofs" | sed -n "s/^$1 //p"
+}
+expect "the proof agent sent its batch through the relay port (exit 0)" test "$(agent_value agent_exit)" = 0
+expect "the agent run acknowledged one batch" grep -q 'acknowledged 1 batches' <<<"$(agent_value agent_out)"
+expect "the spool is empty after the acknowledgement" test "$(agent_value spool_left)" = 0
+expect "a client without a certificate reached the gateway through the relay (server certificate received)" test "$(agent_value no_certificate_out)" -ge 1
+stream_view="$(NATS_BOX_TTY=-t nats_box admin nats_admin_password stream view events --raw 2>&1 || true)"
+printf '%s\n' "$stream_view"
+expect "nats stream view shows the batch on events.default" grep -q 't853 batch through the relay' <<<"$stream_view"
+stream_messages="$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
+expect "the events stream holds exactly one message" test "$stream_messages" = 1
+expect "the gateway logged both refused clients (none, other CA) as failed handshakes" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do [ \$(sudo docker compose logs gateway 2>&1 | grep -c 'TLS handshake failed') -ge 2 ] && exit 0; sleep 2; done; exit 1"
+expect "the gateway published exactly one batch" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 1
+remote "cd compose && sudo docker compose logs gateway 2>&1 | tail -n 20"
+expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 1
+expect "a container that is not the relay is dropped by the gateway relay port before the handshake (curl exit 35)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.63.11:7443/; echo \$?")" = 35
+expect "NATS is closed from the host network" absent remote "nc -z -w 3 $vm_address $NATS_PORT || nc -z -w 3 127.0.0.1 $NATS_PORT"
+expect "the gateway ports are closed from the host network" absent remote "nc -z -w 3 127.0.0.1 7444 || nc -z -w 3 $vm_address 7444"
+for service_name in postgres platform web playbooks nats gateway relay; do
+    expect "init.sh refuses the service name $service_name as the public host name" remote "cd compose && sudo ./init.sh $service_name 2>&1 | grep -q 'is a compose service name'"
+done
+expect "the events stream has the byte limit" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"max_bytes": *\([0-9]*\).*/\1/p' | head -n 1)" = 1073741824
+expect "the gateway certificate names only DNS:gateway" test "$(remote "cd compose && sudo openssl x509 -in secrets/gateway_tls.crt -noout -ext subjectAltName | grep -c 'DNS:'")" = 1
+expect "the gateway key fails curl for the public name (an s_server with the gateway key)" remote "cd compose && (sudo timeout 20 openssl s_server -accept 9555 -www -cert secrets/gateway_tls.crt -key secrets/gateway_tls.key >/dev/null 2>&1 &) ; sleep 2; \
+    sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve lab.example:9555:127.0.0.1 -o /dev/null https://lab.example:9555/ 2>&1 | tee /dev/stderr | grep -q 'no alternative certificate subject name'"
+expect "the gateway key is accepted for the name gateway" remote "cd compose && (sudo timeout 20 openssl s_server -accept 9556 -www -cert secrets/gateway_tls.crt -key secrets/gateway_tls.key >/dev/null 2>&1 &) ; sleep 2; \
+    sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve gateway:9556:127.0.0.1 -o /dev/null https://gateway:9556/"
+expect "the API key fails the name gateway" remote "cd compose && (sudo timeout 20 openssl s_server -accept 9557 -www -cert secrets/api_tls.crt -key secrets/api_tls.key >/dev/null 2>&1 &) ; sleep 2; \
+    sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve gateway:9557:127.0.0.1 -o /dev/null https://gateway:9557/ 2>&1 | tee /dev/stderr | grep -q 'no alternative certificate subject name'"
+remote "sudo ss -ltnp"
 
 if [[ "$failures" -ne 0 ]]; then
     printf '%s check(s) failed\n' "$failures" >&2
