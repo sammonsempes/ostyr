@@ -21,6 +21,13 @@ readonly PLAYBOOKS="the playbooks service is hardened, runs as 65533 and holds o
 readonly NATS_HARD="the nats service is hardened, pinned by digest, publishes no port and holds only its three secrets"
 readonly GATEWAY_HARD="the gateway service is hardened, runs as 65534 and holds only its five secrets"
 readonly RELAY_HARD="the relay service is hardened, runs as 65531 and holds no secret"
+readonly CH_HARD="the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets"
+readonly CHSCHEMA_HARD="the chschema service is hardened, runs as 65530 and holds only the CA and its password"
+readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
+readonly CH_USERS="ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader"
+readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
+readonly CH_NO_PAGE="ClickHouse answers only POST / and GET /ping, no web page"
+readonly CH_REFUSES="init.sh refuses a users file that differs from the rendered one"
 readonly PINNED="every image is pinned by digest or built locally"
 readonly HARDENED="every service is read-only, drops capabilities and sets no-new-privileges"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
@@ -55,6 +62,10 @@ declare -A STATIC_REFUSAL=(
     [gateway_bind_secrets]="$BINDS" [gateway_state_shared]="$BINDS" [gateway_log_debug]="$GATEWAY_HARD" [gateway_root]="$GATEWAY_HARD" [gateway_ip_moved]="$GATEWAY_HARD"
     [relay_cap_add]="$CAPS" [relay_secret_extra]="$RELAY_HARD" [relay_publish_extra]="$PORTS" [relay_bind_secrets]="$BINDS"
     [relay_state_shared]="$BINDS" [relay_root]="$RELAY_HARD" [relay_ip_moved]="$RELAY_HARD"
+    [clickhouse_cap_add]="$CAPS" [clickhouse_publish]="$CH_HARD" [clickhouse_secret_extra]="$CH_HARD" [clickhouse_bind_secrets]="$BINDS"
+    [clickhouse_state_shared]="$BINDS" [clickhouse_unpinned]="$PINNED" [clickhouse_root]="$CH_HARD" [clickhouse_writable]="$HARDENED"
+    [chschema_cap_add]="$CAPS" [chschema_secret_extra]="$CHSCHEMA_HARD" [chschema_bind_secrets]="$BINDS" [chschema_root]="$CHSCHEMA_HARD"
+    [chschema_image_other]="$CH_ONE_IMAGE" [chschema_anonymous_volume]="the chschema service keeps its data and log directories on tmpfs"
 )
 declare -A STRAY_REFUSAL=([override_file]="$STRAY" [dotenv_compose_file]="$STRAY")
 declare -A PARSED_REFUSAL=()
@@ -118,10 +129,33 @@ stray_parsed_run() {
     report "parsed $name" "$output" "${PARSED_REFUSAL[$name]}"
 }
 
+file_static_run() {
+    local name="$1" variable="$2" source="$3" expression="$4" expected="$5" output
+    sed "$expression" "$source" >"$scratch/$name.file"
+    if cmp -s "$source" "$scratch/$name.file"; then
+        printf 'FAIL file %s: the mutation changed nothing\n' "$name"
+        failures=$((failures + 1))
+    else
+        output="$(env "$variable=$scratch/$name.file" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+        report "static $name" "$output" "$expected"
+    fi
+}
+
+file_static_runs() {
+    local init="$COMPOSE_DIR/init.sh" config="$COMPOSE_DIR/config/clickhouse-config.xml" schema="$COMPOSE_DIR/config/clickhouse-schema.sql"
+    file_static_run metrics_select_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples|GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples|' "$CH_USERS"
+    file_static_run metrics_rollup_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>|&<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1m</query>|' "$CH_USERS"
+    file_static_run view_definer_removed STATIC_TEST_CH_SCHEMA_FILE "$schema" '0,/ DEFINER = schema SQL SECURITY DEFINER AS$/s// AS/' "$CH_DEFINER"
+    file_static_run handlers_defaults_back STATIC_TEST_CH_CONFIG_FILE "$config" 's|<http_handlers>|<http_handlers><defaults/>|' "$CH_NO_PAGE"
+    file_static_run handlers_play_added STATIC_TEST_CH_CONFIG_FILE "$config" 's|<url>/ping</url>|<url>/play</url>|' "$CH_NO_PAGE"
+    file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
+}
+
 if [[ "$MODE" == static ]]; then
     mkdir -p "$COMPOSE_DIR/../../target"
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/mutants.XXXXXX")"
     python3 -I "$TESTS_DIR/make-mutants.py" "$COMPOSE_DIR/compose.yaml" "$scratch"
+    file_static_runs
     for name in "${!STATIC_REFUSAL[@]}"; do
         static_run "$name" "$scratch"
     done

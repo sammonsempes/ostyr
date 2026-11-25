@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: sudo deploy/compose/init.sh <public-host-name>
-# Creates deploy/compose/secrets/ once: a throwaway CA (its key is deleted after signing), the PostgreSQL, API, gateway and NATS certificates, a throwaway
-# agent CA with one proof agent certificate, the PostgreSQL superuser and service passwords, the NATS passwords and configuration and the account store key. A file that exists is never touched, so a rerun changes nothing. Runs as root: the files the platform
+# Creates deploy/compose/secrets/ once: a throwaway CA (its key is deleted after signing), the PostgreSQL, API, gateway, NATS and ClickHouse certificates, a throwaway
+# agent CA with one proof agent certificate, the PostgreSQL superuser and service passwords, the NATS passwords and configuration, the ClickHouse user passwords and users file and the account store key. A file that exists is never touched, so a rerun changes nothing. Runs as root: the files the platform
 # container reads are handed to uid 65532, the owner the service demands of a secret.
 set -euo pipefail
 export LC_ALL=C
@@ -13,13 +13,15 @@ readonly SECRETS_DIR="$COMPOSE_DIR/secrets"
 readonly SERVICE_UID=65532
 readonly PLAYBOOKS_UID=65533
 readonly GATEWAY_UID=65534
+readonly CLICKHOUSE_UID=101
+readonly SCHEMA_UID=65530
 readonly CERT_DAYS=825
 readonly KEY_BYTES=32
 readonly ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 readonly LABEL_PATTERN="[$ALNUM]([$ALNUM-]{0,61}[$ALNUM])?"
 readonly NAME_PATTERN="^${LABEL_PATTERN}(\\.${LABEL_PATTERN})*\$"
 readonly NAME_MAX=253
-readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt agent_ca.crt agent.key agent.crt)
+readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt clickhouse_server.key clickhouse_server.crt agent_ca.crt agent.key agent.crt)
 readonly AGENT_TENANT=default
 readonly AGENT_ID=lab-agent
 readonly ADDRESS_PATTERN='^[0123456789]+(\.[0123456789]+){3}$'
@@ -30,7 +32,10 @@ readonly BASE64_LENGTH=44
 readonly PLATFORM_CN=ostyr-platform
 readonly NATS_PORT=4222
 readonly NATS_MAX_FILE_STORE=2G
-readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay)
+readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)
+readonly CLICKHOUSE_USERS=(schema ingest reader metrics)
+readonly CLICKHOUSE_SUBNET=172.29.63.0/24
+readonly CLICKHOUSE_DATABASE=ostyr
 readonly CURVE=prime256v1
 readonly LOCK_FILE="$SECRETS_DIR/.lock"
 readonly LOCK_WAIT_DEFAULT=30
@@ -147,6 +152,8 @@ expected_owner() {
     api_tls.key | pg_service_password | store.key) printf '%s:%s' "$SERVICE_UID" "$SERVICE_UID" ;;
     gateway_tls.key | nats_gateway_password) printf '%s:%s' "$GATEWAY_UID" "$GATEWAY_UID" ;;
     playbooks_pg_password) printf '%s:%s' "$PLAYBOOKS_UID" "$PLAYBOOKS_UID" ;;
+    clickhouse_server.key | clickhouse_users) printf '%s:%s' "$CLICKHOUSE_UID" "$CLICKHOUSE_UID" ;;
+    clickhouse_schema_password) printf '%s:%s' "$SCHEMA_UID" "$SCHEMA_UID" ;;
     *) printf '0:0' ;;
     esac
 }
@@ -246,6 +253,72 @@ CONF
     fi
 }
 
+make_clickhouse_users() {
+    local name=clickhouse_users temporary user
+    local -A hashes=()
+    for user in "${CLICKHOUSE_USERS[@]}"; do
+        hashes[$user]="$(printf '%s' "$(cat "$SECRETS_DIR/clickhouse_${user}_password")" | sha256sum | cut -d' ' -f1)"
+    done
+    temporary="$(mktemp "$scratch/$name.XXXXXX")"
+    cat >"$temporary" <<CONF
+<clickhouse>
+    <profiles>
+        <readwrite>
+            <readonly>0</readonly>
+        </readwrite>
+        <reader>
+            <readonly>2</readonly>
+        </reader>
+    </profiles>
+    <users>
+        <schema>
+            <password_sha256_hex>${hashes[schema]}</password_sha256_hex>
+            <networks><ip>$CLICKHOUSE_SUBNET</ip></networks>
+            <profile>readwrite</profile>
+            <grants>
+                <query>GRANT CREATE DATABASE, CREATE TABLE, CREATE VIEW, SELECT, INSERT ON $CLICKHOUSE_DATABASE.*</query>
+            </grants>
+        </schema>
+        <ingest>
+            <password_sha256_hex>${hashes[ingest]}</password_sha256_hex>
+            <networks><ip>$CLICKHOUSE_SUBNET</ip></networks>
+            <profile>readwrite</profile>
+            <grants>
+                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.events</query>
+            </grants>
+        </ingest>
+        <reader>
+            <password_sha256_hex>${hashes[reader]}</password_sha256_hex>
+            <networks><ip>$CLICKHOUSE_SUBNET</ip></networks>
+            <profile>reader</profile>
+            <grants>
+                <query>GRANT SELECT ON $CLICKHOUSE_DATABASE.*</query>
+            </grants>
+        </reader>
+        <metrics>
+            <password_sha256_hex>${hashes[metrics]}</password_sha256_hex>
+            <networks><ip>$CLICKHOUSE_SUBNET</ip></networks>
+            <profile>readwrite</profile>
+            <grants>
+                <query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>
+            </grants>
+        </metrics>
+    </users>
+</clickhouse>
+CONF
+    if is_present "$SECRETS_DIR/$name"; then
+        check_present "$name"
+        if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then
+            printf 'error: %s is not the file init.sh renders from the four password files, delete it and run init again\n' "$name" >&2
+            exit 1
+        fi
+    else
+        chown -h "$(expected_owner "$name")" "$temporary"
+        chmod 0600 "$temporary"
+        ln "$temporary" "$SECRETS_DIR/$name"
+    fi
+}
+
 make_copy_file() {
     local name="$1" source="$2" temporary
     if is_present "$SECRETS_DIR/$name"; then
@@ -340,6 +413,7 @@ make_certificates() {
     make_leaf api_tls "$PLATFORM_CN" "$api_names" "$scratch"
     make_leaf gateway_tls ostyr-gateway DNS:gateway "$scratch"
     make_leaf nats_server nats DNS:nats "$scratch"
+    make_leaf clickhouse_server clickhouse DNS:clickhouse "$scratch"
     openssl req -x509 -newkey ec -pkeyopt "ec_paramgen_curve:$CURVE" -nodes -days "$CERT_DAYS" -subj "/CN=Ostyr compose agent CA" \
         -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/agent_ca.key" -out "$scratch/agent_ca.crt"
     make_leaf agent "$AGENT_ID" "URI:urn:ostyr:agent:$AGENT_TENANT:$AGENT_ID" "$scratch" agent_ca clientAuth
@@ -353,6 +427,8 @@ make_certificates() {
     stage_file gateway_tls.crt 0644 root:root
     stage_file nats_server.key 0600 root:root
     stage_file nats_server.crt 0644 root:root
+    stage_file clickhouse_server.key 0600 "$CLICKHOUSE_UID:$CLICKHOUSE_UID"
+    stage_file clickhouse_server.crt 0644 root:root
     stage_file agent_ca.crt 0644 root:root
     stage_file agent.key 0600 root:root
     stage_file agent.crt 0644 root:root
@@ -360,7 +436,7 @@ make_certificates() {
 }
 
 verify_scratch() {
-    openssl verify -CAfile "$scratch/ca.crt" "$scratch/pg_server.crt" "$scratch/api_tls.crt" "$scratch/gateway_tls.crt" "$scratch/nats_server.crt" >/dev/null
+    openssl verify -CAfile "$scratch/ca.crt" "$scratch/pg_server.crt" "$scratch/api_tls.crt" "$scratch/gateway_tls.crt" "$scratch/nats_server.crt" "$scratch/clickhouse_server.crt" >/dev/null
     openssl verify -CAfile "$scratch/agent_ca.crt" "$scratch/agent.crt" >/dev/null
 }
 
@@ -406,4 +482,8 @@ make_copy_file playbooks_pg_password pg_service_password
 make_random_file nats_gateway_password base64
 make_random_file nats_admin_password base64
 make_nats_conf
+for clickhouse_user in "${CLICKHOUSE_USERS[@]}"; do
+    make_random_file "clickhouse_${clickhouse_user}_password" base64
+done
+make_clickhouse_users
 printf 'secrets ready in %s\n' "$SECRETS_DIR"

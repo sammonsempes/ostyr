@@ -30,7 +30,21 @@ NATS_IMAGE = "    image: nats:2.15.2-scratch@sha256:965fc69c168a39f2bfd63a683612
 GATEWAY_SECRETS = "    secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password]\n"
 GATEWAY_VOLUME = "      - gatewaystate:/var/lib/ostyr-gateway\n"
 RELAY_VOLUME = "      - relaystate:/var/lib/ostyr-relay\n"
+CH_IMAGE = "    image: clickhouse/clickhouse-server:26.8.46@sha256:%s\n"
+CH_SECRETS = "    secrets: [clickhouse_server_key, clickhouse_server_cert, clickhouse_users]\n"
+CH_VOLUME = "      - chdata:/var/lib/clickhouse\n"
+CHSCHEMA_SECRETS = "    secrets: [pg_ca, clickhouse_schema_password]\n"
+CHSCHEMA_VOLUME = "      - ./config/clickhouse-schema.sql:/etc/ostyr-schema/schema.sql:ro\n"
 RELAY_PORT = '    ports:\n      - "0.0.0.0:7443:7443"\n'
+
+
+SERVICE_SPAN = 400
+DIGEST = "e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9"
+
+
+def replace_in_service(text, marker, old, new):
+    start = text.index(marker)
+    return text[:start] + replace_once(text[start : start + SERVICE_SPAN], old, new) + text[start + SERVICE_SPAN :]
 
 
 def with_platform_ports(replacement):
@@ -75,7 +89,7 @@ MUTANTS = {
     "dollar_default": lambda text: replace_once(text, "ipv4_address: 172.29.63.10\n", "ipv4_address: ${WEB_IP:-172.29.63.10}\n"),
     "esc_secopt": lambda text: replace_once(text, WEB_SECOPT + WEB_COMMAND, '    security_opt: ["\\x24{WEB_SEC:-no-new-privileges:true}"]\n' + WEB_COMMAND),
     "esc_pgcmd": lambda text: replace_once(text, "      - ssl=on\n", '      - "\\x24{PG_SSL:-ssl=on}"\n'),
-    "esc_tmpfs": lambda text: replace_once(text, "      - /tmp\n", '      - "\\x24{TMP_DIR:-/tmp}"\n'),
+    "esc_tmpfs": lambda text: text.replace("      - /tmp\n", '      - "\\x24{TMP_DIR:-/tmp}"\n', 1),
     "env_passthrough": lambda text: replace_once(
         text, "    environment:\n      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password\n", "    environment:\n      - POSTGRES_PASSWORD_FILE\n"
     ),
@@ -136,6 +150,20 @@ MUTANTS = {
     "relay_state_shared": lambda text: replace_once(text, RELAY_VOLUME, "      - gatewaystate:/var/lib/ostyr-relay\n"),
     "relay_root": lambda text: replace_once(text, "    user: 65531:65531\n", "    user: 0:0\n"),
     "relay_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.63.12\n", "ipv4_address: 172.29.63.14\n"),
+    "clickhouse_cap_add": lambda text: replace_once(text, CH_SECRETS, CH_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "clickhouse_publish": lambda text: replace_once(text, CH_SECRETS, CH_SECRETS + '    ports:\n      - "0.0.0.0:8123:8123"\n'),
+    "clickhouse_secret_extra": lambda text: replace_once(text, CH_SECRETS, "    secrets: [clickhouse_server_key, clickhouse_server_cert, clickhouse_users, store_key]\n"),
+    "clickhouse_bind_secrets": lambda text: replace_once(text, CH_VOLUME, CH_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "clickhouse_state_shared": lambda text: replace_once(text, CH_VOLUME, "      - pgdata:/var/lib/clickhouse\n"),
+    "clickhouse_unpinned": lambda text: replace_in_service(text, "  clickhouse:\n", CH_IMAGE % DIGEST, "    image: clickhouse/clickhouse-server:26.8.46\n"),
+    "clickhouse_root": lambda text: replace_once(text, "    user: 101:101\n", "    user: 0:0\n"),
+    "clickhouse_writable": lambda text: replace_in_service(text, "  clickhouse:\n", "    read_only: true\n", ""),
+    "chschema_cap_add": lambda text: replace_once(text, CHSCHEMA_SECRETS, CHSCHEMA_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "chschema_secret_extra": lambda text: replace_once(text, CHSCHEMA_SECRETS, "    secrets: [pg_ca, clickhouse_schema_password, clickhouse_users]\n"),
+    "chschema_bind_secrets": lambda text: replace_once(text, CHSCHEMA_VOLUME, CHSCHEMA_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "chschema_anonymous_volume": lambda text: replace_once(text, "      - /var/lib/clickhouse\n", ""),
+    "chschema_root": lambda text: replace_once(text, "    user: 65530:65530\n", "    user: 0:0\n"),
+    "chschema_image_other": lambda text: replace_in_service(text, "  chschema:\n", CH_IMAGE % DIGEST, CH_IMAGE % ("0" * 64)),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),
 }
 
