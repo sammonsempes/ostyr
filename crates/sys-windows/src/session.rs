@@ -8,11 +8,13 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 use windows::core::BOOL;
 use windows::core::{Owned, HRESULT, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{GetHandleInformation, ERROR_INSUFFICIENT_BUFFER, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::System::Console::{CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation,
@@ -25,14 +27,14 @@ use windows::Win32::System::JobObjects::{
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, OpenProcess, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, STARTUPINFOW,
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
+use windows::Win32::System::IO::CancelIoEx;
 
 
-/// The wait for the shell to end after the job is terminated and the console closed.
+/// The one deadline of a close: job terminated, console released, output drained and the shell ended.
 pub const CLOSE_WAIT_MILLIS: u32 = 10_000;
 
 
@@ -42,6 +44,15 @@ pub const ACTIVE_PROCESS_LIMIT: u32 = 64;
 
 /// The `bInheritHandles` argument of the spawn: never, so the shell holds none of the agent's handles.
 pub const INHERIT_HANDLES: bool = false;
+
+
+const CLOSE_STEPS: usize = 2;
+
+
+const CANCEL_ATTEMPTS: u32 = 50;
+
+
+const CANCEL_POLL_MILLIS: u64 = 20;
 
 
 const KILLED_EXIT_CODE: u32 = 1;
@@ -66,12 +77,14 @@ const UI_RESTRICTIONS: u32 = JOB_OBJECT_UILIMIT_HANDLES.0
     | JOB_OBJECT_UILIMIT_EXITWINDOWS.0;
 
 
-/// One cmd.exe in a pseudo-console inside a kill-on-close job; field order is the drop order.
+#[doc = "One cmd.exe in a pseudo-console inside a kill-on-close job; field order is the drop order. No handle, console, job or pipe end crosses the API and the wrapper is not `Clone`.\n\n```no_run\nuse sys_windows::session::{process_id, read_output, shell_in_job, spawn_session, Session};\nuse sys_windows::types::ConsoleError;\nlet opened: Result<Session, ConsoleError> = spawn_session(1, 1, \"a\");\nif let Ok(session) = opened {\n    let _id: u32 = process_id(&session);\n    let _bytes: Result<Vec<u8>, ConsoleError> = read_output(&session);\n    let _member: Result<bool, ConsoleError> = shell_in_job(&session);\n}\n```\n\n```compile_fail,E0616\nfn job(session: &sys_windows::session::Session) {\n    let _ = &session.job;\n}\n```\n\n```compile_fail,E0616\nfn process(session: &sys_windows::session::Session) {\n    let _ = &session.process;\n}\n```\n\n```compile_fail,E0616\nfn console(session: &sys_windows::session::Session) {\n    let _ = &session.console;\n}\n```\n\n```compile_fail,E0616\nfn input(session: &sys_windows::session::Session) {\n    let _ = &session.input;\n}\n```\n\n```compile_fail,E0616\nfn output(session: &sys_windows::session::Session) {\n    let _ = &session.output;\n}\n```\n\n```compile_fail,E0599\nfn copy(session: &sys_windows::session::Session) -> sys_windows::session::Session {\n    session.clone()\n}\n```\n"]
 pub struct Session {
     state: Mutex<CloseState>,
+    closing: AtomicBool,
+    readers: Arc<AtomicUsize>,
     console: Mutex<Option<Owned<HPCON>>>,
     input: File,
-    output: File,
+    output: Arc<File>,
     process: OwnedHandle,
     job: OwnedHandle,
     process_id: u32,
@@ -81,7 +94,7 @@ pub struct Session {
 struct ConsoleEnds {
     console: Owned<HPCON>,
     input: File,
-    output: File,
+    output: Arc<File>,
 }
 
 
@@ -205,7 +218,7 @@ fn open_console(size: ConsoleSize) -> Result<ConsoleEnds, ConsoleError> {
     Ok(ConsoleEnds {
         console,
         input: File::from(input_write),
-        output: File::from(output_read),
+        output: Arc::new(File::from(output_read)),
     })
 }
 
@@ -370,6 +383,8 @@ pub fn spawn_session_with(columns: u32, rows: u32, label: &str, hook: AssignHook
     join_job(&job, &started, hook).inspect_err(|_| kill_process(&started.process))?;
     Ok(Session {
         state: Mutex::new(CloseState::Open),
+        closing: AtomicBool::new(false),
+        readers: Arc::new(AtomicUsize::new(0)),
         console: Mutex::new(Some(ends.console)),
         input: ends.input,
         output: ends.output,
@@ -386,38 +401,17 @@ pub fn process_id(session: &Session) -> u32 {
 }
 
 
-/// Whether a process with this id exists and has not ended (`OpenProcess` plus a zero wait); a process that cannot be opened counts as gone.
-pub fn process_is_running(process_id: u32) -> bool {
-    // SAFETY: opening by id with SYNCHRONIZE only; a failure is a process that is gone or not ours.
-    let opened = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process_id) };
-    opened
-        .map(|handle| {
-            // SAFETY: the handle was just opened and nothing else owns it.
-            let owned = unsafe { OwnedHandle::from_raw_handle(handle.0) };
-            // SAFETY: the handle is open for the whole call.
-            let waited = unsafe { WaitForSingleObject(raw(&owned), 0) };
-            waited == WAIT_TIMEOUT
-        })
-        .unwrap_or(false)
-}
-
-
-/// Whether this process holds an inheritable pipe handle with this numeric value (a probe only: nothing is read, written or kept).
-pub fn holds_inheritable_pipe(handle_value: usize) -> bool {
-    let handle = HANDLE(std::ptr::with_exposed_provenance_mut::<c_void>(handle_value));
-    let mut flags = 0;
-    // SAFETY: the call only reads the flags of a handle value of this process and writes the out pointer; an invalid value is an error.
-    let queried = unsafe { GetHandleInformation(handle, &mut flags) };
-    // SAFETY: the call only reads the type of a handle value of this process; an invalid value gives the unknown type.
-    let kind = unsafe { GetFileType(handle) };
-    queried.is_ok() && flags & HANDLE_FLAG_INHERIT.0 != 0 && kind == FILE_TYPE_PIPE
-}
-
-
 /// Reads up to `OUTPUT_CHUNK_BYTES` of console output, blocking; an empty result is the end of the output.
 pub fn read_output(session: &Session) -> Result<Vec<u8>, ConsoleError> {
     let mut buffer = vec![0; OUTPUT_CHUNK_BYTES];
-    let count = (&session.output).read(&mut buffer).map_err(|error| io_failure("ReadFile", &error))?;
+    session.readers.fetch_add(1, Ordering::SeqCst);
+    let read = if session.closing.load(Ordering::SeqCst) {
+        Ok(0)
+    } else {
+        (&*session.output).read(&mut buffer)
+    };
+    session.readers.fetch_sub(1, Ordering::SeqCst);
+    let count = read.map_err(|error| io_failure("ReadFile", &error))?;
     buffer.truncate(count);
     Ok(buffer)
 }
@@ -448,41 +442,107 @@ fn terminate_job(session: &Session) -> Result<(), ConsoleError> {
 }
 
 
-fn release_console(session: &Session, console: Option<Owned<HPCON>>) -> Result<(), ConsoleError> {
-    let output = &session.output;
-    std::thread::scope(|scope| {
-        let drain = std::thread::Builder::new().spawn_scoped(scope, || std::io::copy(&mut &*output, &mut std::io::sink()));
-        drop(console);
-        let copied = drain
-            .map_err(|error| io_failure("drain thread", &error))?
-            .join()
-            .map_err(|_| ConsoleError::DrainFailed)?;
-        copied.map(|_| ()).map_err(|error| io_failure("drain", &error))
+fn drain_output(output: &File) -> Result<(), ConsoleError> {
+    std::io::copy(&mut &*output, &mut std::io::sink())
+        .map(|_| ())
+        .map_err(|error| io_failure("drain", &error))
+}
+
+
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+
+fn cancel_pending_read(output: &File) {
+    // SAFETY: the handle belongs to the open output pipe end, which the caller's reference keeps open for the whole call.
+    if let Err(error) = unsafe { CancelIoEx(HANDLE(output.as_raw_handle()), None) } {
+        tracing::debug!(%error, "cancelling the console read found none pending");
+    }
+}
+
+
+fn cancel_pending_reads(session: &Session) {
+    let left = (0..CANCEL_ATTEMPTS).find_map(|_| {
+        cancel_pending_read(&session.output);
+        std::thread::sleep(Duration::from_millis(CANCEL_POLL_MILLIS));
+        (session.readers.load(Ordering::SeqCst) == 0).then_some(())
+    });
+    if left.is_none() {
+        tracing::warn!("a console read outlived the cancellation attempts of the close");
+    }
+}
+
+
+fn release_console(session: &Session, console: Option<Owned<HPCON>>, deadline: Instant) -> Result<(), ConsoleError> {
+    let (sender, receiver) = channel();
+    let drain_sender = sender.clone();
+    let output = Arc::clone(&session.output);
+    let readers = Arc::clone(&session.readers);
+    readers.fetch_add(1, Ordering::SeqCst);
+    std::thread::Builder::new()
+        .name("pty-drain".into())
+        .spawn(move || {
+            let drained = drain_output(&output);
+            readers.fetch_sub(1, Ordering::SeqCst);
+            if let Err(error) = drain_sender.send(drained) {
+                tracing::debug!(%error, "the close stopped waiting for the output drain");
+            }
+        })
+        .map_err(|error| {
+            session.readers.fetch_sub(1, Ordering::SeqCst);
+            io_failure("drain thread", &error)
+        })?;
+    std::thread::Builder::new()
+        .name("pty-close".into())
+        .spawn(move || {
+            drop(console);
+            if let Err(error) = sender.send(Ok(())) {
+                tracing::debug!(%error, "the close stopped waiting for the console release");
+            }
+        })
+        .map_err(|error| io_failure("console thread", &error))?;
+    let results: Vec<_> = (0..CLOSE_STEPS).map(|_| receiver.recv_timeout(remaining(deadline))).collect();
+    if results.iter().any(Result::is_err) {
+        cancel_pending_reads(session);
+    }
+    results.into_iter().try_for_each(|result| {
+        result
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => ConsoleError::CloseTimeout { millis: CLOSE_WAIT_MILLIS },
+                RecvTimeoutError::Disconnected => ConsoleError::DrainFailed,
+            })
+            .and_then(std::convert::identity)
     })
 }
 
 
-fn wait_process(session: &Session) -> Result<(), ConsoleError> {
+fn wait_process(session: &Session, deadline: Instant) -> Result<(), ConsoleError> {
+    let millis = u32::try_from(remaining(deadline).as_millis()).unwrap_or(CLOSE_WAIT_MILLIS);
     // SAFETY: the process handle is open for the life of the session.
-    let waited = unsafe { WaitForSingleObject(raw(&session.process), CLOSE_WAIT_MILLIS) };
+    let waited = unsafe { WaitForSingleObject(raw(&session.process), millis) };
     if waited == WAIT_OBJECT_0 {
         Ok(())
-    } else {
+    } else if waited == WAIT_TIMEOUT {
         Err(ConsoleError::CloseTimeout { millis: CLOSE_WAIT_MILLIS })
+    } else {
+        Err(windows_error("WaitForSingleObject", &windows::core::Error::from_thread()))
     }
 }
 
 
 fn run_close(session: &Session) -> Result<(), ConsoleError> {
+    let deadline = Instant::now() + Duration::from_millis(u64::from(CLOSE_WAIT_MILLIS));
+    session.closing.store(true, Ordering::SeqCst);
     let terminated = terminate_job(session);
     let console = lock(&session.console).take();
-    let released = release_console(session, console);
-    let waited = wait_process(session);
+    let released = release_console(session, console, deadline);
+    let waited = wait_process(session, deadline);
     terminated.and(released).and(waited)
 }
 
 
-/// Terminates the job, closes the console while the output drains, waits `CLOSE_WAIT_MILLIS` for the shell; every step runs, the first error returns.
+/// Terminates the job, closes the console while the output drains, all within one `CLOSE_WAIT_MILLIS` deadline (`CloseTimeout` past it, the pending read cancelled); every step runs, the first error returns.
 pub fn close_console(session: &Session) -> Result<(), ConsoleError> {
     begin_close(&mut lock(&session.state))?;
     run_close(session)

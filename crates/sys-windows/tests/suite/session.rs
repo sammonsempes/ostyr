@@ -8,9 +8,10 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 use sys_windows::console::{session_environment, INPUT_CHUNK_BYTES};
 use sys_windows::session::{
-    close_console, holds_inheritable_pipe, job_limits, process_id, process_is_running, read_output, resize_console, shell_in_job, spawn_session,
-    spawn_session_with, write_input, Session, ACTIVE_PROCESS_LIMIT, INHERIT_HANDLES,
+    close_console, job_limits, process_id, read_output, resize_console, shell_in_job, spawn_session, spawn_session_with, write_input, Session,
+    ACTIVE_PROCESS_LIMIT, INHERIT_HANDLES,
 };
+use sys_windows::test_probes::{holds_inheritable_pipe, process_is_running};
 use sys_windows::types::ConsoleError;
 
 
