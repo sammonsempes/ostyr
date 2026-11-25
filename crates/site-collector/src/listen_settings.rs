@@ -2,10 +2,11 @@ use crate::admission::validate_config;
 use crate::error::ListenError;
 use crate::flow::validate_flow_limits;
 use crate::forward_model::MAX_FORWARD_BATCH_RECORDS;
-use crate::listen_model::{Bound, ListenerSettings, SharedSocket, MAX_TENANT_BYTES, READ_TIMEOUT_MS, SETTINGS_SECTION};
+use crate::listen_model::{Bound, ListenerSettings, SharedSocket, READ_TIMEOUT_MS, SETTINGS_SECTION};
 use crate::model::{BucketLimits, CollectorConfig};
 use crate::types::SourceKeySet;
 use arc_swap::ArcSwap;
+use core_audit::tenant::is_customer_tenant;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
@@ -55,10 +56,7 @@ pub fn parse_listen(text: &str) -> Result<SocketAddr, ListenError> {
 
 /// The socket address when the whole snapshot is acceptable: a tenant, valid limits, a parsable address.
 pub fn validate_settings(settings: &ListenerSettings) -> Result<SocketAddr, ListenError> {
-    (1..=MAX_TENANT_BYTES)
-        .contains(&settings.tenant.len())
-        .then_some(())
-        .ok_or(ListenError::BadTenant)?;
+    is_customer_tenant(&settings.tenant).then_some(()).ok_or(ListenError::BadTenant)?;
     (1..=MAX_FORWARD_BATCH_RECORDS)
         .contains(&settings.forward_batch_records)
         .then_some(())

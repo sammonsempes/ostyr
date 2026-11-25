@@ -3,6 +3,7 @@ mod types;
 
 
 use core_audit::log::{append, open_file_log};
+use core_audit::tenant::{AUDIT_TENANT, MAX_TENANT_BYTES, PLATFORM_TENANT};
 use core_config::reload::{open_engine, reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use site_collector::admission::{collector_config, source_counters, tracked_sources, untracked_dropped};
 use site_collector::error::ListenError;
@@ -13,7 +14,7 @@ use site_collector::listen::{
 };
 use site_collector::listen_model::{
     ListenerKind, ListenerSettings, Runtime, SharedSocket, DEFAULT_BURST, DEFAULT_FORWARD_BATCH_RECORDS, DEFAULT_MAX_SOURCES,
-    DEFAULT_RATE_PER_SECOND, DEFAULT_SOURCE_SHARE_PERCENT, MAX_TENANT_BYTES, PRUNE_INTERVAL_MS,
+    DEFAULT_RATE_PER_SECOND, DEFAULT_SOURCE_SHARE_PERCENT, PRUNE_INTERVAL_MS,
 };
 use site_collector::listen_settings::{
     bind_socket, collector_config_of, open_listener_engine, parse_listen, rebind, settings_loader, settings_state, source_key, validate_settings,
@@ -185,6 +186,15 @@ fn validation_refuses_bad_settings() -> TestResult {
         ..settings()
     };
     assert!(matches!(validate_settings(&long_tenant), Err(ListenError::BadTenant)));
+    ["-x", "PLATFORM", "a b", AUDIT_TENANT, PLATFORM_TENANT].iter().try_for_each(|name| {
+        let refused = ListenerSettings {
+            tenant: (*name).to_owned(),
+            ..settings()
+        };
+        matches!(validate_settings(&refused), Err(ListenError::BadTenant))
+            .then_some(())
+            .ok_or(*name)
+    })?;
     let no_rate = ListenerSettings {
         rate_per_second: 0,
         ..settings()

@@ -12,6 +12,7 @@ use crate::store::{Param, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE};
 use crate::tick::Hooks;
 use crate::types::{InterruptWait, SleepFuture};
 use core_audit::log::{append_declared, open_file_log, AuditLog};
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::load::load_file;
 use core_config::reload::{current_config, ReloadContext, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
@@ -35,9 +36,6 @@ const USAGE: &str = "usage: ostyr-hunt <hunt.yaml>";
 
 
 const WORKER_THREADS: usize = 2;
-
-
-pub const AUDIT_TENANT: &str = "all";
 
 
 const UNBOUNDED_ROUNDS: u64 = u64::MAX;

@@ -1,5 +1,6 @@
 use crate::model::Limits;
 use crate::settings::{validate_limits, validated_statement, MetricsSettings, SettingsError};
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -116,7 +117,7 @@ pub fn limits_state(limits: &Limits) -> ConfigState {
 pub fn context_for(path: &Path, section: &str) -> ReloadContext {
     ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant: "all".to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: format!("{} {section}", path.display()),
         request_id: RELOAD_REQUEST_ID.to_owned(),

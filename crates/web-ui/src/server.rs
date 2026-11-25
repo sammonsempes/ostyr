@@ -10,6 +10,7 @@ use core_api::model::Limits;
 use core_api::server::{bind_socket, check_transport, serve_socket};
 use core_api::types::{ConnectionTable, ServerHandle};
 use core_audit::log::{append_declared, open_file_log};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_auth::random::os_random;
 use core_config::reload::{ReloadContext, ReloadEngine, Subscriber, RELOAD_DECLARED_KEYS};
 use core_config::types::{BoxError, SharedAuditFn};
@@ -28,9 +29,6 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 
 pub const RELOAD_ACTOR: &str = "web-ui";
-
-
-pub const RELOAD_TENANT: &str = "platform";
 
 
 pub const RELOAD_REQUEST_ID: &str = "reload";
@@ -121,7 +119,7 @@ pub fn audit_into(path: &Path) -> Result<Box<SharedAuditFn>, WebError> {
 pub fn reload_context(settings_file: &Path) -> ReloadContext {
     ReloadContext {
         actor_id: RELOAD_ACTOR.to_owned(),
-        tenant: RELOAD_TENANT.to_owned(),
+        tenant: PLATFORM_TENANT.to_owned(),
         module: RELOAD_ACTOR.to_owned(),
         target: settings_file.display().to_string(),
         request_id: RELOAD_REQUEST_ID.to_owned(),

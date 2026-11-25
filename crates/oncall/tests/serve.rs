@@ -591,7 +591,7 @@ async fn a_row_future_is_passed_through_and_a_deadline_is_noted() -> TestResult 
 fn the_purge_entry_names_the_tenants_the_rows_and_a_bounded_detail() -> TestResult {
     let entry = purge_entry(&counts());
     assert_eq!(entry.action, "oncall.outbox.purge");
-    assert_eq!(entry.tenant, "all");
+    assert_eq!(entry.tenant, core_audit::tenant::AUDIT_TENANT);
     assert_eq!(entry.parameters.get("rows").map(String::as_str), Some("7"));
     assert_eq!(entry.parameters.get("tenants").map(String::as_str), Some("2"));
     assert_eq!(entry.parameters.get("detail").map(String::as_str), Some("beta=3,gamma=4"));

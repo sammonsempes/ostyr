@@ -28,9 +28,6 @@ pub const DEFAULT_MAX_SOURCES: usize = 4096;
 pub const DEFAULT_FORWARD_BATCH_RECORDS: usize = 500;
 
 
-pub const MAX_TENANT_BYTES: usize = 128;
-
-
 pub const READ_TIMEOUT_MS: u64 = 200;
 
 
