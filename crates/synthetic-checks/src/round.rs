@@ -5,7 +5,9 @@ use crate::decision::should_alert;
 use crate::error::CheckError;
 use crate::load::{count_within, runner_location_ok};
 use crate::model::{failure_run_len, Check, LocationHistory, MAX_CHECKS, MAX_LOCATION_LEN};
-use crate::types::{Clock, Probe, Stopped, Store, WallClock};
+use crate::types::{Clock, Probe, Refusal, Stopped, Store, WallClock};
+use alerts::error::StoreError;
+use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -91,6 +93,7 @@ pub struct RoundContext<'a> {
     pub clock: &'a Clock<'a>,
     pub wall: &'a WallClock<'a>,
     pub probe: &'a Probe<'a>,
+    pub refused: &'a Refusal<'a>,
     pub store: &'a Store<'a>,
     pub stopped: &'a Stopped<'a>,
 }
@@ -232,6 +235,7 @@ pub fn probe_state(state: &mut CheckState, tenant: &str, location: &str, ctx: &R
         location: location.to_owned(),
         results: state.ring.clone(),
     };
+    let refused = !succeeded && (ctx.refused)(&state.check);
     let alerting = !succeeded && !state.raised && should_alert(&state.check, &[history]);
     state.run_started.filter(|_started| alerting).map(|since| Outage {
         tenant: tenant.to_owned(),
@@ -239,6 +243,7 @@ pub fn probe_state(state: &mut CheckState, tenant: &str, location: &str, ctx: &R
         kind: state.check.kind,
         failing_locations: vec![location.to_owned()],
         since,
+        refused,
     })
 }
 
@@ -304,6 +309,19 @@ pub fn mark_raised(runner: &mut Runner, stored: Vec<Outage>) {
 }
 
 
+/// A fixed word for a store failure: never the error text, which can hold server or peer bytes.
+pub fn store_failure_category(failure: &StoreError) -> &'static str {
+    match failure {
+        StoreError::Pg(PgError::ConnectTimeout { .. }) => "connect_timeout",
+        StoreError::Pg(PgError::StatementTimeout { .. } | PgError::ClientDeadline { .. }) => "statement_timeout",
+        StoreError::Pg(PgError::Server { class, .. }) => class,
+        StoreError::Pg(PgError::Tls(_) | PgError::Handshake(_)) => "tls",
+        StoreError::Pg(_) => "pg_other",
+        _ => "store_other",
+    }
+}
+
+
 /// Stores the pending outages through the injected store: `Ok` raises and clears them, an error keeps them for the next round. Answers (new rows, failed).
 pub fn flush_pending(runner: &mut Runner, ctx: &RoundContext) -> (usize, bool) {
     let now = (ctx.wall)();
@@ -320,9 +338,10 @@ pub fn flush_pending(runner: &mut Runner, ctx: &RoundContext) -> (usize, bool) {
     let answer = (!runner.pending.is_empty()).then(|| (ctx.store)(&alerts));
     match answer {
         None => (0, false),
-        Some(Err(_refused)) => {
+        Some(Err(failure)) => {
             runner.counters.store_failures += 1;
-            tracing::warn!("outage alerts not stored, kept for the next round");
+            let category = store_failure_category(&failure);
+            tracing::warn!(category, "outage alerts not stored, kept for the next round");
             (0, true)
         }
         Some(Ok(inserted)) => {
@@ -379,7 +398,7 @@ pub fn run_round(runner: &mut Runner, ctx: &RoundContext) -> RoundReport {
     let deferred = due.len().saturating_sub(probed);
     runner.counters.deferred += deferred as u64;
     let overdue_seconds = largest_overdue.as_secs();
-    tracing::info!(probed, deferred, overdue_seconds, never_run, "round done");
+    tracing::debug!(probed, deferred, overdue_seconds, never_run, "round done");
     RoundReport {
         due: due.len(),
         probed,

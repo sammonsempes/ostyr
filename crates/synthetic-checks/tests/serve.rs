@@ -28,11 +28,12 @@ use synthetic_checks::error::ProbeError;
 use synthetic_checks::load::load_checks;
 use synthetic_checks::model::Check;
 use synthetic_checks::probe::{FetchCaps, HttpRequest, HttpResponse};
-use synthetic_checks::round::{new_runner, reload_checks};
+use synthetic_checks::round::{new_runner, reload_checks, RoundReport};
 use synthetic_checks::serve::{
-    apply_live, boxed_reload_audit, failure_label, finish_code, live_state, load_service, open_live, pause, probe_check, run_probe, run_service,
-    seconds_since_epoch, serve_rounds, start_with, stop_on_signals, store_alerts, system_resolve, validate_service, Finish, LiveConfig, ProbeTools,
-    RunControl, ServiceSettings, FAILURE_EXIT_CODE, PAUSE_SLICE, ROUND_CAP_EXIT_CODE,
+    apply_live, boxed_reload_audit, explicit_port, failure_label, finish_code, last_refused, literal_target, live_state, load_service, log_round,
+    open_live, pause, probe_check, run_probe, run_service, seconds_since_epoch, serve_rounds, skip_refused_literals, start_with, stop_on_signals,
+    store_alerts, system_resolve, validate_service, Applied, Finish, LiveConfig, ProbeTools, Refusals, RunControl, ServiceSettings,
+    FAILURE_EXIT_CODE, IDLE_SUMMARY_ROUNDS, PAUSE_SLICE, ROUND_CAP_EXIT_CODE,
 };
 use tempfile::tempdir;
 use types::TestResult;
@@ -260,6 +261,7 @@ fn live_of(dir: &Path, yaml: &str) -> Result<LiveConfig, Box<dyn std::error::Err
         checks: load_checks(&file)?,
         roots: vec![vec![1]],
         generation: 1,
+        skipped: 0,
     })
 }
 
@@ -374,18 +376,20 @@ fn probe_check_counts_refusals_and_logs_no_target() -> TestResult {
     let live = live_of(dir.path(), &one_check("tcp", &format!("{SECRET_HOST}:80")))?;
     let check = live.checks.checks.first().ok_or("no check")?.clone();
     let fake = net(vec![IpAddr::V4(Ipv4Addr::new(PRIVATE_OCTET, 1, SECOND, THIRD))]);
-    let refused = AtomicU64::new(0);
+    let refused = Refusals::default();
     let clock = AtomicU64::new(0);
     let verdict = with_tools(&fake, &clock, |tools| probe_check(&check, &live, tools, &refused));
     assert!(!verdict);
-    assert_eq!(refused.load(Ordering::SeqCst), 1);
+    assert_eq!(refused.total.load(Ordering::SeqCst), 1);
+    assert!(last_refused(&refused, &check));
     let ok_live = live_of(dir.path(), &one_check("tcp", "127.0.0.1:80"))?;
     let ok_check: &Check = ok_live.checks.checks.first().ok_or("no check")?;
     assert!(with_tools(&fake, &clock, |tools| probe_check(ok_check, &ok_live, tools, &refused)));
+    assert!(!last_refused(&refused, &check));
     let http_live = live_of(dir.path(), &one_check("http", "http://127.0.0.1:8080/"))?;
     let http_check = http_live.checks.checks.first().ok_or("no check")?;
     assert!(with_tools(&fake, &clock, |tools| probe_check(http_check, &http_live, tools, &refused)));
-    assert_eq!(refused.load(Ordering::SeqCst), 1);
+    assert_eq!(refused.total.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -419,7 +423,7 @@ fn a_status_that_is_not_a_success_fails_without_an_error() -> TestResult {
         handshake: &handshake,
         clock: &clock,
     };
-    assert!(!probe_check(&check, &live, &tools, &AtomicU64::new(0)));
+    assert!(!probe_check(&check, &live, &tools, &Refusals::default()));
     assert_eq!(calls.get(), 1);
     assert_eq!(failure_label(&ProbeError::NoAddress), "failed");
     Ok(())
@@ -440,15 +444,23 @@ fn a_duplicate_name_in_a_new_generation_is_logged_and_keeps_the_old_checks() -> 
     let live = live_of(dir.path(), &one_check("tcp", "127.0.0.1:80"))?;
     let scope = tenant_scope("acme")?;
     let mut runner = new_runner(&scope, "paris")?;
-    assert_eq!(apply_live(&mut runner, &live, 0), 1);
+    let first_state = apply_live(&mut runner, &live, Applied::default());
+    assert_eq!(first_state, Applied { applied: 1, refused: 0 });
     assert_eq!(runner.states.len(), 1);
     let mut twice = live.clone();
     twice.generation = SECOND_GENERATION;
     let first = twice.checks.checks.first().ok_or("no check")?.clone();
     twice.checks.checks.push(first);
-    assert_eq!(apply_live(&mut runner, &twice, 1), SECOND_GENERATION);
+    let refused_state = apply_live(&mut runner, &twice, first_state);
+    assert_eq!(
+        refused_state,
+        Applied {
+            applied: 1,
+            refused: SECOND_GENERATION
+        }
+    );
     assert_eq!(runner.states.len(), 1);
-    assert_eq!(apply_live(&mut runner, &twice, SECOND_GENERATION), SECOND_GENERATION);
+    assert_eq!(apply_live(&mut runner, &twice, refused_state), refused_state);
     reload_checks(&mut runner, &live.checks.checks)?;
     Ok(())
 }
@@ -862,13 +874,16 @@ async fn a_served_round_alerts_once_for_the_refused_target_then_exits_on_sigint(
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let site = site(dir.path(), &served_checks(&listener)?, 0).await?;
     let mut running = spawn_service(&site.settings_file)?;
+    let named = wait_for(&mut running.reader, "check skipped")?;
+    assert!(named.contains("check_name=\"outside\""), "{named}");
     wait_for(&mut running.reader, SERVING_MARKER)?;
     let round = wait_for(&mut running.reader, ROUND_MARKER)?;
-    assert!(round.contains("probed=3"), "{round}");
+    assert!(round.contains("probed=2"), "{round}");
     signal(&running.child, "-INT")?;
     let rest = finish(&mut running)?;
     assert!(!rest.contains("10.255.255.1") && !round.contains("10.255.255.1"));
-    assert_eq!(site.inserts.load(Ordering::SeqCst), 1);
+    assert!(!rest.contains("check skipped"), "{rest}");
+    assert_eq!(site.inserts.load(Ordering::SeqCst), 0);
     drop(site.fake);
     Ok(())
 }
@@ -932,5 +947,125 @@ async fn a_failing_migration_fails_the_start() -> TestResult {
     let output = tokio::task::block_in_place(|| run_to_end(&[&settings_file]))?;
     assert_eq!(output.status.code(), Some(i32::from(FAILURE_EXIT_CODE)));
     assert!(!output.stderr.is_empty());
+    Ok(())
+}
+
+
+const MAX_STATEMENTS: usize = 1000;
+
+
+const SKIPPED_LITERALS: usize = 5;
+
+
+const PORT_EIGHTY: u16 = 80;
+
+
+const PORT_EIGHTY_ONE: u16 = 81;
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_resolving_outside_the_scope_alerts_with_the_refusal_reason() -> TestResult {
+    let dir = tempdir()?;
+    let checks = "scope: [10.0.0.0/8]\nchecks:\n  - name: lo\n    kind: tcp\n    target: localhost:9\n    interval_seconds: 10\n    consecutive_failures: 1\n    locations: [paris]\n";
+    let mut site = site(dir.path(), checks, 0).await?;
+    let mut running = spawn_service(&site.settings_file)?;
+    let round = wait_for(&mut running.reader, ROUND_MARKER)?;
+    assert!(round.contains("probed=1"), "{round}");
+    signal(&running.child, "-INT")?;
+    let rest = finish(&mut running)?;
+    assert!(!rest.contains("check skipped"), "{rest}");
+    let statements: Vec<String> = (0..MAX_STATEMENTS).map_while(|_i| site.fake.statements.try_recv().ok()).collect();
+    assert_eq!(site.inserts.load(Ordering::SeqCst), 1);
+    assert!(
+        statements.iter().any(|statement| statement.contains("refused_by_scope")),
+        "{statements:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn only_a_literal_target_outside_the_scope_is_skipped_at_load() -> TestResult {
+    let dir = tempdir()?;
+    let yaml = "scope: [127.0.0.0/8]\nchecks:\n".to_owned()
+        + &[
+            ("http-out", "http", "http://10.255.255.1/"),
+            ("http-in", "http", "http://127.0.0.1/"),
+            ("http-name", "http", "http://peer.test/"),
+            ("tcp-out", "tcp", "[fd00::1]:9"),
+            ("tcp-in", "tcp", "127.0.0.1:9"),
+            ("tls-out", "tls", "10.255.255.1"),
+            ("icmp-out", "icmp", "10.255.255.1"),
+            ("icmp6-out", "icmp", "fd00::2"),
+            ("icmp-in", "icmp", "127.0.0.1"),
+            ("icmp-name", "icmp", "peer.test"),
+            ("dns-name", "dns", "10.255.255.1"),
+        ]
+        .iter()
+        .map(|(name, kind, target)| {
+            format!("  - name: {name}\n    kind: {kind}\n    target: \"{target}\"\n    interval_seconds: 10\n    locations: [paris]\n")
+        })
+        .collect::<String>();
+    let live = live_of(dir.path(), &yaml)?;
+    let total = live.checks.checks.len();
+    let (kept, skipped) = skip_refused_literals(live.checks.clone());
+    let names: Vec<&str> = kept.checks.iter().map(|check| check.name.as_str()).collect();
+    assert_eq!(skipped, SKIPPED_LITERALS, "{names:?}");
+    assert_eq!(kept.checks.len() + skipped, total);
+    assert_eq!(names, ["http-in", "http-name", "tcp-in", "icmp-in", "icmp-name", "dns-name"]);
+    let unparsable = Check {
+        target: "bad host:80".to_owned(),
+        ..live.checks.checks.first().ok_or("no check")?.clone()
+    };
+    assert_eq!(literal_target(&unparsable), None);
+    let mut state_source = live.clone();
+    state_source.skipped = skipped;
+    assert_eq!(live_state(&state_source).get("checks_skipped").map(String::as_str), Some("5"));
+    Ok(())
+}
+
+
+#[test]
+fn the_tcp_port_comes_from_the_url_that_gave_the_host() -> TestResult {
+    let port_of = |target: &str| -> Result<Option<u16>, Box<dyn std::error::Error>> {
+        let url = url::Url::parse(&format!("https://{target}"))?;
+        Ok(explicit_port(&url, target))
+    };
+    assert_eq!(port_of("peer.test:81")?, Some(PORT_EIGHTY_ONE));
+    assert_eq!(port_of("peer.test:443")?, Some(TLS_DEFAULT_PORT));
+    assert_eq!(port_of("peer.test:80")?, Some(PORT_EIGHTY));
+    assert_eq!(port_of("peer.test")?, None);
+    assert_eq!(port_of("peer.test:80#@10.0.0.1:81")?, Some(PORT_EIGHTY));
+    Ok(())
+}
+
+
+#[test]
+fn a_timed_out_transport_or_lookup_is_labelled_timeout() -> TestResult {
+    let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
+    assert_eq!(failure_label(&ProbeError::Transport(timed_out())), "timeout");
+    assert_eq!(failure_label(&ProbeError::Resolve(timed_out())), "timeout");
+    assert_eq!(failure_label(&ProbeError::Transport(io::Error::from(io::ErrorKind::Other))), "failed");
+    Ok(())
+}
+
+
+#[test]
+fn idle_rounds_are_counted_and_summarised_not_logged_each() -> TestResult {
+    let quiet = RoundReport {
+        due: 0,
+        probed: 0,
+        deferred: 0,
+        largest_overdue: Duration::ZERO,
+        never_run: 0,
+        stored: 0,
+        store_failed: false,
+        pending: 0,
+        pending_dropped: 0,
+    };
+    let busy = RoundReport { probed: 1, ..quiet };
+    assert_eq!(log_round(&quiet, 0, 0), 1);
+    assert_eq!(log_round(&quiet, 0, IDLE_SUMMARY_ROUNDS - 1), IDLE_SUMMARY_ROUNDS);
+    assert_eq!(log_round(&busy, 0, IDLE_SUMMARY_ROUNDS), 0);
     Ok(())
 }

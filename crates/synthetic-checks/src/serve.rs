@@ -9,6 +9,7 @@ use crate::probe::{
     ProbeOutcome, MAX_REDIRECTS, MAX_RESPONSE_BYTES, UNPARSEABLE_TARGET,
 };
 use crate::round::{new_runner, reload_checks, run_round, RoundContext, RoundReport, Runner};
+use crate::target::guard_address_nat64;
 use crate::types::{Clock, Connect, Handshake, Ping, Resolve, RootedFetch, Sleep, StartRead, StopSource};
 use alerts::error::StoreError;
 use alerts::model::Alert;
@@ -28,6 +29,7 @@ use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
 use metric_alerts::token::shown;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
@@ -39,7 +41,10 @@ use std::time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH};
 use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
 use tokio_postgres::Client;
-use tracing::{info, warn};
+use tracing::{info, warn, Dispatch};
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use tracing_subscriber::prelude::*;
 use url::{Host, Url};
 
 
@@ -73,6 +78,16 @@ pub const PAUSE_SLICE: Duration = Duration::from_millis(100);
 pub const URL_SCHEME: &str = "https";
 
 
+pub const FALLBACK_URL_SCHEME: &str = "http";
+
+
+/// Resolver crates log the probed name and the answer text at ERROR for any DNS owner; the service logs none of their targets.
+pub const SILENCED_TARGETS: [&str; 3] = ["hickory_resolver", "hickory_proto", "hickory_net"];
+
+
+pub const IDLE_SUMMARY_ROUNDS: u64 = 60;
+
+
 /// Every field is read at start only: a reload that changes one is refused whole; the checks file's contents are the live part.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +107,23 @@ pub struct LiveConfig {
     pub checks: CheckFile,
     pub roots: Vec<Vec<u8>>,
     pub generation: u64,
+    pub skipped: usize,
+}
+
+
+/// The refusals of the probes: the total, and the names whose last probe was refused by the scope guard.
+#[derive(Default)]
+pub struct Refusals {
+    pub total: AtomicU64,
+    pub last: Mutex<BTreeSet<String>>,
+}
+
+
+/// The generation applied to the runner and the newest generation the runner refused (logged once).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Applied {
+    pub applied: u64,
+    pub refused: u64,
 }
 
 
@@ -186,6 +218,7 @@ pub fn live_state(live: &LiveConfig) -> ConfigState {
         ("checks_generation", live.generation.to_string()),
         ("checks", live.checks.checks.len().to_string()),
         ("scope_entries", live.checks.scope.len().to_string()),
+        ("checks_skipped", live.skipped.to_string()),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
@@ -216,7 +249,7 @@ pub fn live_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn<Liv
                 "tenant, location, checks_file, pg_settings and audit_file are read at start only, restart the service to change them",
             ))
         } else {
-            let checks = load_checks(&settings.checks_file)?;
+            let (checks, skipped) = skip_refused_literals(load_checks(&settings.checks_file)?);
             let roots =
                 crate::http::load_roots(checks.ca_file.as_deref()).map_err(|_refused| setting_error("ca_file", "cannot be read within the caps"))?;
             let generation = next_generation(&memory, &checks);
@@ -225,9 +258,52 @@ pub fn live_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn<Liv
                 checks,
                 roots,
                 generation,
+                skipped,
             })
         }
     })
+}
+
+
+/// The IP literal a check's static target names, parsed as the probe parses it; a DNS check and a host name have none.
+pub fn literal_target(check: &Check) -> Option<IpAddr> {
+    let host = match check.kind {
+        CheckKind::Http => Url::parse(&check.target).ok().and_then(|url| url.host().map(|found| found.to_owned())),
+        CheckKind::Tcp | CheckKind::Tls => Url::parse(&format!("{URL_SCHEME}://{}", check.target))
+            .ok()
+            .and_then(|url| url.host().map(|found| found.to_owned())),
+        CheckKind::Icmp => check.target.parse::<IpAddr>().ok().map(|address| match address {
+            IpAddr::V4(v4) => Host::Ipv4(v4),
+            IpAddr::V6(v6) => Host::Ipv6(v6),
+        }),
+        CheckKind::Dns => None,
+    };
+    match host {
+        Some(Host::Ipv4(address)) => Some(IpAddr::V4(address)),
+        Some(Host::Ipv6(address)) => Some(IpAddr::V6(address)),
+        _ => None,
+    }
+}
+
+
+/// A static literal target outside the scope is a configuration error: the check is dropped, named once per load and counted, never probed or alerted.
+pub fn skip_refused_literals(mut file: CheckFile) -> (CheckFile, usize) {
+    let before = file.checks.len();
+    let scope = file.scope.clone();
+    file.checks.retain(|check| {
+        let refused = literal_target(check).is_some_and(|address| guard_address_nat64(address, &scope, check.nat64_prefix).is_err());
+        if refused {
+            let shown_name = shown(&check.name);
+            let check_name = shown_name.as_str();
+            warn!(check_name, "check skipped: literal target out of scope");
+        }
+        !refused
+    });
+    let skipped = before - file.checks.len();
+    if skipped > 0 {
+        warn!(skipped, "checks skipped at load: literal targets outside the declared scope");
+    }
+    (file, skipped)
 }
 
 
@@ -255,6 +331,7 @@ pub fn failure_label(failure: &ProbeError) -> &'static str {
     match failure {
         ProbeError::Refused(_) => "refused",
         ProbeError::Timeout { .. } => "timeout",
+        ProbeError::Transport(source) | ProbeError::Resolve(source) if source.kind() == std::io::ErrorKind::TimedOut => "timeout",
         _ => "failed",
     }
 }
@@ -267,12 +344,22 @@ pub fn bad_target() -> ProbeError {
 }
 
 
+/// The port written in a `host:port` target, from the URL parse that gave the host: `https` hides `:443` and `http` hides `:80`, so both are read and a port neither shows is absent.
+pub fn explicit_port(url: &Url, target: &str) -> Option<u16> {
+    url.port().or_else(|| {
+        Url::parse(&format!("{FALLBACK_URL_SCHEME}://{target}"))
+            .ok()
+            .and_then(|other| other.port())
+    })
+}
+
+
 /// The guarded address of a `host:port` target of a TCP or TLS check, parsed as an `https` authority so IP literals are real IPs; TLS defaults to 443, TCP needs its port.
 pub fn endpoint(check: &Check, live: &LiveConfig, tools: &ProbeTools) -> Result<Endpoint, ProbeError> {
     let url = Url::parse(&format!("{URL_SCHEME}://{}", check.target)).map_err(|_refused| bad_target())?;
     let host = url.host().ok_or_else(bad_target)?;
     let port = match check.kind {
-        CheckKind::Tcp => check.target.rsplit_once(':').and_then(|(_host, text)| text.parse::<u16>().ok()),
+        CheckKind::Tcp => explicit_port(&url, &check.target),
         _ => url.port_or_known_default(),
     }
     .ok_or_else(bad_target)?;
@@ -334,19 +421,20 @@ pub fn run_probe(check: &Check, live: &LiveConfig, tools: &ProbeTools) -> Result
 
 
 /// The runner's `Probe`: success is the probe's own verdict; a failure is logged with the shown check name and a fixed reason, never the target.
-pub fn probe_check(check: &Check, live: &LiveConfig, tools: &ProbeTools, refused: &AtomicU64) -> bool {
+pub fn probe_check(check: &Check, live: &LiveConfig, tools: &ProbeTools, refusals: &Refusals) -> bool {
     let name = shown(&check.name);
     let check_name = name.as_str();
     match run_probe(check, live, tools) {
         Ok(done) => {
+            note_refusal(refusals, check, false);
             if !done.succeeded {
                 info!(check_name, "probe did not succeed");
             }
             done.succeeded
         }
         Err(failure) => {
-            refused.fetch_add(u64::from(matches!(failure, ProbeError::Refused(_))), Ordering::Relaxed);
             let reason = failure_label(&failure);
+            note_refusal(refusals, check, reason == "refused");
             info!(check_name, reason, "probe failed");
             false
         }
@@ -354,15 +442,43 @@ pub fn probe_check(check: &Check, live: &LiveConfig, tools: &ProbeTools, refused
 }
 
 
-/// Applies a new checks generation to the runner once; a refused reload is logged once and the old checks stay.
-pub fn apply_live(runner: &mut Runner, live: &LiveConfig, applied: u64) -> u64 {
-    if live.generation != applied {
-        if let Err(refusal) = reload_checks(runner, &live.checks.checks) {
-            let reason = refusal.to_string();
-            warn!(reason, "checks reload refused, old checks kept");
+/// Records whether the check's last probe was refused by the scope guard, and counts the refusals.
+pub fn note_refusal(refusals: &Refusals, check: &Check, refused: bool) {
+    refusals.total.fetch_add(u64::from(refused), Ordering::Relaxed);
+    let mut held = refusals.last.lock().unwrap_or_else(PoisonError::into_inner);
+    if refused {
+        held.insert(check.name.clone());
+    } else {
+        held.remove(&check.name);
+    }
+}
+
+
+pub fn last_refused(refusals: &Refusals, check: &Check) -> bool {
+    refusals.last.lock().unwrap_or_else(PoisonError::into_inner).contains(&check.name)
+}
+
+
+/// Applies a new checks generation to the runner once; a refused one is logged once, the old checks stay and `applied` does not move.
+pub fn apply_live(runner: &mut Runner, live: &LiveConfig, state: Applied) -> Applied {
+    if live.generation == state.applied || live.generation == state.refused {
+        state
+    } else {
+        match reload_checks(runner, &live.checks.checks) {
+            Ok(_report) => Applied {
+                applied: live.generation,
+                ..state
+            },
+            Err(refusal) => {
+                let reason = refusal.to_string();
+                warn!(reason, "checks reload refused, old checks kept");
+                Applied {
+                    refused: live.generation,
+                    ..state
+                }
+            }
         }
     }
-    live.generation
 }
 
 
@@ -420,9 +536,19 @@ pub fn pause(control: &RunControl, total: Duration) {
 }
 
 
-pub fn log_round(report: &RoundReport, refused_total: u64) {
+/// One `round` line for a round that did something; idle rounds are only counted, with one summary line every `IDLE_SUMMARY_ROUNDS`. Answers the idle count.
+pub fn log_round(report: &RoundReport, refused_total: u64, idle: u64) -> u64 {
     let (probed, deferred, stored, pending, dropped) = (report.probed, report.deferred, report.stored, report.pending, report.pending_dropped);
-    info!(probed, deferred, stored, pending, dropped, refused_total, "round");
+    if probed + deferred + stored + pending + dropped == 0 {
+        let counted = idle + 1;
+        if counted.is_multiple_of(IDLE_SUMMARY_ROUNDS) {
+            info!(counted, "idle rounds: no check was due");
+        }
+        counted
+    } else {
+        info!(probed, deferred, stored, pending, dropped, refused_total, idle, "round");
+        0
+    }
 }
 
 
@@ -435,24 +561,27 @@ pub fn serve_rounds(
     tools: &ProbeTools,
     control: &RunControl,
 ) -> Finish {
-    let refused = AtomicU64::new(0);
-    let mut applied = 0;
+    let refusals = Refusals::default();
+    let mut applied = Applied::default();
+    let mut idle = 0;
     let limit = control.rounds.min(MAX_ROUNDS);
     (0..limit).take_while(|_round| !control.stop.load(Ordering::Relaxed)).for_each(|_round| {
         let live = current_config(engine);
         applied = apply_live(runner, &live, applied);
-        let probe = |check: &Check| probe_check(check, &live, tools, &refused);
+        let probe = |check: &Check| probe_check(check, &live, tools, &refusals);
+        let refused = |check: &Check| last_refused(&refusals, check);
         let stopped = || control.stop.load(Ordering::Relaxed);
         let context = RoundContext {
             scope,
             clock: tools.clock,
             wall: &wall_seconds,
             probe: &probe,
+            refused: &refused,
             store,
             stopped: &stopped,
         };
         let report = run_round(runner, &context);
-        log_round(&report, refused.load(Ordering::Relaxed));
+        idle = log_round(&report, refusals.total.load(Ordering::Relaxed), idle);
         pause(control, ROUND_PAUSE);
     });
     if control.stop.load(Ordering::Relaxed) {
@@ -503,12 +632,34 @@ pub fn stop_on_signals() -> std::io::Result<Arc<AtomicBool>> {
 }
 
 
+/// INFO and above for the service, nothing from the resolver crates.
+pub fn log_filter() -> Targets {
+    SILENCED_TARGETS
+        .iter()
+        .fold(Targets::new().with_default(LevelFilter::INFO), |targets, target| {
+            targets.with_target(*target, LevelFilter::OFF)
+        })
+}
+
+
+pub fn log_dispatch(writer: BoxMakeWriter) -> Dispatch {
+    Dispatch::new(
+        tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_filter(log_filter()),
+        ),
+    )
+}
+
+
 pub fn run_service(arguments: &[String], stop_source: StopSource) -> Result<Finish, Box<dyn Error>> {
     let settings_file = match arguments {
         [file] => Ok(file),
         _ => Err(USAGE),
     }?;
-    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(std::io::stderr).with_ansi(false).finish())?;
+    tracing::dispatcher::set_global_default(log_dispatch(BoxMakeWriter::new(std::io::stderr)))?;
     let stop = stop_source()?;
     start(Path::new(settings_file), MAX_ROUNDS, &stop, &std::thread::sleep)
 }

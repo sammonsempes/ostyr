@@ -6,7 +6,7 @@ use alerts::error::StoreError;
 use alerts::model::Alert;
 use alerts::types::RowFuture;
 use core_config::parse::parse_document;
-use core_pg::error::PgError;
+use core_pg::error::{PgError, TlsClass};
 use core_pg::scope::{tenant_scope, TenantScope};
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
@@ -18,7 +18,8 @@ use synthetic_checks::alerting::store_outage_alerts;
 use synthetic_checks::load::{text_ok, validate_check};
 use synthetic_checks::model::{Check, CheckFile, CheckKind, FailureRun, RawCheck, MAX_CHECKS};
 use synthetic_checks::round::{
-    new_runner, placement_of, reload_checks, run_round, Placement, RoundContext, RoundReport, Runner, MAX_PENDING_OUTAGES, MAX_PROBES_PER_ROUND,
+    new_runner, placement_of, reload_checks, run_round, store_failure_category, Placement, RoundContext, RoundReport, Runner, MAX_PENDING_OUTAGES,
+    MAX_PROBES_PER_ROUND,
 };
 use types::TestResult;
 
@@ -78,6 +79,7 @@ pub struct Harness {
     pub mono: Cell<u64>,
     pub wall: Cell<u64>,
     pub failing: RefCell<BTreeSet<String>>,
+    pub refused: RefCell<BTreeSet<String>>,
     pub probed: RefCell<Vec<String>>,
     pub stored: RefCell<Vec<Vec<Alert>>>,
     pub mode: Cell<StoreMode>,
@@ -91,6 +93,7 @@ pub fn harness() -> Harness {
         mono: Cell::new(STEP),
         wall: Cell::new(WALL_START),
         failing: RefCell::new(BTreeSet::new()),
+        refused: RefCell::new(BTreeSet::new()),
         probed: RefCell::new(Vec::new()),
         stored: RefCell::new(Vec::new()),
         mode: Cell::new(StoreMode::Accept),
@@ -170,6 +173,7 @@ pub fn round(harness: &Harness, runner: &mut Runner, scope: &TenantScope) -> Rou
         harness.probed.borrow_mut().push(check.name.clone());
         !harness.failing.borrow().contains(&check.name)
     };
+    let refused = |check: &Check| harness.refused.borrow().contains(&check.name);
     let store = |alerts: &[Alert]| match harness.mode.get() {
         StoreMode::Fail => Err(StoreError::TenantMismatch),
         StoreMode::AlreadyThere => Ok(0),
@@ -188,6 +192,7 @@ pub fn round(harness: &Harness, runner: &mut Runner, scope: &TenantScope) -> Rou
         clock: &clock,
         wall: &wall,
         probe: &probe,
+        refused: &refused,
         store: &store,
         stopped: &stopped,
     };
@@ -698,5 +703,46 @@ fn more_than_the_maximum_checks_are_refused_by_the_reload() -> TestResult {
     let mut runner = new_runner(&scope, "paris")?;
     assert!(reload_checks(&mut runner, &many).is_err());
     assert!(runner.states.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_run_refused_by_the_scope_alerts_with_its_own_reason() -> TestResult {
+    let (mut runner, scope) = prepared(&["web", "db"])?;
+    let harness = harness();
+    fail(&harness, &["web", "db"]);
+    harness.refused.borrow_mut().insert("web".to_owned());
+    rounds(&harness, &mut runner, &scope, FIVE);
+    let stored = harness.stored.borrow();
+    let summaries: Vec<(String, String)> = stored
+        .iter()
+        .flatten()
+        .filter_map(|alert| alert.event_ids.first().map(|check| (check.clone(), alert.summary.text.clone())))
+        .collect();
+    assert_eq!(summaries.len(), TWO);
+    let web = summaries.iter().find(|(check, _text)| check == "check:web").ok_or("no web alert")?;
+    let db = summaries.iter().find(|(check, _text)| check == "check:db").ok_or("no db alert")?;
+    assert!(web.1.contains("\"reason\":\"refused_by_scope\""), "{}", web.1);
+    assert!(db.1.contains("\"reason\":\"check_failed\""), "{}", db.1);
+    Ok(())
+}
+
+
+#[test]
+fn a_store_failure_is_logged_under_a_fixed_category() -> TestResult {
+    let category = |failure: StoreError| store_failure_category(&failure);
+    assert_eq!(category(StoreError::Pg(PgError::ConnectTimeout { seconds: 1 })), "connect_timeout");
+    assert_eq!(category(StoreError::Pg(PgError::StatementTimeout { seconds: 1 })), "statement_timeout");
+    assert_eq!(category(StoreError::Pg(PgError::ClientDeadline { seconds: 1 })), "statement_timeout");
+    let server = PgError::Server {
+        code: "23505".to_owned(),
+        class: "integrity",
+    };
+    assert_eq!(category(StoreError::Pg(server)), "integrity");
+    assert_eq!(category(StoreError::Pg(PgError::Tls(rustls::Error::HandshakeNotComplete))), "tls");
+    assert_eq!(category(StoreError::Pg(PgError::Handshake(TlsClass::Alert))), "tls");
+    assert_eq!(category(StoreError::Pg(PgError::InvalidTenant)), "pg_other");
+    assert_eq!(category(StoreError::Busy), "store_other");
     Ok(())
 }

@@ -33,6 +33,10 @@ pub type Ping<'a> = dyn Fn(IpAddr, Duration) -> io::Result<()> + 'a;
 pub type Probe<'a> = dyn Fn(&Check) -> bool + 'a;
 
 
+/// True when the last failure of the named check was a refusal by the scope guard.
+pub type Refusal<'a> = dyn Fn(&Check) -> bool + 'a;
+
+
 /// Wall-clock seconds since the epoch.
 pub type WallClock<'a> = dyn Fn() -> u64 + 'a;
 
