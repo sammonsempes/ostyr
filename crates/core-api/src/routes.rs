@@ -7,7 +7,7 @@ use crate::oidc::{callback_endpoint, start_endpoint};
 use crate::state::{auth_context, auth_inputs, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
@@ -134,6 +134,7 @@ pub fn build_router(state: SharedState, extra: Router<SharedState>) -> Router {
         .route("/auth/oidc/start", get(start_endpoint))
         .route("/auth/oidc/callback", get(callback_endpoint))
         .merge(extra)
+        .layer(DefaultBodyLimit::disable())
         .layer(from_fn_with_state(state.clone(), body_deadline))
         .layer(from_fn_with_state(state.clone(), guard))
         .layer(from_fn_with_state(state.clone(), limit))

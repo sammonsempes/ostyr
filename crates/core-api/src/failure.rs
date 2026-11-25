@@ -1,8 +1,13 @@
 use crate::model::{ApiError, ErrorBody, ErrorDetail};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{AppendHeaders, IntoResponse, Response};
 use axum::Json;
 use core_auth::error::{AuthError, OidcDenial};
+
+
+/// `Retry-After` of a refused sender decode: one second.
+pub const SENDER_RETRY_SECONDS: &str = "1";
 
 
 pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str) {
@@ -22,6 +27,12 @@ pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str)
         ApiError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "the request body is too large"),
         ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", "too many requests, retry later"),
         ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy", "the server is busy, retry later"),
+        ApiError::UnsupportedMediaType => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "the content type or encoding is not supported",
+        ),
+        ApiError::SenderBusy => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", "too many requests, retry later"),
         ApiError::BadGateway => (StatusCode::BAD_GATEWAY, "bad_gateway", "the identity provider is unavailable"),
         ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "the request could not be processed"),
     }
@@ -36,7 +47,8 @@ pub fn error_response(error: &ApiError) -> Response {
             message: message.to_owned(),
         },
     };
-    (status, Json(body)).into_response()
+    let retry = matches!(error, ApiError::SenderBusy).then_some((RETRY_AFTER, HeaderValue::from_static(SENDER_RETRY_SECONDS)));
+    (status, AppendHeaders(retry), Json(body)).into_response()
 }
 
 

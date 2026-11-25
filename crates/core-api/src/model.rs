@@ -1,8 +1,8 @@
 use crate::error::StartupError;
 use crate::server::stop_listener;
 use crate::types::{
-    AccessTable, ConnectionTable, KeyedLimiter, ServerHandle, SharedHttpFn, SharedLimits, SharedListener, SharedResolveFn, VerifyPasswordFn,
-    WatchGuard,
+    AccessTable, ConnectionTable, KeyedLimiter, SenderPermit, SenderSlots, SenderTable, ServerHandle, SharedHttpFn, SharedLimits, SharedListener,
+    SharedResolveFn, VerifyPasswordFn, WatchGuard,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::http::StatusCode;
@@ -69,6 +69,10 @@ pub struct ApiState {
     pub detached_reads: DetachedPool,
     pub detached_read_sources: ConnectionTable,
     pub detached_reads_refused: AtomicU64,
+    pub senders: ArcSwap<SenderTable>,
+    pub sender_slots: SenderSlots,
+    pub sender_pool: DetachedPool,
+    pub sender_refused: AtomicU64,
 }
 
 
@@ -175,6 +179,35 @@ impl Drop for ConnectionGuard {
 }
 
 
+/// One decode slot of a sender, released when dropped.
+#[derive(Debug)]
+pub struct SenderSlot {
+    pub table: SenderSlots,
+    pub name: String,
+}
+
+
+impl Drop for SenderSlot {
+    fn drop(&mut self) {
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        let remaining = table.get(&self.name).copied().unwrap_or(0).saturating_sub(1);
+        if remaining == 0 {
+            table.remove(&self.name);
+        } else {
+            table.insert(self.name.clone(), remaining);
+        }
+    }
+}
+
+
+/// Request extension of an admitted sender route: the sender name and its slots, which a handler clones into the blocking task that decodes.
+#[derive(Debug, Clone)]
+pub struct AdmittedSender {
+    pub name: String,
+    pub permit: Arc<SenderPermit>,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsFiles {
     pub certificate: PathBuf,
@@ -234,6 +267,8 @@ pub enum Requirement {
     Public,
     Session,
     Permission(String),
+    /// A non-session ingest sender: a bearer token digest from the sender table, a protobuf body of at most this many bytes.
+    Sender(usize),
 }
 
 
@@ -269,6 +304,8 @@ pub enum ApiError {
     TooManyRequests,
     BadGateway,
     Busy,
+    UnsupportedMediaType,
+    SenderBusy,
     Internal,
 }
 
