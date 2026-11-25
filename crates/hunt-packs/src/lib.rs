@@ -13,6 +13,7 @@ pub mod model;
 pub mod packs;
 pub mod run;
 pub mod schedule;
+pub mod serve;
 pub mod service;
 pub mod settings;
 pub mod store;

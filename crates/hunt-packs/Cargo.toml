@@ -10,6 +10,7 @@ axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 core-api = { version = "0.0.0", path = "../core-api" }
 core-auth = { version = "0.0.0", path = "../core-auth" }
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
@@ -19,9 +20,11 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "sync"] }
+time = "0.3"
+tokio = { version = "1", features = ["macros", "sync", "rt-multi-thread", "signal", "time"] }
 tokio-postgres = "0.7"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 unicode-general-category = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 utoipa = { version = "5", features = ["axum_extras"] }
@@ -31,7 +34,6 @@ rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
 alerts = { version = "0.0.0", path = "../alerts" }
-core-audit = { version = "0.0.0", path = "../core-audit" }
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 serde_json = "1"
