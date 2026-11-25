@@ -20,6 +20,8 @@ pub enum ConfigError {
     NotUtf8 { file: String, valid_up_to: usize },
     #[error("watched file `{file}` refused: {reason}")]
     WatchedFile { file: String, reason: String },
+    #[error("{file}: module `tenant` refused: {reason}")]
+    Tenant { file: String, reason: &'static str },
     #[error("{file}:{line}:{column}: at `{field_path}`: {message}")]
     Parse {
         file: String,

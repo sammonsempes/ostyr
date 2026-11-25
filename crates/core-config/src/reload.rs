@@ -1,5 +1,5 @@
 use crate::error::{ConfigError, ReloadRefusal};
-use crate::load::{load_layered, load_module};
+use crate::load::{load_module, load_module_for_tenant};
 use crate::model::ModuleConfig;
 use crate::plan::{plan, Change};
 use crate::types::{ApplySectionFn, ConfigState, LoaderFn, Plan, SharedAuditFn, StateFn, ValidateFn};
@@ -171,7 +171,7 @@ pub fn module_loader(path: PathBuf) -> Box<LoaderFn<ModuleConfig>> {
 
 
 pub fn layered_loader(base: PathBuf, tenant: PathBuf) -> Box<LoaderFn<ModuleConfig>> {
-    Box::new(move || load_layered(&base, &tenant))
+    Box::new(move || load_module_for_tenant(&base, &tenant))
 }
 
 
