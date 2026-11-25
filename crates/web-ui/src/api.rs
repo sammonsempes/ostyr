@@ -2,8 +2,8 @@ use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, AttackBodyScan, AttackListView,
     AttackReportView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery, FindingsView, GrcBodyScan, GrcListView,
-    GrcReportView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView,
-    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    GrcReportView, GroupListView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView, RiskDetailView,
+    RiskListView, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -27,7 +27,7 @@ use url::form_urlencoded::{byte_serialize, Serializer};
 pub const MAX_BODY_BYTES: usize = 1_048_576;
 
 
-pub const MAX_BODY_READS: usize = 4096;
+pub const MAX_BODY_READS: usize = 32_768;
 
 
 pub const MAX_ITEMS: usize = 100;
@@ -180,12 +180,12 @@ pub fn classify(status: StatusCode) -> Result<(), ApiFailure> {
 }
 
 
-/// Reads at most `MAX_BODY_BYTES` in at most `MAX_BODY_READS` chunks; anything longer is refused, never cut.
-pub async fn read_capped(mut response: Response) -> Result<Vec<u8>, ApiFailure> {
+/// Reads at most `limit` bytes in at most `MAX_BODY_READS` chunks (sized for `GROUPS_BODY_LIMIT`); anything longer is refused, never cut.
+pub async fn read_capped(mut response: Response, limit: usize) -> Result<Vec<u8>, ApiFailure> {
     let mut body = Vec::new();
     let mut finished = false;
     let mut reads = usize::MIN;
-    while !finished && reads < MAX_BODY_READS && body.len() <= MAX_BODY_BYTES {
+    while !finished && reads < MAX_BODY_READS && body.len() <= limit {
         let chunk = response.chunk().await.map_err(unavailable)?;
         finished = chunk.is_none();
         chunk.iter().for_each(|piece| body.extend_from_slice(piece));
@@ -235,6 +235,23 @@ pub async fn call(
 }
 
 
+/// `call` with a body cap of its own, for a route whose worst-case reply is above `MAX_BODY_BYTES`.
+pub async fn call_limited(client: &ApiClient, source: IpAddr, path: &str, token: &SecretString, limit: usize) -> Result<Vec<u8>, ApiFailure> {
+    let window = CallWindow {
+        until: Instant::now() + client.deadline,
+        limit,
+    };
+    call_window(client, &window, source, Method::GET, path, Some(token), None).await
+}
+
+
+/// The shared deadline of one operation and the most bytes one reply may hold.
+pub struct CallWindow {
+    pub until: Instant,
+    pub limit: usize,
+}
+
+
 /// `call` against an instant computed once by the caller, so several waits of one operation share one deadline.
 pub async fn call_until(
     client: &ApiClient,
@@ -245,6 +262,26 @@ pub async fn call_until(
     token: Option<&SecretString>,
     body: Option<String>,
 ) -> Result<Vec<u8>, ApiFailure> {
+    let window = CallWindow {
+        until,
+        limit: MAX_BODY_BYTES,
+    };
+    call_window(client, &window, source, method, path, token, body).await
+}
+
+
+/// `call_until` with the reply cap of the window.
+pub async fn call_window(
+    client: &ApiClient,
+    window: &CallWindow,
+    source: IpAddr,
+    method: Method,
+    path: &str,
+    token: Option<&SecretString>,
+    body: Option<String>,
+) -> Result<Vec<u8>, ApiFailure> {
+    let until = window.until;
+    let limit = window.limit;
     let _permit = acquire(&client.permits, until).await?;
     let mut request = client
         .http
@@ -257,11 +294,11 @@ pub async fn call_until(
         .fold(request, |pending, text| pending.header(CONTENT_TYPE, JSON_TYPE).body(text));
     let response = request.send().await.map_err(unavailable)?;
     match response.status() {
-        StatusCode::CONFLICT => Err(conflict_failure(&read_capped(response).await?)),
-        StatusCode::UNPROCESSABLE_ENTITY => Err(unreadable_failure(&read_capped(response).await?)),
+        StatusCode::CONFLICT => Err(conflict_failure(&read_capped(response, limit).await?)),
+        StatusCode::UNPROCESSABLE_ENTITY => Err(unreadable_failure(&read_capped(response, limit).await?)),
         status => {
             classify(status)?;
-            read_capped(response).await
+            read_capped(response, limit).await
         }
     }
 }
@@ -1086,6 +1123,89 @@ pub async fn list_findings(client: &ApiClient, source: IpAddr, token: &SecretStr
     scan_hunt_list(&bytes)?;
     let list: FindingsView = serde_json::from_slice(&bytes)?;
     check_hunt_list(&list).map(|()| list)
+}
+
+
+/// The grouping route's `MAX_GROUPS`.
+pub const MAX_GROUPS: usize = 1_000;
+
+
+/// The grouping route's `MAX_ALERTS_PER_GROUP`.
+pub const MAX_GROUP_IDS: usize = 50;
+
+
+pub const GROUPS_PATH: &str = "alert-groups";
+
+
+#[derive(Deserialize)]
+pub struct GroupsScan<'a> {
+    #[serde(borrow)]
+    pub groups: Vec<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct GroupIdsScan<'a> {
+    #[serde(borrow)]
+    pub alert_ids: Vec<&'a RawValue>,
+}
+
+
+/// Counts the groups, then the ids of each, on raw slices before any typed value is built.
+pub fn scan_groups(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: GroupsScan = serde_json::from_slice(bytes)?;
+    if scan.groups.len() > MAX_GROUPS {
+        Err(ApiFailure::Malformed("too many groups"))
+    } else {
+        scan.groups.iter().try_for_each(|group| {
+            let ids: GroupIdsScan = serde_json::from_str(group.get())?;
+            if ids.alert_ids.len() > MAX_GROUP_IDS {
+                Err(ApiFailure::Malformed("too many alert ids"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+
+/// The alerts store's `MAX_ENTITY_CHARS`: host and user names.
+pub const GROUPS_ENTITY_CHARS: usize = 256;
+
+
+/// The alerts store's `MAX_RULE_ID_CHARS`.
+pub const GROUPS_RULE_CHARS: usize = 128;
+
+
+/// The longest JSON form of one stored character: ESC is written as six bytes.
+pub const GROUPS_JSON_BYTES_PER_CHAR: usize = 6;
+
+
+/// An alert id between quotes, then a comma.
+pub const GROUPS_ID_BYTES: usize = 67;
+
+
+/// The fixed keys, the two counts, the two times, the severity and the flags of one group, with a wide margin.
+pub const GROUPS_FIXED_BYTES: usize = 512;
+
+
+/// One worst-case group: rule, host and user at their caps in the longest JSON form, the representative and `MAX_GROUP_IDS` ids.
+pub const GROUPS_WORST_GROUP_BYTES: usize =
+    GROUPS_JSON_BYTES_PER_CHAR * (GROUPS_RULE_CHARS + 2 * GROUPS_ENTITY_CHARS) + GROUPS_ID_BYTES * (MAX_GROUP_IDS + 1) + GROUPS_FIXED_BYTES;
+
+
+/// The envelope: `complete`, `alerts_read` and `oldest_read`, with a wide margin.
+pub const GROUPS_HEADER_BYTES: usize = 1_024;
+
+
+/// The reply cap of the groups route: `MAX_GROUPS` worst-case groups, derived, never typed (about 7.4 MiB).
+pub const GROUPS_BODY_LIMIT: usize = GROUPS_HEADER_BYTES + MAX_GROUPS * GROUPS_WORST_GROUP_BYTES;
+
+
+pub async fn list_groups(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<GroupListView, ApiFailure> {
+    let bytes = call_limited(client, source, GROUPS_PATH, token, GROUPS_BODY_LIMIT).await?;
+    scan_groups(&bytes)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 

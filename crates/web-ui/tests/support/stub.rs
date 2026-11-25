@@ -32,7 +32,7 @@ pub const FIRST_CURSOR: &str = "abc_-=";
 pub const OVERSIZE_BYTES: usize = 1_100_000;
 
 
-pub const CHUNK_COUNT: usize = 5000;
+pub const CHUNK_COUNT: usize = 40_000;
 
 
 pub const MANY_ITEMS: usize = 101;
@@ -107,6 +107,8 @@ pub struct StubState {
     pub triage: Mutex<Option<Value>>,
     pub linked: Mutex<Vec<String>>,
     pub link_paths: Mutex<Vec<String>>,
+    pub groups_reply: Mutex<Option<Value>>,
+    pub group_paths: Mutex<Vec<String>>,
     pub links_reply: Mutex<Option<Value>>,
     pub links_fault: Mutex<Option<StatusCode>>,
     pub observables: Mutex<Vec<Value>>,
@@ -1117,6 +1119,55 @@ pub fn hunt_hostile_list() -> Value {
 }
 
 
+pub const GROUP_ALERTS: u64 = 3;
+
+
+pub const GROUP_ALERTS_READ: u64 = 42;
+
+
+pub fn group_json(rule: &str, representative: &str) -> Value {
+    json!({
+        "rule_id": rule,
+        "host_name": "web01",
+        "user_name": null,
+        "representative": representative,
+        "alert_ids": [representative],
+        "omitted": false,
+        "alert_count": GROUP_ALERTS,
+        "duplicates": 1,
+        "first_time": "2026-03-01T00:00:00Z",
+        "last_time": "2026-03-01T00:05:00Z",
+        "max_severity": "high",
+        "cut_at_older": false
+    })
+}
+
+
+pub fn group_list_json(groups: Vec<Value>, complete: bool) -> Value {
+    json!({"groups": groups, "complete": complete, "alerts_read": GROUP_ALERTS_READ, "oldest_read": "2026-02-28T00:00:00Z"})
+}
+
+
+pub async fn group_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.group_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    let forged = state.groups_reply.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if authorised(&headers) {
+        match (mode_of(&state), forged) {
+            (Mode::Status(status), _) => error_reply(status),
+            (_, Some(reply)) => Json(reply).into_response(),
+            _ => Json(group_list_json(
+                vec![group_json("rule-a", &id_of('a')), group_json("rule-b", &id_of('b'))],
+                true,
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub async fn hunt_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
     note_forwarded(&state, &headers);
     state.hunt_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
@@ -1848,6 +1899,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         triage: Mutex::new(None),
         linked: Mutex::new(Vec::new()),
         link_paths: Mutex::new(Vec::new()),
+        groups_reply: Mutex::new(None),
+        group_paths: Mutex::new(Vec::new()),
         links_reply: Mutex::new(None),
         links_fault: Mutex::new(None),
         observables: Mutex::new(Vec::new()),
@@ -1866,6 +1919,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/risk/entities/{kind}/{id}", get(risk_detail_handler))
         .route("/certificates", get(cert_list_handler))
         .route("/certificates/{fingerprint}", get(cert_detail_handler))
+        .route("/alert-groups", get(group_list_handler))
         .route("/hunts/findings", get(hunt_list_handler))
         .route("/compliance/state", get(state_list_handler))
         .route("/compliance/assets/{asset}", get(state_asset_handler))
