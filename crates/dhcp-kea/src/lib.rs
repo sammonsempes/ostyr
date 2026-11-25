@@ -11,4 +11,5 @@ pub mod follow;
 pub mod header;
 pub mod history;
 pub mod row;
+pub mod serve;
 pub mod types;

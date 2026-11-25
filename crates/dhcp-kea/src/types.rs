@@ -33,3 +33,9 @@ pub type AtLookupFn = Arc<dyn Fn(TenantScope, String, i64) -> LookupFuture + Sen
 
 
 pub type MacLookupFn = Arc<dyn Fn(TenantScope, String, i64, i64) -> LookupFuture + Send + Sync>;
+
+
+pub type InterruptWait = Pin<Box<dyn Future<Output = std::io::Result<()>>>>;
+
+
+pub type WaitFn = fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>;
