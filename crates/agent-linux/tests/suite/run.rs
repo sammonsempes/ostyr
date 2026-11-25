@@ -4,7 +4,7 @@ use agent_channel::types::{PauseFn, PauseFuture};
 use agent_linux::app::{run_linux, run_linux_with, source_paths};
 use agent_linux::cursor::write_cursor;
 use agent_linux::error::{SensorError, SourceError};
-use agent_linux::exec_probe::EXEC_PROBE_JOIN_POLL_MILLIS;
+use agent_linux::exec_probe::{EXEC_PROBE_JOIN_POLL_MILLIS, THREAD_NAME};
 use agent_linux::model::{Cursor, LinuxFile, Report, SourceSettings, Totals, DEFAULT_POLL_MILLIS};
 use agent_linux::run::{run_source, tally};
 use agent_linux::types::RunFuture;
@@ -289,10 +289,10 @@ async fn a_group_writable_spool_directory_ends_the_start_before_any_spool_file_e
 }
 
 
-const STOP_SPINS: u32 = 60_000;
+const STOP_SPINS: u32 = 4_000_000;
 
 
-const JOIN_SLEEP_MILLIS: u64 = 10;
+const FINISH_YIELDS: u32 = 20_000;
 
 
 const WAIT_ATTEMPTS: u32 = 100_000;
@@ -307,14 +307,26 @@ fn probe_until_stopped(
     attached();
     (0..STOP_SPINS)
         .take_while(|_| !stop.load(Ordering::Relaxed))
-        .for_each(|_| std::thread::sleep(Duration::from_millis(1)));
+        .for_each(|_| std::thread::yield_now());
     Ok(0)
+}
+
+
+fn probe_thread_alive() -> bool {
+    fs::read_dir("/proc/self/task").is_ok_and(|tasks| {
+        tasks
+            .flatten()
+            .any(|task| fs::read_to_string(task.path().join("comm")).is_ok_and(|name| name.trim_end() == THREAD_NAME))
+    })
 }
 
 
 fn joining_pause(delay: Duration) -> PauseFuture {
     if delay == Duration::from_millis(EXEC_PROBE_JOIN_POLL_MILLIS) {
-        std::thread::sleep(Duration::from_millis(JOIN_SLEEP_MILLIS));
+        (0..STOP_SPINS)
+            .take_while(|_| probe_thread_alive())
+            .for_each(|_| std::thread::yield_now());
+        (0..FINISH_YIELDS).for_each(|_| std::thread::yield_now());
         Box::pin(async {})
     } else {
         Box::pin(tokio::task::yield_now())
@@ -341,24 +353,38 @@ async fn wait_for_text(path: PathBuf, needle: &str) -> bool {
 }
 
 
-#[tokio::test]
-async fn a_producer_failing_after_the_probe_started_still_unloads_it_before_the_agent_ends() -> TestResult {
+#[test]
+fn a_producer_failing_after_the_probe_started_still_unloads_it_before_the_agent_ends() -> TestResult {
     let _log = scoped_logging();
     let dir = tempdir()?;
     let config = write_files(dir.path())?;
     enable_exec_probe(&config)?;
     fs::write(dir.path().join("cursor"), "garbage")?;
-    let ended = run_linux_with(
+    let audit_path = dir.path().join("linux-audit");
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()?;
+    let run = run_linux_with(
         &config,
         u64::MAX,
         &joining_pause,
         no_systemctl,
         probe_until_stopped,
         std::future::pending(),
-    )
-    .await;
+    );
+    let holder = async {
+        let blocker = tokio::task::spawn_blocking(move || held.recv());
+        wait_for_text(audit_path.clone(), "exec_probe.load").await;
+        release.send(())?;
+        blocker.await??;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (ended, held_result) = runtime.block_on(async { tokio::join!(run, holder) });
+    held_result?;
     assert!(matches!(ended, Err(SourceError::Cursor(_))));
-    let audit = fs::read_to_string(dir.path().join("linux-audit"))?;
+    let audit = fs::read_to_string(&audit_path)?;
     assert_eq!(audit.matches("exec_probe.unload").count(), 1, "{audit}");
     assert!(audit.contains("unloaded") && !audit.contains("unload_unknown"), "{audit}");
     Ok(())
