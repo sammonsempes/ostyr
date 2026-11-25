@@ -32,7 +32,7 @@ pub const FIRST_CURSOR: &str = "abc_-=";
 pub const OVERSIZE_BYTES: usize = 1_100_000;
 
 
-pub const CHUNK_COUNT: usize = 5000;
+pub const CHUNK_COUNT: usize = 40_000;
 
 
 pub const MANY_ITEMS: usize = 101;

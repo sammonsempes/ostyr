@@ -4,7 +4,7 @@ use crate::stub::{group_json, group_list_json, id_of, Mode};
 use crate::types::{TestError, TestResult};
 use axum::http::StatusCode;
 use serde_json::{json, Value};
-use web_ui::api::{scan_groups, MAX_GROUPS, MAX_GROUP_IDS};
+use web_ui::api::{scan_groups, GROUPS_BODY_LIMIT, GROUPS_ENTITY_CHARS, GROUPS_RULE_CHARS, MAX_BODY_BYTES, MAX_GROUPS, MAX_GROUP_IDS};
 
 
 const HOSTILE_RULE: &str = "<script>x</script>&\"\u{1b}\u{202e}";
@@ -19,7 +19,10 @@ const GROUP_ROWS: usize = 2;
 const BIG_HOST_CHARS: usize = 65_536;
 
 
-const HUGE_RULE_CHARS: usize = 2_097_152;
+const OVER_CAP_RULE_CHARS: usize = 8_388_608;
+
+
+const ESC: char = '\u{1b}';
 
 
 fn set(target: &mut Value, key: &str, value: Value) -> TestResult {
@@ -170,12 +173,10 @@ async fn an_out_of_bound_or_malformed_reply_is_a_bad_gateway_page() -> TestResul
     set(&mut crowded, "alert_ids", json!(vec![id_of('a'); MAX_GROUP_IDS + 1]))?;
     let mut wrong_type = group_json("r", &id_of('a'));
     set(&mut wrong_type, "alert_count", json!("many"))?;
-    let huge = group_json(&"x".repeat(HUGE_RULE_CHARS), &id_of('a'));
     for reply in [
         group_list_json(many, true),
         group_list_json(vec![crowded], true),
         group_list_json(vec![wrong_type], true),
-        group_list_json(vec![huge], true),
         json!({"groups": 1}),
     ] {
         set_groups(&rig, Some(reply))?;
@@ -195,5 +196,45 @@ fn the_pre_scan_accepts_the_bounds_exactly() -> TestResult {
     set(&mut widest, "alert_ids", json!(vec![id_of('a'); MAX_GROUP_IDS]))?;
     scan_groups(group_list_json(vec![widest], true).to_string().as_bytes())?;
     assert!(scan_groups(b"not json").is_err());
+    Ok(())
+}
+
+
+fn worst_case_group() -> Result<Value, TestError> {
+    let mut group = group_json(&ESC.to_string().repeat(GROUPS_RULE_CHARS), &id_of('a'));
+    set(&mut group, "host_name", json!(ESC.to_string().repeat(GROUPS_ENTITY_CHARS)))?;
+    set(&mut group, "user_name", json!(ESC.to_string().repeat(GROUPS_ENTITY_CHARS)))?;
+    set(&mut group, "alert_ids", json!(vec![id_of('a'); MAX_GROUP_IDS]))?;
+    Ok(group)
+}
+
+
+#[test]
+fn the_worst_case_reply_fits_the_groups_cap_and_the_old_cap_does_not() -> TestResult {
+    let group = worst_case_group()?;
+    let reply = group_list_json((0..MAX_GROUPS).map(|_| group.clone()).collect(), false).to_string();
+    assert!(reply.len() <= GROUPS_BODY_LIMIT, "{} > {GROUPS_BODY_LIMIT}", reply.len());
+    assert!(reply.len() > MAX_BODY_BYTES);
+    scan_groups(reply.as_bytes())?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_worst_case_reply_renders_and_a_reply_over_the_cap_is_the_named_page() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let group = worst_case_group()?;
+    set_groups(&rig, Some(group_list_json((0..MAX_GROUPS).map(|_| group.clone()).collect(), true)))?;
+    let shown = fire(&rig, get_with("/alert-groups", &session)).await?;
+    assert_eq!(shown.status, StatusCode::OK);
+    assert_hardened(&shown);
+    let huge = group_json(&"x".repeat(OVER_CAP_RULE_CHARS), &id_of('a'));
+    set_groups(&rig, Some(group_list_json(vec![huge], true)))?;
+    let page = fire(&rig, get_with("/alert-groups", &session)).await?;
+    assert_eq!(page.status, StatusCode::BAD_GATEWAY);
+    assert_hardened(&page);
+    assert!(page.body.contains("The alert groups are too large to show."));
+    assert!(!page.body.contains("The service is not available"));
     Ok(())
 }

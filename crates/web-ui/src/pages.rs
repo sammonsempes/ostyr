@@ -2133,6 +2133,18 @@ pub fn posture_row(language: Language, finding: &PostureFindingView) -> Markup {
 }
 
 
+pub fn groups_too_large_page(language: Language, csrf: &str) -> Markup {
+    layout(
+        language,
+        "title_groups",
+        Some(csrf),
+        html! {
+            div class="notice" { (text(language, "groups_too_large")) }
+        },
+    )
+}
+
+
 pub fn posture_head(language: Language) -> Markup {
     html! {
         thead {

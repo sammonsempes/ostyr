@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 432;
+pub const TEXT_COUNT: usize = 433;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -382,6 +382,7 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("posture_sev_fatal", "Fatal"),
     ("posture_sev_other", "Other"),
     ("error_run_changed", "The stored run changed: restart from the first page."),
+    ("groups_too_large", "The alert groups are too large to show."),
     (
         "posture_too_large",
         "This page of findings is too large to show. Go back to the first page.",
@@ -839,6 +840,7 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("posture_sev_fatal", "Fatale"),
     ("posture_sev_other", "Autre"),
     ("error_run_changed", "L'exécution stockée a changé : repartez de la première page."),
+    ("groups_too_large", "Les groupes d'alertes sont trop volumineux pour être affichés."),
     (
         "posture_too_large",
         "Cette page de constats est trop volumineuse pour être affichée. Revenez à la première page.",

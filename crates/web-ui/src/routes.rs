@@ -15,8 +15,9 @@ use crate::model::{
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, attack_page, attack_report_page, case_page, case_page_all, case_page_full, case_page_with,
     cases_page, cert_page, certs_page, comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, grc_page,
-    grc_report_page, groups_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page, posture_form_page, posture_page,
-    posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page, STYLESHEET,
+    grc_report_page, groups_page, groups_too_large_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page,
+    posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page,
+    STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -811,10 +812,19 @@ pub async fn show_groups_page(state: &WebState, source: IpAddr, headers: &Header
     let principal = current_principal(state, headers)?;
     require(query.is_empty(), language, StatusCode::BAD_REQUEST, "error_bad_request")?;
     let client = state.api.load_full();
-    let list = list_groups(&client, source, &principal.token)
-        .await
-        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    Ok(html_response(StatusCode::OK, &groups_page(language, &principal.csrf, &list), &[]))
+    let outcome = list_groups(&client, source, &principal.token).await;
+    match outcome {
+        Ok(list) => Ok(html_response(StatusCode::OK, &groups_page(language, &principal.csrf, &list), &[])),
+        Err(ApiFailure::TooLarge) => {
+            tracing::warn!(class = "groups_too_large", "Alert groups reply over the cap");
+            Ok(html_response(
+                StatusCode::BAD_GATEWAY,
+                &groups_too_large_page(language, &principal.csrf),
+                &[],
+            ))
+        }
+        Err(failure) => Err(Box::new(api_failure(state, &principal, language, &failure))),
+    }
 }
 
 
