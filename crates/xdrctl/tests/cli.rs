@@ -1,3 +1,4 @@
+mod groups;
 mod reports;
 mod support;
 mod transport_text;
