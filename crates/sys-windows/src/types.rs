@@ -97,16 +97,16 @@ pub enum ConsoleError {
         max_columns: u16,
         max_rows: u16,
     },
-    #[error("environment variable name is empty, holds '=' or NUL")]
+    #[error("environment variable name is empty or outside [A-Za-z0-9_]")]
     BadEnvironmentName,
     #[error("environment variable {name} has a NUL in its value")]
     BadEnvironmentValue { name: String },
     #[error("environment variable {name} is defined twice")]
     DuplicateEnvironmentName { name: String },
-    #[error("program path is empty, holds a quote or NUL")]
-    BadProgramPath,
-    #[error("windows directory {0:?} does not start with a drive letter and a colon")]
-    BadWindowsDirectory(String),
+    #[error("directory {0:?} is not an absolute drive path without quote, semicolon or NUL")]
+    BadDirectory(String),
+    #[error("session label is empty, longer than {max_bytes} bytes, starts with '-' or leaves [A-Za-z0-9._-]")]
+    BadSessionLabel { max_bytes: usize },
     #[error("the console is already closed")]
     AlreadyClosed,
 }
