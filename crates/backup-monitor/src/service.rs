@@ -522,7 +522,11 @@ pub fn failure_category(failure: &StoreFailure) -> &'static str {
 /// The next due second after a round: one interval after the due one, moved past every tick the round overran; the second value counts those ticks.
 pub fn next_due(due: u64, interval: u64, now: u64) -> (u64, u64) {
     let planned = due.saturating_add(interval);
-    let overrun = u64::from(now >= planned) * (now.saturating_sub(planned) / interval.max(1) + 1);
+    let overrun = if now >= planned {
+        now.saturating_sub(planned) / interval.max(1) + 1
+    } else {
+        0
+    };
     (planned.saturating_add(overrun.saturating_mul(interval)), overrun)
 }
 

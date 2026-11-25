@@ -1,12 +1,12 @@
 use crate::api::{
     cert_filter, checked_observable, get_alert, get_asset, get_attack, get_case, get_cert, get_dhcp, get_grc, get_oncall_alert, get_posture,
     get_risk_entity, get_shell_session, get_state_asset, get_vuln_asset, list_alerts, list_assets, list_attack, list_case_links,
-    list_case_observables, list_cases, list_certs, list_findings, list_grc, list_oncall, list_risk, list_shell_sessions, list_states, list_vulns,
-    login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_alert_triage, post_case_action, post_case_comment,
-    post_case_link, post_case_observable, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id,
-    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference,
-    valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_OBSERVABLE_CHARS, MAX_SOURCE_CHARS,
-    RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    list_case_observables, list_cases, list_certs, list_findings, list_grc, list_groups, list_oncall, list_risk, list_shell_sessions, list_states,
+    list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_alert_triage, post_case_action,
+    post_case_comment, post_case_link, post_case_observable, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor,
+    valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester,
+    valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, MAX_NOTE_CHARS,
+    MAX_OBSERVABLE_CHARS, MAX_SOURCE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{
@@ -15,8 +15,9 @@ use crate::model::{
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, attack_page, attack_report_page, case_page, case_page_all, case_page_full, case_page_with,
     cases_page, cert_page, certs_page, comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, grc_page,
-    grc_report_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page, posture_form_page, posture_page,
-    posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page, STYLESHEET,
+    grc_report_page, groups_page, groups_too_large_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page,
+    posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page,
+    STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -806,6 +807,37 @@ pub fn parse_hunt_cursor(query: &BTreeMap<String, String>) -> Result<Option<&str
 }
 
 
+pub async fn show_groups_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    require(query.is_empty(), language, StatusCode::BAD_REQUEST, "error_bad_request")?;
+    let client = state.api.load_full();
+    let outcome = list_groups(&client, source, &principal.token).await;
+    match outcome {
+        Ok(list) => Ok(html_response(StatusCode::OK, &groups_page(language, &principal.csrf, &list), &[])),
+        Err(ApiFailure::TooLarge) => {
+            tracing::warn!(class = "groups_too_large", "Alert groups reply over the cap");
+            Ok(html_response(
+                StatusCode::BAD_GATEWAY,
+                &groups_too_large_page(language, &principal.csrf),
+                &[],
+            ))
+        }
+        Err(failure) => Err(Box::new(api_failure(state, &principal, language, &failure))),
+    }
+}
+
+
+pub async fn show_groups(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_groups_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
 pub async fn show_hunts_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
     let language = language_of(headers);
     let principal = current_principal(state, headers)?;
@@ -1407,6 +1439,7 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/risk/{kind}/{id}", get(show_risk_entity))
         .route("/certificates", get(show_certs))
         .route("/certificates/{fingerprint}", get(show_cert))
+        .route("/alert-groups", get(show_groups))
         .route("/hunts", get(show_hunts))
         .route("/compliance", get(show_compliance))
         .route("/compliance/{asset}", get(show_compliance_asset))

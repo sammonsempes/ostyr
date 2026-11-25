@@ -550,6 +550,7 @@ fn zero_value_cap_admits_no_labelled_series() -> TestResult {
 fn reasons_have_stable_names() -> TestResult {
     let reasons = [
         DropReason::EmptyName,
+        DropReason::ReservedName,
         DropReason::TextTooLong,
         DropReason::ControlCharacter,
         DropReason::TooManyLabels,
@@ -898,5 +899,22 @@ fn allocations_round_to_the_allocator_chunk() -> TestResult {
     ALLOCATION_CASES
         .iter()
         .for_each(|(length, bytes)| assert_eq!(allocation_bytes(*length), *bytes));
+    Ok(())
+}
+
+
+#[test]
+fn reserved_names_are_dropped_alone() -> TestResult {
+    let metrics = vec![
+        one_gauge("ostyr.synthetic.check.up", Vec::new()),
+        one_gauge("OSTYR.agent.x", Vec::new()),
+        one_gauge("cpu.load", Vec::new()),
+        one_gauge("ostyrx.y", Vec::new()),
+        one_gauge("ostyr", Vec::new()),
+    ];
+    let outcome = run(&encode(Vec::new(), metrics), &Limits::default());
+    let kept: Vec<&str> = outcome.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(kept, vec!["cpu.load", "ostyrx.y", "ostyr"]);
+    assert_eq!(dropped(&outcome, DropReason::ReservedName), Some(COUNT_TWO));
     Ok(())
 }
