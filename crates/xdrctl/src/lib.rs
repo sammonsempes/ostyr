@@ -6,6 +6,7 @@ pub mod cases;
 pub mod cli;
 pub mod commands;
 pub mod error;
+pub mod groups;
 pub mod http;
 pub mod model;
 pub mod reports;

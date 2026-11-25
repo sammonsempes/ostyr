@@ -271,6 +271,8 @@ pub enum AlertsCommand {
     },
     /// Shows one alert by id.
     Show { id: String },
+    /// Lists the deduplicated alert groups of the tenant.
+    Groups,
 }
 
 
@@ -563,4 +565,28 @@ pub struct Context<'a> {
     pub ca_file: Option<&'a Path>,
     pub session_file: PathBuf,
     pub send: &'a SendFn<'a>,
+}
+
+
+#[derive(Deserialize)]
+pub struct GroupRow {
+    pub rule_id: String,
+    pub host_name: Option<String>,
+    pub user_name: Option<String>,
+    pub alert_count: u64,
+    pub duplicates: u64,
+    pub max_severity: String,
+    pub first_time: String,
+    pub last_time: String,
+    pub omitted: bool,
+    pub cut_at_older: bool,
+}
+
+
+#[derive(Deserialize)]
+pub struct GroupsReply {
+    pub groups: Vec<GroupRow>,
+    pub complete: bool,
+    pub alerts_read: u64,
+    pub oldest_read: Option<String>,
 }

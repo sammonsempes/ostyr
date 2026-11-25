@@ -85,6 +85,8 @@ pub enum CliError {
     RateLimited,
     #[error("risk scores unavailable, retry later")]
     Unavailable,
+    #[error("alert groups unavailable, retry later")]
+    GroupsUnavailable,
     #[error("apply cancelled")]
     Cancelled,
 }
