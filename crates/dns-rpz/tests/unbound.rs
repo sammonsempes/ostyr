@@ -15,12 +15,14 @@ use core_audit::log::{append, genesis_log};
 use core_config::reload::ReloadContext;
 use dns_rpz::error::{PolicyError, ReloadError};
 use dns_rpz::limits::{MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK};
-use dns_rpz::model::{CommandStatus, ReloadVerdict, Reloader};
+use dns_rpz::model::{Capture, CommandStatus, ReloadVerdict, Reloader};
 use dns_rpz::policy::{validate_policy, Action, Policy};
 use dns_rpz::types::{ReadbackFn, RunnerFn};
 #[cfg(unix)]
 use dns_rpz::unbound::group_kill_result;
-use dns_rpz::unbound::{captured_text, reload_zone, render_unbound_config, run_capture, run_readback, run_reload, run_with_deadline, served_serial};
+use dns_rpz::unbound::{
+    captured_text, reaped, reload_zone, render_unbound_config, run_capture, run_readback, run_reload, run_with_deadline, served_serial,
+};
 use fixtures::fixture;
 use logging::init_logging;
 use runner::{failing_runner, succeeding_runner};
@@ -296,12 +298,60 @@ fn the_served_serial_is_read_by_zone_name_only() -> TestResult {
 }
 
 
+fn captured(status: CommandStatus, output: Vec<u8>, cut: bool) -> Capture {
+    Capture { status, output, cut }
+}
+
+
 #[test]
 fn captured_text_names_each_way_a_command_can_end() -> TestResult {
-    assert_eq!(captured_text(CommandStatus::Success, b"abc".to_vec()).ok().as_deref(), Some("abc"));
-    assert!(captured_text(CommandStatus::Success, vec![INVALID_BYTE]).is_err());
-    assert!(captured_text(CommandStatus::Failed(Some(1)), Vec::new()).is_err_and(|error| error.to_string().contains("failed with status")));
-    assert!(captured_text(CommandStatus::TimedOut, Vec::new()).is_err_and(|error| error.kind() == io::ErrorKind::TimedOut));
+    assert_eq!(
+        captured_text(captured(CommandStatus::Success, b"abc".to_vec(), false)).ok().as_deref(),
+        Some("abc")
+    );
+    assert!(captured_text(captured(CommandStatus::Success, vec![INVALID_BYTE], false)).is_err());
+    assert!(captured_text(captured(CommandStatus::Failed(Some(1)), Vec::new(), false))
+        .is_err_and(|error| error.to_string().contains("failed with status")));
+    assert!(captured_text(captured(CommandStatus::TimedOut, Vec::new(), false)).is_err_and(|error| error.kind() == io::ErrorKind::TimedOut));
+    Ok(())
+}
+
+
+#[test]
+fn a_cut_listing_is_a_named_cut_never_a_listing_without_a_serial() -> TestResult {
+    let failure = captured_text(captured(CommandStatus::Success, b"rpz.example.org.\tserial 7\n".to_vec(), true)).err();
+    assert!(failure.is_some_and(|cause| cause.to_string() == format!("read-back cut at {MAX_CAPTURE_BYTES} bytes")));
+    let arguments = ["-c".to_owned(), (MAX_CAPTURE_BYTES * CAPTURE_FACTOR).to_string(), "/dev/zero".to_owned()];
+    assert!(run_readback("head", &arguments, LONG_DEADLINE).is_err_and(|error| error.to_string().contains("read-back cut at")));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversized_read_back_is_unknown_with_the_named_reason() -> TestResult {
+    let oversized = |_program: &str, _arguments: &[String], deadline: Duration| {
+        run_readback(
+            "head",
+            &["-c".to_owned(), (MAX_CAPTURE_BYTES * CAPTURE_FACTOR).to_string(), "/dev/zero".to_owned()],
+            deadline,
+        )
+    };
+    let verdict = reload_text(&succeeding_runner, &oversized)?;
+    assert_eq!(verdict.0, ReloadVerdict::Unknown);
+    assert!(
+        verdict.1.contains(&format!("read-back cut at {MAX_CAPTURE_BYTES} bytes")),
+        "{}",
+        verdict.1
+    );
+    assert!(!verdict.1.contains("lists no serial"));
+    Ok(())
+}
+
+
+#[test]
+fn a_leader_not_reaped_after_the_kill_is_an_error() -> TestResult {
+    assert!(reaped(None).is_err_and(|error| error.kind() == io::ErrorKind::TimedOut));
+    assert!(reaped(Some(std::process::ExitStatus::default())).is_ok());
     Ok(())
 }
 
@@ -318,9 +368,12 @@ fn the_real_readback_returns_standard_output_and_names_failures() -> TestResult 
 #[test]
 fn a_capture_is_cut_at_the_cap() -> TestResult {
     let arguments = ["-c".to_owned(), (MAX_CAPTURE_BYTES * CAPTURE_FACTOR).to_string(), "/dev/zero".to_owned()];
-    let (status, output) = run_capture("head", &arguments, LONG_DEADLINE)?;
-    assert_eq!(status, CommandStatus::Success);
-    assert_eq!(output.len() as u64, MAX_CAPTURE_BYTES);
+    let capture = run_capture("head", &arguments, LONG_DEADLINE)?;
+    assert_eq!(capture.status, CommandStatus::Success);
+    assert_eq!(capture.output.len() as u64, MAX_CAPTURE_BYTES);
+    assert!(capture.cut);
+    let exact = ["-c".to_owned(), MAX_CAPTURE_BYTES.to_string(), "/dev/zero".to_owned()];
+    assert!(!run_capture("head", &exact, LONG_DEADLINE)?.cut);
     Ok(())
 }
 
@@ -359,6 +412,15 @@ fn the_real_runner_reports_success_failure_and_a_missing_command() -> TestResult
     assert_eq!(run_with_deadline("true", &[], LONG_DEADLINE)?, CommandStatus::Success);
     assert_eq!(run_with_deadline("false", &[], LONG_DEADLINE)?, CommandStatus::Failed(Some(1)));
     assert!(run_with_deadline("/nonexistent/unbound-control", &[], LONG_DEADLINE).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_leader_that_left_its_group_is_killed_at_the_deadline() -> TestResult {
+    let script = "setpgrp(0, getpgrp(getppid())); exec 'sleep', '600';".to_owned();
+    let arguments = ["-e".to_owned(), script];
+    assert_eq!(run_with_deadline("perl", &arguments, SHORT_DEADLINE)?, CommandStatus::TimedOut);
     Ok(())
 }
 

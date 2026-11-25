@@ -39,6 +39,10 @@ pub fn read_counter(path: &Path) -> Result<Option<u32>, SerialError> {
     match open_regular(path, &path.display().to_string()) {
         Ok(handle) => parse_counter(handle, path).map(Some),
         Err(ConfigError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(ConfigError::WatchedFile { reason, .. }) => Err(SerialError::Refused {
+            path: path.to_path_buf(),
+            reason,
+        }),
         Err(error) => Err(SerialError::Open(error)),
     }
 }

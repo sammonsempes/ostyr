@@ -1,6 +1,8 @@
 use crate::error::ReloadError;
-use crate::limits::{MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK, READBACK_SUBCOMMAND, RELOAD_AUDIT_ACTION, RELOAD_SUBCOMMAND, SERIAL_WORD};
-use crate::model::{CommandStatus, ReloadVerdict, Reloader};
+use crate::limits::{
+    MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK, READBACK_SUBCOMMAND, REAP_GRACE_SECONDS, RELOAD_AUDIT_ACTION, RELOAD_SUBCOMMAND, SERIAL_WORD,
+};
+use crate::model::{Capture, CommandStatus, ReloadVerdict, Reloader};
 use crate::policy::{Action, Policy};
 use crate::types::RunnerFn;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
@@ -8,7 +10,7 @@ use core_config::reload::ReloadContext;
 use std::io::{self, Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{error, info};
@@ -80,8 +82,16 @@ pub fn end_group(child: &mut Child) -> io::Result<()> {
 }
 
 
-/// Own process group, stdout in an anonymous file; the group is ended with the command or at the deadline, output capped.
-pub fn run_capture(program: &str, arguments: &[String], deadline: Duration) -> io::Result<(CommandStatus, Vec<u8>)> {
+/// A leader that is still not reaped after the kill and the grace period is an error, never an unbounded wait.
+pub fn reaped(status: Option<ExitStatus>) -> io::Result<()> {
+    status
+        .map(|_status| ())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "the command did not exit after it was killed"))
+}
+
+
+/// Own process group, stdout in an anonymous file; the group and the leader are killed with the command or at the deadline, output capped.
+pub fn run_capture(program: &str, arguments: &[String], deadline: Duration) -> io::Result<Capture> {
     let mut capture = tempfile::tempfile()?;
     let mut command = Command::new(program);
     let mut child = in_own_group(command.args(arguments).stdin(Stdio::null()).stderr(Stdio::null()))
@@ -89,7 +99,8 @@ pub fn run_capture(program: &str, arguments: &[String], deadline: Duration) -> i
         .spawn()?;
     let waited = child.wait_timeout(deadline)?;
     end_group(&mut child)?;
-    child.wait()?;
+    child.kill()?;
+    reaped(child.wait_timeout(Duration::from_secs(REAP_GRACE_SECONDS))?)?;
     let status = match waited {
         Some(status) if status.success() => CommandStatus::Success,
         Some(status) => CommandStatus::Failed(status.code()),
@@ -97,21 +108,24 @@ pub fn run_capture(program: &str, arguments: &[String], deadline: Duration) -> i
     };
     let mut output = Vec::new();
     capture.seek(SeekFrom::Start(0))?;
-    Read::take(&mut capture, MAX_CAPTURE_BYTES).read_to_end(&mut output)?;
-    Ok((status, output))
+    Read::take(&mut capture, MAX_CAPTURE_BYTES + 1).read_to_end(&mut output)?;
+    let cut = output.len() as u64 > MAX_CAPTURE_BYTES;
+    output.truncate(MAX_CAPTURE_BYTES as usize);
+    Ok(Capture { status, output, cut })
 }
 
 
 /// Runs the command with null standard streams; past the deadline its process group is ended and reaped.
 pub fn run_with_deadline(program: &str, arguments: &[String], deadline: Duration) -> io::Result<CommandStatus> {
-    run_capture(program, arguments, deadline).map(|(status, _output)| status)
+    run_capture(program, arguments, deadline).map(|capture| capture.status)
 }
 
 
-/// The text a successful command printed; a failure or a timeout is an error.
-pub fn captured_text(status: CommandStatus, output: Vec<u8>) -> io::Result<String> {
-    match status {
-        CommandStatus::Success => String::from_utf8(output).map_err(io::Error::other),
+/// The text a successful command printed; a failure, a timeout or output cut at the cap is an error.
+pub fn captured_text(capture: Capture) -> io::Result<String> {
+    match capture.status {
+        CommandStatus::Success if capture.cut => Err(io::Error::other(format!("read-back cut at {MAX_CAPTURE_BYTES} bytes"))),
+        CommandStatus::Success => String::from_utf8(capture.output).map_err(io::Error::other),
         CommandStatus::Failed(code) => Err(io::Error::other(ReloadError::Failed(code))),
         CommandStatus::TimedOut => Err(io::Error::new(io::ErrorKind::TimedOut, "the Unbound control command timed out")),
     }
@@ -120,7 +134,7 @@ pub fn captured_text(status: CommandStatus, output: Vec<u8>) -> io::Result<Strin
 
 /// Real read-back runner: the command's standard output.
 pub fn run_readback(program: &str, arguments: &[String], deadline: Duration) -> io::Result<String> {
-    run_capture(program, arguments, deadline).and_then(|(status, output)| captured_text(status, output))
+    run_capture(program, arguments, deadline).and_then(captured_text)
 }
 
 

@@ -48,6 +48,8 @@ pub enum SerialError {
     },
     #[error("serial counter file: {0}")]
     Open(#[source] ConfigError),
+    #[error("serial counter file `{path}` refused: {reason}")]
+    Refused { path: PathBuf, reason: String },
     #[error("serial counter file `{0}` is larger than allowed")]
     TooLarge(PathBuf),
     #[error("all 99 serials of the day are used, last was {0}")]

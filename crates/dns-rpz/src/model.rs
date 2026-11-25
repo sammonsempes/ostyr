@@ -55,6 +55,15 @@ pub enum CommandStatus {
 }
 
 
+/// What a command left: how it ended, its standard output up to the cap, and whether more output was cut off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub status: CommandStatus,
+    pub output: Vec<u8>,
+    pub cut: bool,
+}
+
+
 /// What Unbound was read to serve after a reload attempt: the new serial, another serial, or no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReloadVerdict {
