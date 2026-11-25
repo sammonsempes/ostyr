@@ -447,7 +447,7 @@ for durable in siem-ingest detection metrics-ingest; do
     add_durable "$durable"
 done
 REMOTE
-ssh -n "${ssh_options[@]}" "$datastore_target" "sudo systemctl daemon-reload && sudo systemctl enable --now ${SERVICES[*]/#/ostyr-}" >/dev/null 2>&1 ||
+ssh -n "${ssh_options[@]}" "$datastore_target" "sudo systemctl daemon-reload && sudo systemctl enable ${SERVICES[*]/#/ostyr-} && sudo systemctl restart ${SERVICES[*]/#/ostyr-}" >/dev/null 2>&1 ||
     die "enabling the Ostyr services failed on the datastore VM"
 
 log "installing Tetragon and the Linux agent on the client VM"
@@ -465,6 +465,7 @@ printf 'true' >/etc/tetragon/tetragon.conf.d/enable-process-cred
 rm -rf /tmp/tetragon-release /tmp/tetragon.tar.gz
 systemctl restart tetragon
 systemctl daemon-reload
-systemctl enable --now ostyr-linux-agent
+systemctl enable ostyr-linux-agent
+systemctl restart ostyr-linux-agent
 REMOTE
 log "e2e-linux setup done"
