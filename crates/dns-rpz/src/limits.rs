@@ -220,6 +220,9 @@ pub const READBACK_SUBCOMMAND: &str = "list_auth_zones";
 pub const MAX_CAPTURE_BYTES: u64 = 1_048_576;
 
 
+pub const REAP_GRACE_SECONDS: u64 = 5;
+
+
 pub const SERIAL_WORD: &str = "serial";
 
 

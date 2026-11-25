@@ -270,7 +270,7 @@ fn only_a_regular_file_of_bounded_size_opens_as_a_source() -> TestResult {
     let link = dir.path().join("zero");
     symlink("/dev/zero", &link)?;
     assert!(open_file(&link).is_err());
-    assert!(open_file(dir.path()).is_err());
+    assert!(open_file(dir.path()).is_err_and(|error| error.to_string().starts_with("IOC source `") && !error.to_string().contains("watched")));
     let sparse = dir.path().join("sparse");
     let file = fs::File::create(&sparse)?;
     file.set_len(MAX_IOC_SOURCE_BYTES + 1)?;
@@ -296,6 +296,32 @@ fn a_source_with_more_lines_than_the_cap_fails_the_run_before_anything_is_writte
     let result = generate(&policy, &mut Cursor::new(over_cap), now(), &counter, &output);
     assert!(
         matches!(&result, Err(RpzError::Io(error)) if error.to_string().contains("more than")),
+        "{result:?}"
+    );
+    assert!(!output.exists() && !counter.exists());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_source_at_the_byte_cap_reads_and_one_that_grows_past_it_is_a_named_failed_round() -> TestResult {
+    init_logging();
+    let dir = tempdir()?;
+    let policy = sample_policy();
+    let sparse = dir.path().join("sparse");
+    let file = fs::File::create(&sparse)?;
+    file.set_len(MAX_IOC_SOURCE_BYTES)?;
+    let counter = dir.path().join("counter");
+    let output = dir.path().join("zone.db");
+    assert!(generate(&policy, &mut open_file(&sparse)?, now(), &counter, &output).is_ok());
+    fs::remove_file(&output)?;
+    fs::remove_file(&counter)?;
+    let mut growing = open_file(&sparse)?;
+    file.set_len(MAX_IOC_SOURCE_BYTES + 1)?;
+    let result = generate(&policy, &mut growing, now(), &counter, &output);
+    assert!(
+        matches!(&result, Err(RpzError::Io(error)) if error.to_string().contains("grew past")),
         "{result:?}"
     );
     assert!(!output.exists() && !counter.exists());

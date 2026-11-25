@@ -7,6 +7,7 @@ use crate::select::{compile_allow, decide, reason_key, Allow};
 use crate::serial::advance;
 use crate::types::Counts;
 use crate::zone::{apply_cap, render_zone};
+use core_config::error::ConfigError;
 use core_config::parse::open_regular;
 use intel_feeds::lines::{numbered_lines, NumberedLine};
 use intel_feeds::model::Ioc;
@@ -23,13 +24,22 @@ pub fn count(counts: &mut Counts, key: &'static str) {
 }
 
 
-/// Opens a regular file only (a FIFO or device is refused without blocking) of at most `MAX_IOC_SOURCE_BYTES`, read under the same cap.
+/// A refused source keeps its own label, not the one core-config's helper gives a watched file.
+pub fn source_refusal(error: ConfigError) -> io::Error {
+    match error {
+        ConfigError::WatchedFile { file, reason } => io::Error::other(format!("IOC source `{file}` refused: {reason}")),
+        other => io::Error::other(other),
+    }
+}
+
+
+/// Opens a regular file only (a FIFO or device is refused without blocking) of at most `MAX_IOC_SOURCE_BYTES`; read one byte past it to see growth.
 pub fn open_file(path: &Path) -> io::Result<Box<dyn BufRead>> {
-    let handle = open_regular(path, &path.display().to_string()).map_err(io::Error::other)?;
+    let handle = open_regular(path, &path.display().to_string()).map_err(source_refusal)?;
     if handle.metadata()?.len() > MAX_IOC_SOURCE_BYTES {
         Err(io::Error::other(format!("IOC source larger than {MAX_IOC_SOURCE_BYTES} bytes")))
     } else {
-        Ok(Box::new(BufReader::new(handle.take(MAX_IOC_SOURCE_BYTES))))
+        Ok(Box::new(BufReader::new(handle.take(MAX_IOC_SOURCE_BYTES + 1))))
     }
 }
 
@@ -75,7 +85,8 @@ pub fn collect_entries(
     skipped: &mut Counts,
 ) -> io::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
-    numbered_lines(input).try_for_each(|line| {
+    let mut capped = Read::take(&mut *input, MAX_IOC_SOURCE_BYTES);
+    numbered_lines(&mut capped).try_for_each(|line| {
         let numbered = line?;
         if numbered.number > MAX_IOC_LINES {
             Err(io::Error::other(format!("IOC source has more than {MAX_IOC_LINES} lines")))
@@ -89,7 +100,13 @@ pub fn collect_entries(
             Ok::<(), io::Error>(())
         }
     })?;
-    Ok(entries)
+    if capped.into_inner().fill_buf()?.is_empty() {
+        Ok(entries)
+    } else {
+        Err(io::Error::other(format!(
+            "IOC source grew past {MAX_IOC_SOURCE_BYTES} bytes while it was read"
+        )))
+    }
 }
 
 

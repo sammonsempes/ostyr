@@ -135,7 +135,7 @@ fn an_unusable_counter_is_an_error_and_is_never_reset() -> TestResult {
     assert!(matches!(read_counter(&path), Err(SerialError::Counter { .. })));
     assert!(advance(&path, MORNING).is_err());
     assert_eq!(fs::read_to_string(&path)?, "garbage\n");
-    assert!(matches!(read_counter(dir.path()), Err(SerialError::Open(_))));
+    assert!(matches!(read_counter(dir.path()), Err(SerialError::Refused { .. })));
     assert!(matches!(read_counter(&path.join("below")), Err(SerialError::Open(_))));
     Ok(())
 }
@@ -163,11 +163,15 @@ fn a_fifo_or_a_device_as_the_counter_is_refused_without_blocking() -> TestResult
     let dir = tempdir()?;
     let fifo = dir.path().join("fifo");
     make_fifo(&fifo)?;
-    assert!(matches!(read_counter(&fifo), Err(SerialError::Open(_))));
+    assert!(matches!(read_counter(&fifo), Err(SerialError::Refused { .. })));
     assert!(advance(&fifo, MORNING).is_err());
     let link = dir.path().join("zero");
     symlink("/dev/zero", &link)?;
-    assert!(matches!(read_counter(&link), Err(SerialError::Open(_))));
+    assert!(matches!(read_counter(&link), Err(SerialError::Refused { .. })));
+    assert!(read_counter(&link).is_err_and(|error| {
+        let text = error.to_string();
+        text.starts_with("serial counter file") && !text.contains("watched")
+    }));
     Ok(())
 }
 
