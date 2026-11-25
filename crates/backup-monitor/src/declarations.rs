@@ -2,8 +2,23 @@ use crate::error::BackupError;
 use crate::model::{Declarations, DeclarationsFile, DEFAULT_MAX_TEXT_CHARS};
 use crate::text::{valid_host_key, valid_text};
 use core_config::parse::parse_document;
+use core_config::strict::{refuse_features, refuse_forbidden_bytes, Rules};
 use core_pg::scope::tenant_scope;
 use std::collections::BTreeSet;
+
+
+pub const REPOSITORIES_KEY: &str = "repositories";
+
+
+pub const DECLARATIONS_INVALID: &str = "the document is not a valid declarations file";
+
+
+pub const DECLARATIONS_RULES: Rules<'static> = Rules {
+    list_key: REPOSITORIES_KEY,
+    invalid_text: DECLARATIONS_INVALID,
+    allow_flow: false,
+    show_line: true,
+};
 
 
 pub const MAX_ENTRIES: usize = 10_000;
@@ -65,8 +80,10 @@ pub fn problem(file: &DeclarationsFile) -> Option<&'static str> {
 }
 
 
-/// Parses and validates a declarations file; `file` only labels parse errors.
+/// Refuses forbidden bytes and YAML features on the text, then parses exactly that text and validates it; `file` only labels errors.
 pub fn load_declarations(text: &str, file: &str) -> Result<Declarations, BackupError> {
+    refuse_forbidden_bytes(text, file)?;
+    refuse_features(text, file, DECLARATIONS_RULES)?;
     let parsed: DeclarationsFile = parse_document(text, file)?;
     let tenant = tenant_scope(&parsed.tenant)?;
     match problem(&parsed) {

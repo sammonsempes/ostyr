@@ -1,12 +1,14 @@
 #![cfg(unix)]
 use backup_monitor::borg::{
     base_directory, base_directory_with, environment, fill, io_failure, local_location, parse_run, plan, private_directory, read_capped, run_raw,
-    snapshot_listing, valid_location, valid_source, verify_identity, write_identity, BorgError, IDENTITY_FILE, MAX_PASSPHRASE_BYTES, MODE_MASK,
+    snapshot_listing, valid_location, valid_source, verify_identity, write_identity, BorgError, BorgTarget, IDENTITY_FILE, MAX_PASSPHRASE_BYTES,
+    MODE_MASK,
 };
 use backup_monitor::declarations::load_declarations;
 use backup_monitor::error::BackupError;
 use backup_monitor::model::{BorgSource, Limits};
 use backup_monitor::restic::{plan as restic_plan, valid_authority, valid_port, MAX_LOCATION_BYTES};
+use backup_monitor::secrets::{open_secrets_dir, SecretsDir, MAX_SECRET_NAME_BYTES};
 use core_pg::scope::{tenant_scope, TenantScope};
 use net_topology::model::RunFailure;
 use std::error::Error;
@@ -104,9 +106,9 @@ const GONE_POLL: Duration = Duration::from_millis(50);
 
 
 const DECLARATIONS: &str = "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://u@h/srv/borg\n      \
-                            passphrase_file: /etc/borg-pw\n  - repository: bad\n    expected_min_snapshots: 1\n    borg:\n      location: -r\n      \
-                            passphrase_file: /etc/borg-pw\n  - repository: both\n    expected_min_snapshots: 1\n    borg:\n      location: /srv/borg\n      \
-                            passphrase_file: /etc/borg-pw\n    restic:\n      location: /srv/restic\n      password_file: /etc/restic-pw\n  - repository: \
+                            passphrase_file: borg-pw\n  - repository: bad\n    expected_min_snapshots: 1\n    borg:\n      location: -r\n      \
+                            passphrase_file: borg-pw\n  - repository: both\n    expected_min_snapshots: 1\n    borg:\n      location: /srv/borg\n      \
+                            passphrase_file: borg-pw\n    restic:\n      location: /srv/restic\n      password_file: restic-pw\n  - repository: \
                             plain\n    expected_min_snapshots: 1\n";
 
 
@@ -116,6 +118,7 @@ struct Setup {
     state: PathBuf,
     source: BorgSource,
     tenant: TenantScope,
+    secrets: SecretsDir,
 }
 
 
@@ -136,15 +139,18 @@ fn setup(mode: &str) -> Result<Setup, Box<dyn Error>> {
     create_dir_all(&state)?;
     let source = BorgSource {
         location: REMOTE.to_owned(),
-        passphrase_file: passphrase.display().to_string(),
+        passphrase_file: "passphrase".to_owned(),
         hostname_from_name: true,
     };
+    set_permissions(dir.path(), Permissions::from_mode(PRIVATE))?;
+    let secrets = open_secrets_dir(dir.path(), euid())?;
     Ok(Setup {
         dir,
         program,
         state,
         source,
         tenant: tenant_scope("acme")?,
+        secrets,
     })
 }
 
@@ -157,10 +163,13 @@ fn euid() -> u32 {
 fn run(setup: &Setup) -> Result<Vec<u8>, BorgError> {
     run_raw(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &Limits::default(),
         PATIENT,
     )
@@ -259,10 +268,10 @@ fn ports_run_from_one_to_65535() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn passphrase_paths_follow_the_grammar() -> Result<(), Box<dyn Error>> {
-    let long = format!("/{}", "a".repeat(MAX_LOCATION_BYTES));
+    let long = "a".repeat(MAX_SECRET_NAME_BYTES + 1);
     let relative = BorgSource {
         location: REMOTE.to_owned(),
-        passphrase_file: "relative".to_owned(),
+        passphrase_file: "/etc/borg-pw".to_owned(),
         hostname_from_name: false,
     };
     let overlong = BorgSource {
@@ -272,7 +281,7 @@ fn passphrase_paths_follow_the_grammar() -> Result<(), Box<dyn Error>> {
     };
     assert!(!valid_source(&relative));
     assert!(valid_source(&BorgSource {
-        passphrase_file: "/etc/borg-pw".to_owned(),
+        passphrase_file: "borg-pw".to_owned(),
         ..relative.clone()
     }));
     assert!(!valid_source(&overlong));
@@ -349,10 +358,13 @@ fn the_listing_is_keyed_on_the_repository_id_and_reads_the_host_from_the_name() 
     let setup = setup("ok")?;
     let listing = snapshot_listing(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &Limits::default(),
         PATIENT,
     )?;
@@ -394,7 +406,7 @@ fn a_refused_declaration_spawns_nothing() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_bad_passphrase_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let path = PathBuf::from(&setup.source.passphrase_file);
+    let path = setup.dir.path().join("passphrase");
     let link = setup.dir.path().join("link");
     symlink(&path, &link)?;
     let directory = setup.dir.path().join("directory");
@@ -407,15 +419,18 @@ fn a_bad_passphrase_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Err
     candidates.push(path);
     candidates.iter().try_for_each(|file| -> Result<(), Box<dyn Error>> {
         let source = BorgSource {
-            passphrase_file: file.display().to_string(),
+            passphrase_file: file.file_name().and_then(OsStr::to_str).ok_or("name")?.to_owned(),
             ..setup.source.clone()
         };
         let outcome = run_raw(
             &setup.program,
+            &setup.secrets,
             &source,
-            &setup.tenant,
-            REPOSITORY_NAME,
-            &setup.state,
+            &BorgTarget {
+                tenant: &setup.tenant,
+                repository: REPOSITORY_NAME,
+                state: &setup.state,
+            },
             &Limits::default(),
             PATIENT,
         );
@@ -436,7 +451,7 @@ fn the_passphrase_cap_is_exact() -> Result<(), Box<dyn Error>> {
     assert!(matches!(read_capped(&mut over.as_slice()), Err(BorgError::PassphraseFile)));
     assert!(matches!(read_capped(&mut Broken), Err(BorgError::PassphraseFile)));
     let setup = setup("ok")?;
-    std::fs::write(&setup.source.passphrase_file, &at_cap)?;
+    std::fs::write(setup.dir.path().join("passphrase"), &at_cap)?;
     run(&setup)?;
     assert_eq!(std::fs::read(setup.dir.path().join("stdin"))?, at_cap);
     Ok(())
@@ -551,10 +566,13 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
     let setup = setup("sleep")?;
     let outcome = run_raw(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &Limits::default(),
         IMPATIENT,
     );
@@ -568,10 +586,13 @@ fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn 
     let setup = setup("hold")?;
     let outcome = run_raw(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &Limits::default(),
         IMPATIENT,
     );
@@ -596,10 +617,13 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
     };
     let outcome = run_raw(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &limits,
         PATIENT,
     );
@@ -626,10 +650,13 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     let outcome = run_raw(
         Path::new("/nonexistent/borg"),
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        REPOSITORY_NAME,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository: REPOSITORY_NAME,
+            state: &setup.state,
+        },
         &Limits::default(),
         PATIENT,
     );
@@ -713,16 +740,16 @@ fn every_local_form_and_root_is_refused_by_name_before_any_spawn() -> Result<(),
 
 #[test]
 fn the_plan_refuses_local_and_root_locations_by_index() -> Result<(), Box<dyn Error>> {
-    let text = "tenant: acme\nrepositories:\n  - repository: local\n    expected_min_snapshots: 1\n    borg:\n      location: /srv/x\n      passphrase_file: /etc/pw\n  - \
-                repository: root\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://root@h/x\n      passphrase_file: /etc/pw\n  - repository: \
-                ssh\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://u@h/x\n      passphrase_file: /etc/pw\n";
+    let text = "tenant: acme\nrepositories:\n  - repository: local\n    expected_min_snapshots: 1\n    borg:\n      location: /srv/x\n      passphrase_file: pw\n  - \
+                repository: root\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://root@h/x\n      passphrase_file: pw\n  - repository: \
+                ssh\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://u@h/x\n      passphrase_file: pw\n";
     let declarations = load_declarations(text, "d.yaml")?;
     let planned = plan(&declarations);
     assert_eq!(planned.refused, vec![0, 1]);
     assert_eq!(planned.runnable.first().map(|(name, _)| *name), Some("ssh"));
     assert!(!valid_source(&BorgSource {
         location: "/srv/x".to_owned(),
-        passphrase_file: "/etc/pw".to_owned(),
+        passphrase_file: "pw".to_owned(),
         hostname_from_name: false
     }));
     Ok(())
@@ -777,10 +804,13 @@ fn a_directory_that_cannot_be_made_is_a_base_refusal() -> Result<(), Box<dyn Err
 fn run_named(setup: &Setup, repository: &str) -> Result<Vec<u8>, BorgError> {
     run_raw(
         &setup.program,
+        &setup.secrets,
         &setup.source,
-        &setup.tenant,
-        repository,
-        &setup.state,
+        &BorgTarget {
+            tenant: &setup.tenant,
+            repository,
+            state: &setup.state,
+        },
         &Limits::default(),
         PATIENT,
     )
