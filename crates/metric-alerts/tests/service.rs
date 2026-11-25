@@ -82,22 +82,38 @@ const MORE_RULES: &str = "rules:\n  - id: disk\n    metric: disk.used\n    condi
 const DUPLICATE_RULES: &str = "rules:\n  - id: disk\n    metric: disk.used\n    condition: {kind: threshold, direction: above, threshold: 90}\n    close_after: 60\n    severity: high\n    runbook: https://r.example.org\n  - id: disk\n    metric: cpu.used\n    condition: {kind: threshold, direction: above, threshold: 90}\n    close_after: 60\n    severity: high\n    runbook: https://r.example.org\n";
 
 
-fn settings_text(round_seconds: u64, max_tenants: usize, tenants: &str, audit: &str, pg: &str) -> String {
+const ABSOLUTE_ROOT: &str = if cfg!(windows) { "C:" } else { "" };
+
+
+fn absolute(path: &str) -> String {
+    if path.starts_with('/') {
+        format!("{ABSOLUTE_ROOT}{path}")
+    } else {
+        path.to_owned()
+    }
+}
+
+
+fn settings_text(round_seconds: u64, max_tenants: usize, tenants: &str, audit_path: &str, pg_path: &str) -> String {
+    let audit = absolute(audit_path);
+    let pg = absolute(pg_path);
+    let fetch = absolute("/f.yaml");
+    let rules = absolute("/r.yaml");
     format!(
-        "fetch_settings: /f.yaml\nrules_file: /r.yaml\npg_settings: {pg}\ntenants: {tenants}\nround_seconds: {round_seconds}\nmax_tenants: {max_tenants}\naudit_file: {audit}\n"
+        "fetch_settings: {fetch}\nrules_file: {rules}\npg_settings: {pg}\ntenants: {tenants}\nround_seconds: {round_seconds}\nmax_tenants: {max_tenants}\naudit_file: {audit}\n"
     )
 }
 
 
 fn settings_of(tenants: &[&str]) -> ServiceSettings {
     ServiceSettings {
-        fetch_settings: "/f.yaml".into(),
-        rules_file: "/r.yaml".into(),
-        pg_settings: "/p.yaml".into(),
+        fetch_settings: absolute("/f.yaml").into(),
+        rules_file: absolute("/r.yaml").into(),
+        pg_settings: absolute("/p.yaml").into(),
         tenants: tenants.iter().map(|name| (*name).to_owned()).collect(),
         round_seconds: ROUND_SECONDS,
         max_tenants: MAX_TENANTS,
-        audit_file: "/a.log".into(),
+        audit_file: absolute("/a.log").into(),
     }
 }
 
@@ -318,7 +334,7 @@ fn a_start_only_or_invalid_settings_change_is_refused_audited_and_the_old_file_k
     fs::write(&file, settings_text(1, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).round_seconds, ROUND_SECONDS);
-    assert_eq!(current_config(&engine).pg_settings, Path::new("/p.yaml"));
+    assert_eq!(current_config(&engine).pg_settings, Path::new(&absolute("/p.yaml")));
     let audit = fs::read_to_string(&audit_path)?;
     assert_eq!(audit.lines().count(), TWO, "{audit}");
     assert_eq!(audit.matches("\"outcome\":\"denied\"").count(), TWO, "{audit}");
