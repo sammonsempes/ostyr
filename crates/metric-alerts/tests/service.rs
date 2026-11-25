@@ -12,8 +12,8 @@ use metric_alerts::query::MetricQuery;
 use metric_alerts::round::RoundStates;
 use metric_alerts::serve::{boxed_reload_audit, exit_code, seconds_since_epoch, ServeError};
 use metric_alerts::service::{
-    load_settings, next_now, open_rules, open_service_settings, open_service_settings_from, run_pass, serve, tenant_round, tenants_of, Live,
-    PassReport, ServeEnd, ServiceSettings, MAX_TENANTS,
+    load_settings, next_now, open_rules, open_service_settings_from, run_pass, serve, tenant_round, tenants_of, Live, PassReport, ServeEnd,
+    ServiceSettings, MAX_TENANTS,
 };
 use metric_alerts::types::{FetchResult, PassFuture, TenantStates, Timestamp};
 use serde_json::Value;
@@ -270,7 +270,7 @@ fn a_live_settings_change_is_applied_and_audited() -> TestResult {
         "s.yaml",
         &settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"),
     )?;
-    let engine = open_service_settings(&file, boxed_reload_audit(&log))?;
+    let engine = open_service_settings_from(&file, load_settings(&file)?, boxed_reload_audit(&log))?;
     fs::write(&file, settings_text(OTHER_ROUND_SECONDS, MAX_TENANTS, "[a, b]", "/a.log", "/p.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
     assert_eq!(current_config(&engine).round_seconds, OTHER_ROUND_SECONDS);
@@ -312,7 +312,7 @@ fn a_start_only_or_invalid_settings_change_is_refused_audited_and_the_old_file_k
         "s.yaml",
         &settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"),
     )?;
-    let engine = open_service_settings(&file, boxed_reload_audit(&log))?;
+    let engine = open_service_settings_from(&file, load_settings(&file)?, boxed_reload_audit(&log))?;
     fs::write(&file, settings_text(ROUND_SECONDS, MAX_TENANTS, "[a]", "/a.log", "/other.yaml"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     fs::write(&file, settings_text(1, MAX_TENANTS, "[a]", "/a.log", "/p.yaml"))?;

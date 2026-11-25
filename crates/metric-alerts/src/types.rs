@@ -53,4 +53,8 @@ pub type LiveFn<'a> = dyn Fn() -> Live + 'a;
 pub type TenantStates = BTreeMap<String, RoundStates>;
 
 
+/// The one start read of the settings file; production passes `load_settings`.
+pub type StartRead = fn(&std::path::Path) -> Result<crate::service::ServiceSettings, core_config::error::ConfigError>;
+
+
 pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>>>>;
