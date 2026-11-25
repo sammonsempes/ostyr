@@ -14,6 +14,7 @@ core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
+hunt-stats = { version = "0.0.0", path = "../hunt-stats" }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 metric-alerts = { version = "0.0.0", path = "../metric-alerts" }
 serde = { version = "1", features = ["derive"] }

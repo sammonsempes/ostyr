@@ -25,6 +25,9 @@ use types::{Calls, Log, Store, TestResult};
 const HOUR: i64 = 3_600;
 
 
+const BOUND_MATCHES: u64 = 11;
+
+
 const MIDNIGHT: i64 = 1_641_600_000;
 
 
@@ -104,6 +107,7 @@ fn recorder(log: &Log, fails: fn(i64) -> bool) -> impl FnMut(&HuntPack, &str, i6
             Ok(HuntOutcome {
                 matches: 1,
                 finding: (end / HOUR) % EVEN == 0,
+                bound: None,
             })
         }
     }
@@ -766,5 +770,34 @@ async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it(
     let refusals = text.lines().filter(|line| line.contains("hunt finding refused for good")).count();
     assert_eq!(refusals, 1);
     assert!(text.contains("tenant a pack p"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_bound_outcome_is_stored_under_the_bound_id_and_the_window_advances() -> TestResult {
+    let (store, calls, _log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = |_pack: &HuntPack, _tenant: &str, _end: i64| -> Result<HuntOutcome, RunError> {
+        Ok(HuntOutcome {
+            matches: BOUND_MATCHES,
+            finding: true,
+            bound: Some(BOUND_MATCHES - 1),
+        })
+    };
+    let packs = [pack("rarity.p", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(report.findings_failed, 0);
+    assert_eq!(stored(&store, "a", &format!("rarity.p.bound@{H4}")), Some(BOUND_MATCHES as i64));
+    assert_eq!(stored(&store, "a", &format!("rarity.p@{H4}")), None);
+    assert_eq!(stored(&store, "a", "rarity.p"), Some(H4));
     Ok(())
 }

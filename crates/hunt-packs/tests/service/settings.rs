@@ -29,6 +29,7 @@ fn settings() -> HuntSettings {
         tick_seconds: MINUTE,
         grace_seconds: 0,
         max_runs_per_tick: 1,
+        stat_hunts: Vec::new(),
     }
 }
 
@@ -142,5 +143,54 @@ fn the_engine_baseline_is_the_value_the_caller_read_not_a_second_read() -> TestR
     assert_eq!(current_config(&engine).audit_file, settings().audit_file);
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).audit_file, settings().audit_file);
+    Ok(())
+}
+
+
+const STAT_HUNTS: &str = "stat_hunts:
+  - id: rare-process
+    statistic:
+      rarity:
+        max_entities: 1
+    query: SELECT host, process FROM events WHERE tenant = {tenant:String} AND t >= {window_start:DateTime64(3)} AND t < {window_end:DateTime64(3)}
+    schedule_seconds: 3600
+    window_seconds: 3600
+    cost:
+      max_rows: 1000
+      max_seconds: 10
+      max_bytes_read: 1000000
+    max_rows: 100
+  - id: beacon
+    statistic:
+      beaconing:
+        min_regularity_ppm: 900000
+    query: SELECT pair, toUnixTimestamp(t) FROM events WHERE tenant = {tenant:String} AND t >= {window_start:DateTime64(3)} AND t < {window_end:DateTime64(3)}
+    schedule_seconds: 3600
+    window_seconds: 3600
+    cost:
+      max_rows: 1000
+      max_seconds: 10
+      max_bytes_read: 1000000
+    max_rows: 100
+    max_matches: 2
+";
+
+
+#[test]
+fn statistical_hunts_are_read_validated_and_shown_in_the_state() -> TestResult {
+    assert!(open_text(&format!("{BASE}tick_seconds: 60\n{STAT_HUNTS}")).is_ok());
+    let broken = STAT_HUNTS.replace("max_entities: 1", "max_entities: 0");
+    assert!(matches!(
+        open_text(&format!("{BASE}tick_seconds: 60\n{broken}")),
+        Err(OpenError::Invalid(HuntSettingsError::StatHunt("statistic")))
+    ));
+    let unknown = STAT_HUNTS.replace("max_rows: 100\n  - id", "max_rows: 100\n    extra: 1\n  - id");
+    assert!(matches!(
+        open_text(&format!("{BASE}tick_seconds: 60\n{unknown}")),
+        Err(OpenError::Config(_))
+    ));
+    let tagged = STAT_HUNTS.replace("rarity:", "!Rarity");
+    assert!(open_text(&format!("{BASE}tick_seconds: 60\n{tagged}")).is_err());
+    assert!(hunt_state(&settings()).contains_key("stat_hunts"));
     Ok(())
 }

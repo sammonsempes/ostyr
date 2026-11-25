@@ -2,6 +2,7 @@ use crate::error::shown_id;
 use crate::model::{HuntPack, Source};
 use crate::run::HuntOutcome;
 use crate::schedule::{RunWindow, ScheduleError};
+use crate::stat_model::finding_of;
 use crate::store::{is_permanent, last_done, record_done, record_finding, Param, StateError};
 use crate::types::{DueFn, RunFn};
 use core_pg::error::PgError;
@@ -198,7 +199,8 @@ where
     Pending: Future<Output = Result<Vec<i64>, PgError>>,
 {
     let refused = if outcome.finding {
-        match record_finding(exec, tenant, &pack.id, window, outcome.matches, pack.baseline.max_matches).await {
+        let (finding_id, matches, baseline) = finding_of(pack, outcome);
+        match record_finding(exec, tenant, &finding_id, window, matches, baseline).await {
             Ok(_) => false,
             Err(error) if is_permanent(&error) => {
                 finding_refusal(tenant, &pack.id);

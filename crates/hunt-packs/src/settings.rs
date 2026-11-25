@@ -1,4 +1,5 @@
 use crate::schedule::MAX_GRACE_SECONDS;
+use crate::stat_model::{validate_stat_hunts, StatHunt};
 use crate::tick::{check_limits, TickError, TickLimits, DEFAULT_MAX_RUNS, DEFAULT_MAX_RUNS_PER_TICK, DEFAULT_MAX_TENANTS};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
@@ -38,6 +39,8 @@ pub struct HuntSettings {
     pub grace_seconds: i64,
     #[serde(default = "default_max_runs_per_tick")]
     pub max_runs_per_tick: usize,
+    #[serde(default)]
+    pub stat_hunts: Vec<StatHunt>,
 }
 
 
@@ -51,6 +54,8 @@ pub enum HuntSettingsError {
     StartOnly,
     #[error("audit_file must be an absolute path")]
     AuditFile,
+    #[error("stat_hunts: invalid `{0}`")]
+    StatHunt(&'static str),
     #[error("tick limits refused")]
     Limits(#[from] TickError),
 }
@@ -84,6 +89,7 @@ pub fn validate_hunt(settings: &HuntSettings) -> Result<(), HuntSettingsError> {
     } else if !settings.audit_file.is_absolute() {
         Err(HuntSettingsError::AuditFile)
     } else {
+        validate_stat_hunts(&settings.stat_hunts).map_err(HuntSettingsError::StatHunt)?;
         check_limits(&tick_limits(settings), settings.tenants.len()).map_err(HuntSettingsError::from)
     }
 }
@@ -99,6 +105,7 @@ pub fn hunt_state(settings: &HuntSettings) -> ConfigState {
         ("tick_seconds", settings.tick_seconds.to_string()),
         ("grace_seconds", settings.grace_seconds.to_string()),
         ("max_runs_per_tick", settings.max_runs_per_tick.to_string()),
+        ("stat_hunts", format!("{:?}", settings.stat_hunts)),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
