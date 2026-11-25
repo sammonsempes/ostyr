@@ -108,3 +108,29 @@ fn entry_counts_are_capped_at_n_and_n_plus_one() -> Result<(), Box<dyn Error>> {
     assert!(refused(&repositories, "entry count"));
     Ok(())
 }
+
+
+#[test]
+fn yaml_features_and_forbidden_bytes_are_refused_before_any_parse() -> Result<(), Box<dyn Error>> {
+    let base = "tenant: acme\nrepositories:\n  - repository: a\n    expected_min_snapshots: 1\n";
+    let hostile = [
+        "tenant: acme\ncritical:\n  - &one\n    host: web1\n    max_age_hours: 1\n  - *one\n",
+        "tenant: acme\ncritical:\n  - <<: {host: web1, max_age_hours: 1}\n",
+        "tenant: !!str acme\n",
+        "tenant: \"ac\\u006de\"\n",
+        "tenant: |\n  acme\n",
+        "tenant: acme\ncritical: []\n",
+        "tenant: acme\r\nx: 1\n",
+        "tenant: acme\ncritical:\n  - host: caf\u{e9}\n    max_age_hours: 1\n",
+        "tenant: acme\n\tx: 1\n",
+        "tenant: [unclosed\n",
+    ];
+    hostile.iter().for_each(|text| {
+        let outcome = load_declarations(text, "d.yaml");
+        assert!(matches!(outcome, Err(BackupError::Declarations(_))), "{text:?}: {outcome:?}");
+    });
+    assert!(load_declarations(base, "d.yaml").is_ok());
+    let alias = load_declarations(hostile.first().ok_or("no case")?, "d.yaml").err().ok_or("accepted")?;
+    assert!(!alias.to_string().contains("web1"));
+    Ok(())
+}

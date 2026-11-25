@@ -4,8 +4,9 @@ use crate::error::BackupError;
 use crate::model::{BorgSource, Declarations, Limits, Listing, DEFAULT_MAX_TEXT_CHARS};
 use crate::parse::parse_borg;
 use crate::restic::{valid_authority, valid_path, MAX_HOST_BYTES, MAX_LOCATION_BYTES, SSH_PROGRAM};
+use crate::secrets::{open_secret_in, secret_refusal, valid_secret_name, SecretsDir};
 use crate::text::valid_text;
-use core_config::secret_file::{open_secret, SecretFileError};
+use core_config::secret_file::SecretFileError;
 use core_config::trusted_dir::{open_trusted_dir, TrustedDirError};
 use core_pg::scope::{tenant_of, TenantScope};
 use net_topology::model::RunFailure;
@@ -111,6 +112,15 @@ impl From<RunFailure> for BorgError {
 }
 
 
+/// Where one Borg repository keeps its state: the tenant, the declared repository name and the state directory.
+#[derive(Debug, Clone, Copy)]
+pub struct BorgTarget<'a> {
+    pub tenant: &'a TenantScope,
+    pub repository: &'a str,
+    pub state: &'a Path,
+}
+
+
 /// The repositories that will run (declared name and source) and the indexes of the ones refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BorgPlan<'a> {
@@ -147,7 +157,7 @@ pub fn local_location(text: &str) -> bool {
 
 
 pub fn valid_source(source: &BorgSource) -> bool {
-    valid_location(&source.location) && source.passphrase_file.len() <= MAX_LOCATION_BYTES && valid_path(&source.passphrase_file)
+    valid_location(&source.location) && valid_secret_name(&source.passphrase_file)
 }
 
 
@@ -168,8 +178,7 @@ pub fn plan(declarations: &Declarations) -> BorgPlan<'_> {
 
 
 fn passphrase_refusal(error: SecretFileError) -> BorgError {
-    let refusal = error.to_string();
-    debug!(refusal, "passphrase file refused");
+    secret_refusal(&error);
     BorgError::PassphraseFile
 }
 
@@ -357,8 +366,8 @@ pub fn environment(base: &str) -> Vec<(String, String)> {
 
 
 /// Reads the passphrase file and returns the pipe that carries it; the handle and the bytes are dropped on return, before any spawn.
-fn passphrase_input(path: &Path) -> Result<PipeReader, BorgError> {
-    let mut handle = open_secret(path).map_err(passphrase_refusal)?;
+fn passphrase_input(secrets: &SecretsDir, name: &str) -> Result<PipeReader, BorgError> {
+    let mut handle = open_secret_in(secrets, name, rustix::process::geteuid().as_raw()).map_err(passphrase_refusal)?;
     let passphrase = read_capped(&mut handle)?;
     passphrase_pipe(&passphrase)
 }
@@ -367,19 +376,19 @@ fn passphrase_input(path: &Path) -> Result<PipeReader, BorgError> {
 /// Runs `borg --lock-wait 1 list --json <location>` once (shared repository lock, no `info`) within `deadline`; returns the raw listing.
 pub fn run_raw(
     program: &Path,
+    secrets: &SecretsDir,
     source: &BorgSource,
-    tenant: &TenantScope,
-    repository: &str,
-    state: &Path,
+    target: &BorgTarget<'_>,
     limits: &Limits,
     deadline: Duration,
 ) -> Result<Vec<u8>, BorgError> {
+    let (tenant, repository, state) = (target.tenant, target.repository, target.state);
     if local_location(&source.location) {
         Err(BorgError::LocalLocationRefused)
     } else if !valid_source(source) {
         Err(BorgError::Refused)
     } else {
-        let input = passphrase_input(Path::new(&source.passphrase_file))?;
+        let input = passphrase_input(secrets, &source.passphrase_file)?;
         let base = base_directory(state, tenant, repository, rustix::process::geteuid().as_raw())?;
         let base_text = base.to_str().ok_or(BorgError::BaseDir)?;
         let variables = environment(base_text);
@@ -398,12 +407,11 @@ pub fn parse_run(raw: &[u8], source: &BorgSource, limits: &Limits) -> Result<Lis
 
 pub fn snapshot_listing(
     program: &Path,
+    secrets: &SecretsDir,
     source: &BorgSource,
-    tenant: &TenantScope,
-    repository: &str,
-    state: &Path,
+    target: &BorgTarget<'_>,
     limits: &Limits,
     deadline: Duration,
 ) -> Result<Listing, BorgError> {
-    parse_run(&run_raw(program, source, tenant, repository, state, limits, deadline)?, source, limits)
+    parse_run(&run_raw(program, secrets, source, target, limits, deadline)?, source, limits)
 }

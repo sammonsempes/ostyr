@@ -6,6 +6,7 @@ use backup_monitor::restic::{
     config_id, findings, parse_run, plan, run_raw, snapshot_listing, unchanged, valid_authority, valid_location, valid_path, valid_source, RawRun,
     ResticError, MAX_LOCATION_BYTES,
 };
+use backup_monitor::secrets::{open_secrets_dir, SecretsDir, MAX_SECRET_NAME_BYTES};
 use net_topology::model::RunFailure;
 use std::error::Error;
 use std::fs::{create_dir, set_permissions, File, Permissions};
@@ -40,6 +41,9 @@ const FAILED_CODE: i32 = 2;
 const SCRIPT_MODE: &str = "755";
 
 
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+
+
 const SECRET_MODE: u32 = 0o600;
 
 
@@ -67,15 +71,17 @@ const GONE_ATTEMPTS: usize = 100;
 const GONE_POLL: Duration = Duration::from_millis(50);
 
 
-const DECLARATIONS: &str = "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 100\n    restic:\n      location: /srv/repo\n      \
-                            password_file: /etc/restic-pw\n  - repository: bad\n    expected_min_snapshots: 1\n    restic:\n      location: -r\n      \
-                            password_file: /etc/restic-pw\n  - repository: plain\n    expected_min_snapshots: 1\n";
+const DECLARATIONS: &str =
+    "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 100\n    restic:\n      location: /srv/repo\n      \
+                            password_file: restic-pw\n  - repository: bad\n    expected_min_snapshots: 1\n    restic:\n      location: -r\n      \
+                            password_file: restic-pw\n  - repository: plain\n    expected_min_snapshots: 1\n";
 
 
 struct Setup {
     dir: TempDir,
     program: PathBuf,
     source: ResticSource,
+    secrets: SecretsDir,
 }
 
 
@@ -92,9 +98,16 @@ fn setup(mode: &str) -> Result<Setup, Box<dyn Error>> {
     set_permissions(&password, Permissions::from_mode(SECRET_MODE))?;
     let source = ResticSource {
         location: "/srv/repo".to_owned(),
-        password_file: password.display().to_string(),
+        password_file: "password".to_owned(),
     };
-    Ok(Setup { dir, program, source })
+    set_permissions(dir.path(), Permissions::from_mode(PRIVATE_DIRECTORY_MODE))?;
+    let secrets = open_secrets_dir(dir.path(), rustix::process::geteuid().as_raw())?;
+    Ok(Setup {
+        dir,
+        program,
+        source,
+        secrets,
+    })
 }
 
 
@@ -155,7 +168,7 @@ fn password_paths_follow_the_grammar() -> Result<(), Box<dyn Error>> {
     assert!(valid_path("/etc/restic.pw"));
     assert!(!valid_path("relative"));
     assert!(!valid_path("/etc/pw --x"));
-    let long = format!("/{}", "a".repeat(MAX_LOCATION_BYTES));
+    let long = "a".repeat(MAX_SECRET_NAME_BYTES + 1);
     let source = ResticSource {
         location: "/srv".to_owned(),
         password_file: long,
@@ -179,11 +192,11 @@ fn a_refused_entry_refuses_only_its_repository() -> Result<(), Box<dyn Error>> {
 #[test]
 fn the_argument_vector_is_fixed_and_the_listing_is_keyed_on_the_config_id() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let listing = snapshot_listing(&setup.program, &setup.source, &Limits::default(), PATIENT)?;
+    let listing = snapshot_listing(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)?;
     assert_eq!(listing.repository, CONFIG_ID);
     assert!(!listing.snapshots.is_empty());
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
-    let password = &setup.source.password_file;
+    let password = setup.dir.path().join("password").display().to_string();
     let expected = format!("-r /srv/repo --password-file {password} --no-cache --no-lock --json cat config\n");
     let second = format!("-r /srv/repo --password-file {password} --no-cache --no-lock --json snapshots\n");
     assert_eq!(args, format!("{expected}{second}"));
@@ -195,7 +208,7 @@ fn the_argument_vector_is_fixed_and_the_listing_is_keyed_on_the_config_id() -> R
 fn an_sftp_location_names_the_ssh_program_explicitly() -> Result<(), Box<dyn Error>> {
     let mut setup = setup("ok")?;
     setup.source.location = "sftp:backup@host.example:/srv/restic".to_owned();
-    snapshot_listing(&setup.program, &setup.source, &Limits::default(), PATIENT)?;
+    snapshot_listing(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)?;
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
     let first = args.lines().next().ok_or("no run")?;
     assert!(first.starts_with("-o sftp.command=/usr/bin/ssh -o BatchMode=yes backup@host.example -s sftp -r sftp:backup@host.example:/srv/restic "));
@@ -208,7 +221,7 @@ fn a_refused_declaration_spawns_nothing() -> Result<(), Box<dyn Error>> {
     let mut setup = setup("ok")?;
     setup.source.location = "-r".to_owned();
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), PATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
         Err(ResticError::Refused)
     ));
     assert_eq!(runs(&setup), 0);
@@ -219,9 +232,9 @@ fn a_refused_declaration_spawns_nothing() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_group_readable_password_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    set_permissions(&setup.source.password_file, Permissions::from_mode(GROUP_READABLE_MODE))?;
+    set_permissions(setup.dir.path().join("password"), Permissions::from_mode(GROUP_READABLE_MODE))?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), PATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
         Err(ResticError::PasswordFile)
     ));
     assert_eq!(runs(&setup), 0);
@@ -233,24 +246,24 @@ fn a_group_readable_password_file_is_refused_before_any_spawn() -> Result<(), Bo
 fn a_missing_or_linked_password_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     let link = setup.dir.path().join("link");
-    symlink(&setup.source.password_file, &link)?;
+    symlink(setup.dir.path().join("password"), &link)?;
     let linked = ResticSource {
         location: setup.source.location.clone(),
-        password_file: link.display().to_string(),
+        password_file: "link".to_owned(),
     };
     let missing = ResticSource {
         location: setup.source.location.clone(),
-        password_file: setup.dir.path().join("absent").display().to_string(),
+        password_file: "absent".to_owned(),
     };
     let directory = setup.dir.path().join("directory");
     create_dir(&directory)?;
     let not_regular = ResticSource {
         location: setup.source.location.clone(),
-        password_file: directory.display().to_string(),
+        password_file: "directory".to_owned(),
     };
     [linked, missing, not_regular].iter().for_each(|source| {
         assert!(matches!(
-            run_raw(&setup.program, source, &Limits::default(), PATIENT),
+            run_raw(&setup.program, &setup.secrets, source, &Limits::default(), PATIENT),
             Err(ResticError::PasswordFile)
         ))
     });
@@ -263,7 +276,7 @@ fn a_missing_or_linked_password_file_is_refused_before_any_spawn() -> Result<(),
 fn a_password_file_swapped_for_a_symlink_during_the_run_fails_the_run() -> Result<(), Box<dyn Error>> {
     let setup = setup("swap")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), PATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
         Err(ResticError::PasswordFileChanged)
     ));
     Ok(())
@@ -274,7 +287,7 @@ fn a_password_file_swapped_for_a_symlink_during_the_run_fails_the_run() -> Resul
 fn a_password_file_removed_during_the_run_fails_the_run() -> Result<(), Box<dyn Error>> {
     let setup = setup("remove")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), PATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
         Err(ResticError::Io)
     ));
     Ok(())
@@ -284,8 +297,9 @@ fn a_password_file_removed_during_the_run_fails_the_run() -> Result<(), Box<dyn 
 #[test]
 fn unchanged_accepts_the_same_file() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let handle = File::open(&setup.source.password_file)?;
-    unchanged(&handle, &setup.source.password_file)?;
+    let path = setup.dir.path().join("password").display().to_string();
+    let handle = File::open(&path)?;
+    unchanged(&handle, &path)?;
     Ok(())
 }
 
@@ -294,7 +308,7 @@ fn unchanged_accepts_the_same_file() -> Result<(), Box<dyn Error>> {
 fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
     let setup = setup("sleep")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), IMPATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), IMPATIENT),
         Err(ResticError::Timeout)
     ));
     Ok(())
@@ -305,7 +319,7 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.source, &Limits::default(), IMPATIENT),
+        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), IMPATIENT),
         Err(ResticError::Timeout)
     ));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
@@ -322,7 +336,13 @@ fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn 
 #[test]
 fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
     let config_over = setup("big")?;
-    let first = run_raw(&config_over.program, &config_over.source, &Limits::default(), PATIENT);
+    let first = run_raw(
+        &config_over.program,
+        &config_over.secrets,
+        &config_over.source,
+        &Limits::default(),
+        PATIENT,
+    );
     assert!(matches!(first, Err(ResticError::Oversized)), "{first:?}");
     let snapshots_over = setup("ok")?;
     let limits = Limits {
@@ -330,7 +350,7 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         ..Limits::default()
     };
     assert!(matches!(
-        run_raw(&snapshots_over.program, &snapshots_over.source, &limits, PATIENT),
+        run_raw(&snapshots_over.program, &snapshots_over.secrets, &snapshots_over.source, &limits, PATIENT),
         Err(ResticError::Oversized)
     ));
     Ok(())
@@ -340,7 +360,7 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_failing_restic_keeps_no_stderr_text() -> Result<(), Box<dyn Error>> {
     let setup = setup("fail")?;
-    let error = run_raw(&setup.program, &setup.source, &Limits::default(), PATIENT)
+    let error = run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)
         .err()
         .ok_or("no error")?;
     assert!(matches!(error, ResticError::Failed { code: Some(1) }));
@@ -355,7 +375,7 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     let missing = Path::new("/nonexistent/restic");
     assert!(matches!(
-        run_raw(missing, &setup.source, &Limits::default(), PATIENT),
+        run_raw(missing, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
         Err(ResticError::Spawn)
     ));
     Ok(())

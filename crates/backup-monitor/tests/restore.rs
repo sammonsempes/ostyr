@@ -5,8 +5,9 @@ use backup_monitor::model::{Limits, ResticSource, RestoreTest, SkipReason};
 use backup_monitor::restic::ResticError;
 use backup_monitor::restore::{
     choose, covers, digest_hex, dump_arguments, id_gaps, judge, list_arguments, list_cap, listing_gap, outcome_label, parse_id_list, restore_plan,
-    restore_test, skip_label, valid_canary_path, valid_test, RestoreOutcome, CANARY_FILE_NAME, ID_LINE_BYTES, MAX_CANARY_BYTES,
+    restore_test, skip_label, valid_canary_path, valid_test, RestoreOutcome, RestoreTarget, CANARY_FILE_NAME, ID_LINE_BYTES, MAX_CANARY_BYTES,
 };
+use backup_monitor::secrets::{open_secrets_dir, SecretsDir};
 use net_topology::model::RunFailure;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -45,6 +46,9 @@ const BIG_CAP: u64 = 8192;
 
 
 const SCRIPT_MODE: &str = "755";
+
+
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 
 
 const SECRET_MODE: u32 = 0o600;
@@ -110,8 +114,9 @@ const LONG_PATH_BYTES: usize = 2000;
 const TOO_MANY_PATHS: usize = 257;
 
 
-const DECLARATIONS: &str = "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      \
-                            password_file: /etc/restic-pw\n    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: ";
+const DECLARATIONS: &str =
+    "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      \
+                            password_file: restic-pw\n    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: ";
 
 
 fn clock() -> OffsetDateTime {
@@ -152,6 +157,7 @@ struct Setup {
     program: PathBuf,
     source: ResticSource,
     test: RestoreTest,
+    secrets: SecretsDir,
 }
 
 
@@ -170,7 +176,7 @@ fn setup(mode: &str, snapshots: &[String]) -> Result<Setup, Box<dyn Error>> {
     set_permissions(&password, Permissions::from_mode(SECRET_MODE))?;
     let source = ResticSource {
         location: "/srv/repo".to_owned(),
-        password_file: password.display().to_string(),
+        password_file: "password".to_owned(),
     };
     let test = RestoreTest {
         host: "web1".to_owned(),
@@ -178,7 +184,15 @@ fn setup(mode: &str, snapshots: &[String]) -> Result<Setup, Box<dyn Error>> {
         sha256: digest_hex(CANARY_CONTENT.as_bytes()),
         max_bytes: SMALL_CAP,
     };
-    Ok(Setup { dir, program, source, test })
+    set_permissions(dir.path(), Permissions::from_mode(PRIVATE_DIRECTORY_MODE))?;
+    let secrets = open_secrets_dir(dir.path(), rustix::process::geteuid().as_raw())?;
+    Ok(Setup {
+        dir,
+        program,
+        source,
+        test,
+        secrets,
+    })
 }
 
 
@@ -195,9 +209,12 @@ fn run(setup: &Setup) -> Result<backup_monitor::restore::RestoreResult, ResticEr
     let declarations = load_declarations("tenant: acme\n", "d.yaml").map_err(ResticError::Listing)?;
     restore_test(
         &setup.program,
-        &declarations.tenant,
-        &setup.source,
-        &setup.test,
+        &setup.secrets,
+        &RestoreTarget {
+            tenant: &declarations.tenant,
+            source: &setup.source,
+            test: &setup.test,
+        },
         &Limits::default(),
         PATIENT,
         clock,
@@ -232,7 +249,7 @@ fn a_matching_canary_is_restored_from_the_newest_snapshot_of_the_host_by_id() ->
     assert_eq!(result.snapshot_id, Some(id_of('2')));
     assert_eq!(result.snapshot_time, Some(NEWEST_GOOD_TIME));
     assert_eq!(result.tested_at, clock());
-    let password = &setup.source.password_file;
+    let password = setup.dir.path().join("password").display().to_string();
     let expected = format!(
         "-r /srv/repo --password-file {password} --no-cache --no-lock dump {} {CANARY_PATH}\n",
         id_of('2')
@@ -286,9 +303,12 @@ fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Erro
     let declarations = load_declarations("tenant: acme\n", "d.yaml")?;
     let result = restore_test(
         &setup.program,
-        &declarations.tenant,
-        &setup.source,
-        &setup.test,
+        &setup.secrets,
+        &RestoreTarget {
+            tenant: &declarations.tenant,
+            source: &setup.source,
+            test: &setup.test,
+        },
         &Limits::default(),
         IMPATIENT,
         clock,
@@ -304,9 +324,12 @@ fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Erro
     assert_eq!(
         restore_test(
             &sleeping.program,
-            &declarations.tenant,
-            &sleeping.source,
-            &sleeping.test,
+            &sleeping.secrets,
+            &RestoreTarget {
+                tenant: &declarations.tenant,
+                source: &sleeping.source,
+                test: &sleeping.test,
+            },
             &Limits::default(),
             IMPATIENT,
             clock
@@ -473,14 +496,14 @@ fn a_bad_entry_refuses_only_its_own_test_by_index() -> Result<(), Box<dyn Error>
     let digest = digest_hex(b"x");
     let text = format!(
         "{DECLARATIONS}{digest}\n      max_bytes: 10\n  \
-         - repository: badpath\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      password_file: /etc/restic-pw\n    restore_test:\n      \
+         - repository: badpath\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      password_file: restic-pw\n    restore_test:\n      \
          host: web1\n      path: /etc/shadow\n      sha256: {digest}\n      max_bytes: 10\n  \
          - repository: norestic\n    expected_min_snapshots: 1\n    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      \
          sha256: {digest}\n      max_bytes: 10\n  \
-         - repository: both\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      password_file: /etc/restic-pw\n    borg:\n      \
-         location: ssh://u@h/p\n      passphrase_file: /etc/x\n    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      \
+         - repository: both\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      password_file: restic-pw\n    borg:\n      \
+         location: ssh://u@h/p\n      passphrase_file: x\n    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      \
          sha256: {digest}\n      max_bytes: 10\n  \
-         - repository: badsource\n    expected_min_snapshots: 1\n    restic:\n      location: -r\n      password_file: /etc/restic-pw\n    restore_test:\n      \
+         - repository: badsource\n    expected_min_snapshots: 1\n    restic:\n      location: -r\n      password_file: restic-pw\n    restore_test:\n      \
          host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: {digest}\n      max_bytes: 10\n  \
          - repository: plain\n    expected_min_snapshots: 1\n"
     );
@@ -502,7 +525,7 @@ fn a_refused_test_spawns_nothing_and_a_bad_password_file_too() -> Result<(), Box
     setup.source.location = "-r".to_owned();
     assert!(matches!(run(&setup), Err(ResticError::Refused)));
     setup.source.location = "/srv/repo".to_owned();
-    set_permissions(&setup.source.password_file, Permissions::from_mode(GROUP_READABLE_MODE))?;
+    set_permissions(setup.dir.path().join("password"), Permissions::from_mode(GROUP_READABLE_MODE))?;
     assert!(matches!(run(&setup), Err(ResticError::PasswordFile)));
     assert_eq!(runs(&setup), 0);
     Ok(())
@@ -550,10 +573,10 @@ fn run_failures_of_the_dump_are_outcomes_or_fixed_errors() -> Result<(), Box<dyn
 fn the_dump_vector_carries_the_sftp_transport_and_no_json_flag() -> Result<(), Box<dyn Error>> {
     let source = ResticSource {
         location: "sftp:u@h:/r".to_owned(),
-        password_file: "/pw".to_owned(),
+        password_file: "pw".to_owned(),
     };
     let transport = vec!["-o".to_owned(), "x".to_owned()];
-    let vector = dump_arguments(&source, &transport, "ID", CANARY_PATH);
+    let vector = dump_arguments(&source, "/pw", &transport, "ID", CANARY_PATH);
     assert_eq!(
         vector,
         vec![
@@ -747,16 +770,16 @@ fn a_snapshot_the_list_does_not_hold_is_an_unlisted_gap() -> Result<(), Box<dyn 
 fn the_list_call_uses_the_prefix_and_the_shared_flags_without_json() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok", &good_snapshots())?;
     run(&setup)?;
-    let password = &setup.source.password_file;
+    let password = setup.dir.path().join("password").display().to_string();
     let expected = format!("-r /srv/repo --password-file {password} --no-cache --no-lock list snapshots\n");
     assert!(args(&setup)?.contains(&expected));
     let source = ResticSource {
         location: "sftp:u@h:/r".to_owned(),
-        password_file: "/pw".to_owned(),
+        password_file: "pw".to_owned(),
     };
     let transport = vec!["-o".to_owned(), "x".to_owned()];
     assert_eq!(
-        list_arguments(&source, &transport),
+        list_arguments(&source, "/pw", &transport),
         vec![
             "-o",
             "x",
@@ -802,7 +825,20 @@ fn a_bad_id_list_is_a_fixed_error() -> Result<(), Box<dyn Error>> {
 fn too_many_list_lines_and_a_huge_output_are_fixed_errors() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok", &good_snapshots())?;
     let declarations = load_declarations("tenant: acme\n", "d.yaml")?;
-    let run_with = |limits: &Limits| restore_test(&setup.program, &declarations.tenant, &setup.source, &setup.test, limits, PATIENT, clock);
+    let run_with = |limits: &Limits| {
+        restore_test(
+            &setup.program,
+            &setup.secrets,
+            &RestoreTarget {
+                tenant: &declarations.tenant,
+                source: &setup.source,
+                test: &setup.test,
+            },
+            limits,
+            PATIENT,
+            clock,
+        )
+    };
     assert!(matches!(
         run_with(&limits_of(TWO_LINES)),
         Err(ResticError::Listing(BackupError::TooManySnapshots { .. }))
@@ -840,9 +876,12 @@ fn a_failing_or_hanging_list_is_a_fixed_error_within_the_shared_deadline() -> Re
     std::fs::write(setup.dir.path().join("list_mode"), "hang")?;
     let hung = restore_test(
         &setup.program,
-        &declarations.tenant,
-        &setup.source,
-        &setup.test,
+        &setup.secrets,
+        &RestoreTarget {
+            tenant: &declarations.tenant,
+            source: &setup.source,
+            test: &setup.test,
+        },
         &Limits::default(),
         IMPATIENT,
         clock,
