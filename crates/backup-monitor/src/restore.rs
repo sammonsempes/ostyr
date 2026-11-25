@@ -287,11 +287,12 @@ pub fn restore_test(
     limits: &Limits,
     deadline: Duration,
     clock: Clock,
+    euid: u32,
 ) -> Result<RestoreResult, ResticError> {
     let (tenant, source, test) = (target.tenant, target.source, target.test);
     let password_text = secret_path(secrets, &source.password_file).filter(|_| valid_source(source) && valid_test(test));
     if let Some(password) = password_text {
-        let checked = open_secret_in(secrets, &source.password_file, rustix::process::geteuid().as_raw()).map_err(password_failure)?;
+        let checked = open_secret_in(secrets, &source.password_file, euid).map_err(password_failure)?;
         let transport = sftp_transport(&source.location);
         let start = Instant::now();
         let config = run_command(

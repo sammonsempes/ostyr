@@ -172,6 +172,7 @@ fn run(setup: &Setup) -> Result<Vec<u8>, BorgError> {
         },
         &Limits::default(),
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     )
 }
 
@@ -367,6 +368,7 @@ fn the_listing_is_keyed_on_the_repository_id_and_reads_the_host_from_the_name() 
         },
         &Limits::default(),
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     )?;
     assert_eq!(listing.repository, REPOSITORY_ID);
     assert_eq!(listing.snapshots.len(), 1);
@@ -433,6 +435,7 @@ fn a_bad_passphrase_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Err
             },
             &Limits::default(),
             PATIENT,
+            rustix::process::geteuid().as_raw(),
         );
         assert!(matches!(outcome, Err(BorgError::PassphraseFile)), "{file:?}");
         Ok(())
@@ -575,6 +578,7 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
         },
         &Limits::default(),
         IMPATIENT,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     Ok(())
@@ -595,6 +599,7 @@ fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn 
         },
         &Limits::default(),
         IMPATIENT,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
@@ -626,6 +631,7 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         },
         &limits,
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(outcome, Err(BorgError::Oversized)));
     Ok(())
@@ -659,6 +665,7 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
         },
         &Limits::default(),
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(outcome, Err(BorgError::Spawn)));
     Ok(())
@@ -813,6 +820,7 @@ fn run_named(setup: &Setup, repository: &str) -> Result<Vec<u8>, BorgError> {
         },
         &Limits::default(),
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     )
 }
 

@@ -763,13 +763,17 @@ dependencies = [
 name = "backup-monitor"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
  "core-config",
  "core-pg",
  "net-topology",
+ "pg-fake",
+ "rcgen",
  "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
