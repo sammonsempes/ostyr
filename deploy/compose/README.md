@@ -47,7 +47,9 @@ docker run --rm --network ostyr_default -v "$PWD/secrets/ca.crt:/ca.crt:ro" nats
     --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge
 ```
 
-Read events back with the same container and `stream view events --raw` (add `-t` to `docker run`). The consumer services (siem-ingest, detection) are not in this stack yet.
+Read events back with the same container and `stream view events --raw` (add `-t` to `docker run`).
+
+The consumers read through their own durables, which the operator also creates once as `admin`, with the same container: a stream `dead` (`stream add dead --subjects 'dead.events.*' --storage file --retention limits --discard old --max-msgs=16000 --max-bytes=134217728 --max-age=0 --max-msg-size=8192 --max-msgs-per-subject=1000 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge`) and the durables `siem-ingest` and `metrics-ingest` (`consumer add events <name> --pull --deliver all --ack explicit --filter 'events.>' --replay instant --max-deliver=-1 --max-pending 1000 --no-headers-only --wait 30s --defaults`). `siem` (`ostyr-siem-ingest`) stores the events in ClickHouse `ostyr.events`, `metrics` (`ostyr-metrics-ingest`) stores the host metrics of the agents in `ostyr.metric_samples`, and `metricalerts` (`ostyr-metric-alerts`) evaluates `config/metric-alerts-rules.yaml` for tenant `default` every 30 s and stores an alert row in PostgreSQL. Before the durables exist `siem` and `metrics` stop and compose restarts them. Each reloads its files on a change or on `docker compose kill -s HUP <service>` and writes an audit log in its own volume.
 
 ## Configuration
 

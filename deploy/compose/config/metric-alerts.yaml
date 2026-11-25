@@ -1,0 +1,7 @@
+fetch_settings: /etc/ostyr/metric-alerts-fetch.yaml
+rules_file: /etc/ostyr/metric-alerts-rules.yaml
+pg_settings: /etc/ostyr/metric-alerts-pg.yaml
+tenants: [default]
+round_seconds: 30
+max_tenants: 5
+audit_file: /var/lib/ostyr-metric-alerts/audit.log

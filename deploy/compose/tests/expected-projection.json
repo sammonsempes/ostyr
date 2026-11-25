@@ -26,6 +26,14 @@
       "file": "secrets/api_tls.key",
       "name": "ostyr_api_tls_key"
     },
+    "clickhouse_ingest_password": {
+      "file": "secrets/clickhouse_ingest_password",
+      "name": "ostyr_clickhouse_ingest_password"
+    },
+    "clickhouse_metrics_password": {
+      "file": "secrets/clickhouse_metrics_password",
+      "name": "ostyr_clickhouse_metrics_password"
+    },
     "clickhouse_schema_password": {
       "file": "secrets/clickhouse_schema_password",
       "name": "ostyr_clickhouse_schema_password"
@@ -50,6 +58,14 @@
       "file": "secrets/gateway_tls.key",
       "name": "ostyr_gateway_tls_key"
     },
+    "metricalerts_clickhouse_password": {
+      "file": "secrets/metricalerts_clickhouse_password",
+      "name": "ostyr_metricalerts_clickhouse_password"
+    },
+    "metricalerts_pg_password": {
+      "file": "secrets/metricalerts_pg_password",
+      "name": "ostyr_metricalerts_pg_password"
+    },
     "nats_conf": {
       "file": "secrets/nats.conf",
       "name": "ostyr_nats_conf"
@@ -58,6 +74,10 @@
       "file": "secrets/nats_gateway_password",
       "name": "ostyr_nats_gateway_password"
     },
+    "nats_metrics_password": {
+      "file": "secrets/nats_metrics_password",
+      "name": "ostyr_nats_metrics_password"
+    },
     "nats_server_cert": {
       "file": "secrets/nats_server.crt",
       "name": "ostyr_nats_server_cert"
@@ -65,6 +85,10 @@
     "nats_server_key": {
       "file": "secrets/nats_server.key",
       "name": "ostyr_nats_server_key"
+    },
+    "nats_siem_password": {
+      "file": "secrets/nats_siem_password",
+      "name": "ostyr_nats_siem_password"
     },
     "pg_ca": {
       "file": "secrets/ca.crt",
@@ -290,6 +314,130 @@
         {
           "source": "gatewaystate",
           "target": "/var/lib/ostyr-gateway",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "metricalerts": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-metric-alerts",
+        "/etc/ostyr/metric-alerts.yaml"
+      ],
+      "depends_on": {
+        "clickhouse": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "metricalerts_pg_password",
+          "target": "/run/secrets/metricalerts_pg_password"
+        },
+        {
+          "source": "metricalerts_clickhouse_password",
+          "target": "/run/secrets/metricalerts_clickhouse_password"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65527:65527",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "alertsstate",
+          "target": "/var/lib/ostyr-metric-alerts",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "metrics": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-metrics-ingest",
+        "/etc/ostyr/metrics-ingest.yaml"
+      ],
+      "depends_on": {
+        "clickhouse": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "nats": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "clickhouse_metrics_password",
+          "target": "/run/secrets/clickhouse_metrics_password"
+        },
+        {
+          "source": "nats_metrics_password",
+          "target": "/run/secrets/nats_metrics_password"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65528:65528",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "metricsstate",
+          "target": "/var/lib/ostyr-metrics",
           "type": "volume",
           "volume": {}
         }
@@ -623,6 +771,68 @@
         }
       ]
     },
+    "siem": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-siem-ingest",
+        "/etc/ostyr/siem-ingest.yaml"
+      ],
+      "depends_on": {
+        "clickhouse": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "nats": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": null
+      },
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "clickhouse_ingest_password",
+          "target": "/run/secrets/clickhouse_ingest_password"
+        },
+        {
+          "source": "nats_siem_password",
+          "target": "/run/secrets/nats_siem_password"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65529:65529",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "siemstate",
+          "target": "/var/lib/ostyr-siem",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
     "web": {
       "cap_drop": [
         "ALL"
@@ -693,11 +903,17 @@
     }
   },
   "volumes": {
+    "alertsstate": {
+      "name": "ostyr_alertsstate"
+    },
     "chdata": {
       "name": "ostyr_chdata"
     },
     "gatewaystate": {
       "name": "ostyr_gatewaystate"
+    },
+    "metricsstate": {
+      "name": "ostyr_metricsstate"
     },
     "natsdata": {
       "name": "ostyr_natsdata"
@@ -710,6 +926,9 @@
     },
     "relaystate": {
       "name": "ostyr_relaystate"
+    },
+    "siemstate": {
+      "name": "ostyr_siemstate"
     },
     "state": {
       "name": "ostyr_state"

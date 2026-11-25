@@ -309,7 +309,7 @@ expect "the analyst has no status.write: opening an incident is 403" test "$(sed
 migrations="$(query_migrations 'select namespace || chr(32) || count(*) from public.schema_migrations group by namespace order by namespace')"
 printf 'migrations applied:\n%s\n' "$migrations"
 readonly MIGRATION_NAMESPACES=14
-expect "the 14 modules with a store (risk reads alerts) applied their migrations, each in its own namespace" test "$(grep -c -E '^[a-z_]+ [0-9]+$' <<<"$migrations")" -eq "$MIGRATION_NAMESPACES"
+expect "the 14 modules with a store (risk reads alerts) applied their migrations, each in its own namespace, the playbooks service one more or not yet" test "$(grep -v '^playbooks ' <<<"$migrations" | grep -c -E '^[a-z_]+ [0-9]+$')" -eq "$MIGRATION_NAMESPACES"
 migrations_before="$(query_migrations 'select count(*) from public.schema_migrations')"
 compose "restart"
 expect "the API answers after a restart on the same pgdata" wait_ready
@@ -380,9 +380,9 @@ expect "the gateway sits at the address the relay forwards to" test "$(inspect_s
 expect "the relay sits at the address the gateway admits" test "$(inspect_service relay '{{(index .NetworkSettings.Networks "ostyr_default").IPAddress}}')" = 172.29.63.12
 expect "the secret files have the expected owners and modes" test "$(remote "cd compose && sudo stat -c '%n %a %u:%g' secrets/gateway_tls.key secrets/nats_gateway_password secrets/nats_admin_password secrets/nats.conf secrets/nats_server.key secrets/agent.key secrets/agent_ca.crt | sed 's#secrets/##' | xargs")" \
     = "gateway_tls.key 600 65534:65534 nats_gateway_password 600 65534:65534 nats_admin_password 600 0:0 nats.conf 600 0:0 nats_server.key 600 0:0 agent.key 600 0:0 agent_ca.crt 644 0:0"
-expect "init.sh refuses a nats.conf that lacks the gateway password" remote "sudo rm -rf natsplant && sudo mkdir natsplant && sudo cp -a compose/init.sh natsplant/ && sudo cp -a compose/secrets natsplant/secrets \
+expect "init.sh refuses a nats.conf that is not its own rendering (one line only)" remote "sudo rm -rf natsplant && sudo mkdir natsplant && sudo cp -a compose/init.sh natsplant/ && sudo cp -a compose/secrets natsplant/secrets \
     && sudo sh -c 'echo x >natsplant/secrets/nats.conf' && sudo chmod 0600 natsplant/secrets/nats.conf && cd natsplant && ! sudo ./init.sh lab.example 2>&1 | grep -q 'secrets ready' \
-    && sudo ./init.sh lab.example 2>&1 | grep -q 'nats.conf does not hold'"
+    && sudo ./init.sh lab.example 2>&1 | grep -q 'nats.conf is not the file init.sh renders'"
 remote "sudo rm -rf natsplant"
 expect "the gateway logs that it serves" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do sudo docker compose logs gateway 2>&1 | grep -q 'serving' && exit 0; sleep 2; done; exit 1"
 expect "the relay logs no start error" absent remote "cd compose && sudo docker compose logs relay 2>&1 | grep -e ERROR -e WARN"
@@ -390,6 +390,14 @@ expect "the relay logs no start error" absent remote "cd compose && sudo docker 
 nats_box admin nats_admin_password stream add events --subjects "'events.>'" --storage file --retention limits --discard old --max-msgs=-1 --max-bytes=1073741824 \
     --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
 expect "the events stream exists in the events account" nats_box admin nats_admin_password stream info events
+nats_box admin nats_admin_password stream add dead --subjects "'dead.events.*'" --storage file --retention limits --discard old --max-msgs=16000 --max-bytes=134217728 \
+    --max-age=0 --max-msg-size=8192 --max-msgs-per-subject=1000 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+for durable in siem-ingest metrics-ingest; do
+    nats_box admin nats_admin_password consumer add events "$durable" --pull --deliver all --ack explicit --filter "'events.>'" --replay instant --max-deliver=-1 --max-pending 1000 \
+        --no-headers-only --wait 30s --defaults >/dev/null
+    expect "the durable $durable exists on the events stream" nats_box admin nats_admin_password consumer info events "$durable"
+done
+expect "the dead stream exists" nats_box admin nats_admin_password stream info dead
 expect "the gateway user cannot publish outside events.*" test "$(nats_box gateway nats_gateway_password pub other.subject x 2>&1 | grep -c -i 'permissions violation')" -ge 1
 expect "the gateway user cannot call the JetStream API" test "$(nats_box gateway nats_gateway_password pub "'\$JS.API.STREAM.LIST'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
 expect "the gateway user cannot publish on a nested events subject" test "$(nats_box gateway nats_gateway_password pub events.a.b x 2>&1 | grep -c -i 'permissions violation')" -ge 1
@@ -402,22 +410,80 @@ agent_value() {
     printf '%s\n' "$agent_proofs" | sed -n "s/^$1 //p"
 }
 expect "the proof agent sent its batch through the relay port (exit 0)" test "$(agent_value agent_exit)" = 0
-expect "the agent run acknowledged one batch" grep -q 'acknowledged 1 batches' <<<"$(agent_value agent_out)"
+expect "the agent run acknowledged its two spooled batches (a log line and a host metrics line)" grep -q 'acknowledged 2 batches' <<<"$(agent_value agent_out)"
 expect "the spool is empty after the acknowledgement" test "$(agent_value spool_left)" = 0
 expect "a client without a certificate reached the gateway through the relay (server certificate received)" test "$(agent_value no_certificate_out)" -ge 1
 stream_view="$(NATS_BOX_TTY=-t nats_box admin nats_admin_password stream view events --raw 2>&1 || true)"
 printf '%s\n' "$stream_view"
 expect "nats stream view shows the batch on events.default" grep -q 't853 batch through the relay' <<<"$stream_view"
 stream_messages="$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
-expect "the events stream holds exactly one message" test "$stream_messages" = 1
+expect "the events stream holds exactly the two events of the batch (a log line and a host metrics line)" test "$stream_messages" = 2
 expect "the gateway logged both refused clients (none, other CA) as failed handshakes" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do [ \$(sudo docker compose logs gateway 2>&1 | grep -c 'TLS handshake failed') -ge 2 ] && exit 0; sleep 2; done; exit 1"
-expect "the gateway published exactly one batch" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 1
+expect "the gateway published exactly two batches" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 2
 remote "cd compose && sudo docker compose logs gateway 2>&1 | tail -n 20"
-expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 1
+expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 2
 expect "a container that is not the relay is dropped by the gateway relay port before the handshake (curl exit 35)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.63.11:7443/; echo \$?")" = 35
 expect "NATS is closed from the host network" absent remote "nc -z -w 3 $vm_address $NATS_PORT || nc -z -w 3 127.0.0.1 $NATS_PORT"
 expect "the gateway ports are closed from the host network" absent remote "nc -z -w 3 127.0.0.1 7444 || nc -z -w 3 $vm_address 7444"
-for service_name in postgres platform web playbooks nats gateway relay clickhouse chschema; do
+for service in siem metrics metricalerts; do
+    expect "the $service service is running" test "$(inspect_service "$service" '{{.State.Running}}')" = true
+    expect "the $service root filesystem is read-only" test "$(inspect_service "$service" '{{.HostConfig.ReadonlyRootfs}}')" = true
+    expect "the $service service drops every capability" test "$(inspect_service "$service" '{{.HostConfig.CapDrop}}')" = "[ALL]"
+    expect "the $service service has no-new-privileges" test "$(inspect_service "$service" '{{.HostConfig.SecurityOpt}}')" = "[no-new-privileges:true]"
+    expect "the $service service publishes no port" test -z "$(published_ports "$service")"
+    expect "no secret value is in the $service environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $(service_container "$service") | grep -i -e password -e BEGIN"
+done
+expect "siem, metrics and metricalerts run as 65529, 65528 and 65527" test "$(inspect_service siem '{{.Config.User}}') $(inspect_service metrics '{{.Config.User}}') $(inspect_service metricalerts '{{.Config.User}}')" \
+    = "65529:65529 65528:65528 65527:65527"
+expect "siem mounts exactly its three secrets" test "$(service_secret_files siem)" = "ca.crt clickhouse_ingest_password nats_siem_password"
+expect "metrics mounts exactly its three secrets" test "$(service_secret_files metrics)" = "ca.crt clickhouse_metrics_password nats_metrics_password"
+expect "metricalerts mounts exactly its three secrets" test "$(service_secret_files metricalerts)" = "ca.crt metricalerts_clickhouse_password metricalerts_pg_password"
+expect "the ingest secret files have the expected owners and modes" test "$(remote "cd compose && sudo stat -c '%n %a %u:%g' secrets/clickhouse_ingest_password secrets/nats_siem_password secrets/clickhouse_metrics_password \
+    secrets/nats_metrics_password secrets/metricalerts_pg_password secrets/metricalerts_clickhouse_password | sed 's#secrets/##' | xargs")" \
+    = "clickhouse_ingest_password 600 65529:65529 nats_siem_password 600 65529:65529 clickhouse_metrics_password 600 65528:65528 nats_metrics_password 600 65528:65528 metricalerts_pg_password 400 65527:65527 metricalerts_clickhouse_password 400 65527:65527"
+expect "the metricalerts copies equal their sources" remote "cd compose && sudo cmp secrets/metricalerts_pg_password secrets/pg_service_password && sudo cmp secrets/metricalerts_clickhouse_password secrets/clickhouse_reader_password"
+events_before_attacks="$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
+dead_before_attacks="$(nats_box admin nats_admin_password stream info dead --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
+expect "siem_ingest cannot publish an event" test "$(nats_box siem_ingest nats_siem_password pub events.default x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot purge the stream" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.API.STREAM.PURGE.events'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot create a consumer" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.API.CONSUMER.CREATE.events'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot read the metrics durable" test "$(nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.metrics-ingest'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot ack the metrics durable" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.ACK.events.metrics-ingest.1.1.1.1.1'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot publish an event" test "$(nats_box metrics_ingest nats_metrics_password pub events.default x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot read the siem durable" test "$(nats_box metrics_ingest nats_metrics_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.siem-ingest'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot subscribe to another inbox" test "$(nats_box metrics_ingest nats_metrics_password sub "'_INBOX_siem_ingest.>'" --count 1 --timeout 3s 2>&1 | grep -c -i 'permissions violation')" -ge 1
+nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.siem-ingest'" '' --reply events.victim >/dev/null 2>&1
+nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.MSG.NEXT.events.siem-ingest'" '' --reply events.victim >/dev/null 2>&1
+expect "a reply subject named as events.victim stores nothing on the stream" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = "$events_before_attacks"
+expect "no consumer was created by the refused subjects" test "$(nats_box admin nats_admin_password consumer ls events --names 2>&1 | grep -c -e siem-ingest -e metrics-ingest)" -eq 2
+for api_subject in 'STREAM.DELETE.events' 'STREAM.DELETE.dead' 'STREAM.INFO.events' 'STREAM.INFO.dead' 'CONSUMER.DELETE.events.siem-ingest' 'CONSUMER.DELETE.events.metrics-ingest' \
+    'CONSUMER.DELETE.dead.siem-ingest' 'CONSUMER.INFO.dead.siem-ingest'; do
+    for prefix in '$JS.API' 'JS.EVENTS.API'; do
+        expect "siem_ingest cannot publish $prefix.$api_subject" test "$(nats_box siem_ingest nats_siem_password pub "'$prefix.$api_subject'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+        expect "metrics_ingest cannot publish $prefix.$api_subject" test "$(nats_box metrics_ingest nats_metrics_password pub "'$prefix.$api_subject'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+    done
+done
+expect "after the delete and info attempts both streams are still listed" test "$(nats_box admin nats_admin_password stream ls --names 2>&1 | grep -c -x -e events -e dead)" -eq 2
+expect "after the delete attempts both durables are still listed on events" test "$(nats_box admin nats_admin_password consumer ls events --names 2>&1 | grep -c -x -e siem-ingest -e metrics-ingest)" -eq 2
+expect "after the delete attempts the events stream still holds its messages" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = "$events_before_attacks"
+expect "after the delete attempts the dead stream still holds its messages" test "$(nats_box admin nats_admin_password stream info dead --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = "$dead_before_attacks"
+ingest_proofs="$(remote_stdin "cd compose && sudo bash -s -- $NATS_BOX_IMAGE" <"$TESTS_DIR/ingest-proof.sh")"
+printf '%s\n' "$ingest_proofs"
+ingest_value() {
+    printf '%s\n' "$ingest_proofs" | sed -n "s/^$1 //p"
+}
+expect "siem stored the agent's log event in ClickHouse (read back as the reader)" test "$(ingest_value events_rows)" = 1
+expect "siem skipped the host metrics event (no row with that dataset in events)" test "$(ingest_value host_event_rows_in_events)" = 0
+expect "metrics stored the host metric sample for the proof tenant" test "$(ingest_value metric_rows)" = 1
+expect "the stored sample value is the agent's 0.97" test "$(ingest_value metric_value)" = 0.97
+expect "the sample belongs to the tenant of the agent certificate only" test "$(ingest_value metric_tenants)" = "['default']"
+expect "the threshold rule raised exactly one alert row for the proof tenant" test "$(ingest_value alert_rows)" = 1
+for volume in siemstate metricsstate alertsstate; do
+    expect "$volume: the reload after SIGHUP is audited under the non-customer tenant all" test "$(ingest_value "${volume}_audit_all")" -ge 1
+    expect "$volume: no audit line carries a customer tenant" test "$(ingest_value "${volume}_audit_other")" = 0
+done
+compose logs siem metrics metricalerts 2>&1 | tail -n 40
+for service_name in postgres platform web playbooks nats gateway relay clickhouse chschema siem metrics metricalerts; do
     expect "init.sh refuses the service name $service_name as the public host name" remote "cd compose && sudo ./init.sh $service_name 2>&1 | grep -q 'is a compose service name'"
 done
 expect "the events stream has the byte limit" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"max_bytes": *\([0-9]*\).*/\1/p' | head -n 1)" = 1073741824
@@ -429,7 +495,8 @@ expect "the gateway key is accepted for the name gateway" remote "cd compose && 
 expect "the API key fails the name gateway" remote "cd compose && (sudo timeout 20 openssl s_server -accept 9557 -www -cert secrets/api_tls.crt -key secrets/api_tls.key >/dev/null 2>&1 &) ; sleep 2; \
     sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve gateway:9557:127.0.0.1 -o /dev/null https://gateway:9557/ 2>&1 | tee /dev/stderr | grep -q 'no alternative certificate subject name'"
 expect "no s_server proof process is left listening on 9555 to 9557" absent remote "sudo pkill -x openssl; sleep 1; sudo ss -ltn | grep -E ':(9555|9556|9557) '"
-expect "init.sh warns by name about an old nats.conf without max_file_store and changes nothing" remote "sudo rm -rf $VM_WORK_DIR/init-copy && sudo mkdir -p $VM_WORK_DIR/init-copy && sudo cp -a compose/. $VM_WORK_DIR/init-copy/ && cd $VM_WORK_DIR/init-copy && sudo sed -i '/max_file_store/d' secrets/nats.conf && before=\$(sudo sha256sum secrets/nats.conf) && sudo ./init.sh lab.example 2>&1 | tee /dev/stderr | grep -q 'nats.conf has no max_file_store' && test \"\$before\" = \"\$(sudo sha256sum secrets/nats.conf)\"; status=\$?; sudo rm -rf $VM_WORK_DIR/init-copy; exit \$status"
+expect "the live nats.conf equals the committed golden file once the passwords are replaced by markers" remote "cd compose && sudo cat secrets/nats.conf | sudo env ADMIN_PASSWORD=\$(sudo cat secrets/nats_admin_password) GATEWAY_PASSWORD=\$(sudo cat secrets/nats_gateway_password) SIEM_PASSWORD=\$(sudo cat secrets/nats_siem_password) METRICS_PASSWORD=\$(sudo cat secrets/nats_metrics_password) tests/mark-nats-passwords.sh | diff - tests/expected-nats.conf"
+expect "init.sh refuses a nats.conf with an added line, by name, and changes nothing" remote "sudo rm -rf $VM_WORK_DIR/init-copy && sudo mkdir -p $VM_WORK_DIR/init-copy && sudo cp -a compose/. $VM_WORK_DIR/init-copy/ && cd $VM_WORK_DIR/init-copy && printf 'authorization { token: x }\\n' | sudo tee -a secrets/nats.conf >/dev/null && before=\$(sudo sha256sum secrets/nats.conf) && sudo ./init.sh lab.example 2>&1 | tee /dev/stderr | grep -q 'nats.conf is not the file init.sh renders' && test \"\$before\" = \"\$(sudo sha256sum secrets/nats.conf)\"; status=\$?; sudo rm -rf $VM_WORK_DIR/init-copy; exit \$status"
 expect "init.sh warns by name about a gateway certificate with an extra name or a newline name, and changes no file" remote "sudo rm -rf $VM_WORK_DIR/init-copy && sudo mkdir -p $VM_WORK_DIR/init-copy && sudo cp -a compose/. $VM_WORK_DIR/init-copy/ && sudo compose/tests/gateway-san-proof.sh $VM_WORK_DIR/init-copy | tee /dev/stderr | grep -c '^ok' | grep -qx 2; status=\$?; sudo rm -rf $VM_WORK_DIR/init-copy; exit \$status"
 expect "chschema finished and exited 0" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do sudo docker compose ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}' | grep -qx 'chschema exited 0' && exit 0; sleep 2; done; exit 1"
 expect "chschema logged its statement count" remote "cd compose && sudo docker compose logs chschema 2>&1 | grep -q 'schema applied: 9 statements'"
