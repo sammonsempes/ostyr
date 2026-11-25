@@ -413,6 +413,71 @@ fn a_flapping_check_cannot_evict_another_checks_single_outage() -> TestResult {
 
 
 #[test]
+fn a_recovered_check_keeps_its_outage_while_another_flaps() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let mut runner = new_runner(&scope, "paris")?;
+    let mut both = checks(&["flap"], STEP, 1, "x:1", "[paris]")?;
+    both.extend(checks(&["steady"], STEP, 1, "x:1", "[paris]")?);
+    reload_checks(&mut runner, &both)?;
+    let harness = harness();
+    harness.mode.set(StoreMode::Fail);
+    (0..FLAP_ROUNDS).for_each(|k| {
+        let failing: &[&str] = match (k, k % TWO) {
+            (0, _) => &["flap", "steady"],
+            (_, 0) => &["flap"],
+            _ => &[],
+        };
+        fail(&harness, failing);
+        round(&harness, &mut runner, &scope);
+    });
+    assert!(runner.counters.pending_dropped > 0);
+    assert!(runner
+        .states
+        .iter()
+        .all(|state| state.run_started.is_none() || state.check.name == "flap"));
+    harness.mode.set(StoreMode::Accept);
+    round(&harness, &mut runner, &scope);
+    let steady_stored = harness
+        .stored
+        .borrow()
+        .iter()
+        .flatten()
+        .filter(|alert| alert.event_ids.first().is_some_and(|id| id == "check:steady"))
+        .count();
+    assert_eq!(steady_stored, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_kind_change_in_the_same_second_never_merges_two_outages() -> TestResult {
+    let (mut runner, scope) = prepared(&["web"])?;
+    let harness = harness();
+    harness.mode.set(StoreMode::Fail);
+    fail(&harness, &["web"]);
+    rounds(&harness, &mut runner, &scope, TWO);
+    let changed: Vec<Check> = simple(&["web"])?
+        .into_iter()
+        .map(|check| Check {
+            kind: CheckKind::Icmp,
+            target: "127.0.0.1".to_owned(),
+            ..check
+        })
+        .collect();
+    reload_checks(&mut runner, &changed)?;
+    harness.wall.set(WALL_START);
+    harness.mono.set(harness.mono.get() + DAY);
+    let report = rounds(&harness, &mut runner, &scope, TWO).pop().ok_or("no round")?;
+    assert_eq!(report.pending, TWO);
+    harness.mode.set(StoreMode::Accept);
+    let stored = round(&harness, &mut runner, &scope);
+    assert_eq!((stored.stored, stored.pending), (TWO, 0));
+    assert!(runner.states.iter().all(|state| state.raised));
+    Ok(())
+}
+
+
+#[test]
 fn a_duplicate_check_name_is_refused_and_nothing_changes() -> TestResult {
     let (mut runner, _scope) = prepared(&["web"])?;
     let mut twice = simple(&["a"])?;

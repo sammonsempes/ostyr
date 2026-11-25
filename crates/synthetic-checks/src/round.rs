@@ -14,7 +14,7 @@ use std::time::Duration;
 pub const MAX_PROBES_PER_ROUND: usize = 64;
 
 
-/// Shared slots for the pending outages of runs that ended or were reset; the current run of each check has its own reserved slot on top.
+/// Shared slots for pending outages that are not the newest of a current check; that newest one has its own reserved slot on top.
 pub const MAX_PENDING_OUTAGES: usize = 256;
 
 
@@ -241,41 +241,46 @@ pub fn probe_state(state: &mut CheckState, tenant: &str, location: &str, ctx: &R
 }
 
 
-/// Keeps one pending outage per check and run; the cap is applied by `trim_pending`.
+/// Keeps one pending outage per check, kind and run; the cap is applied by `trim_pending`.
 pub fn add_pending(runner: &mut Runner, outage: Outage) {
     let known = runner
         .pending
         .iter()
-        .any(|pending| pending.check == outage.check && pending.since == outage.since);
+        .any(|pending| pending.check == outage.check && pending.kind == outage.kind && pending.since == outage.since);
     if !known {
         runner.pending.push(outage);
     }
 }
 
 
-/// True when a check of the runner still holds the run this outage belongs to: its reserved slot, never evicted by another check.
-pub fn is_current_run(states: &[CheckState], outage: &Outage) -> bool {
-    states
+/// For each pending outage, true when it is the newest of a check still in `states`: its reserved slot, never evicted by another check.
+pub fn reserved_flags(states: &[CheckState], pending: &[Outage]) -> Vec<bool> {
+    pending
         .iter()
-        .any(|state| state.check.name == outage.check && state.run_started == Some(outage.since))
+        .enumerate()
+        .map(|(index, outage)| {
+            let present = states.iter().any(|state| state.check.name == outage.check);
+            present && !pending.iter().skip(index + 1).any(|newer| newer.check == outage.check)
+        })
+        .collect()
 }
 
 
-/// Drops the oldest pending outages of earlier runs beyond `MAX_PENDING_OUTAGES`, counted; the current run of each check is never dropped.
+/// Drops the oldest unreserved pending outages beyond `MAX_PENDING_OUTAGES`, counted; the newest outage of each current check is never dropped.
 pub fn trim_pending(runner: &mut Runner) {
-    let current: Vec<bool> = runner.pending.iter().map(|outage| is_current_run(&runner.states, outage)).collect();
-    let older = current.iter().filter(|is_current| !**is_current).count();
-    let excess = older.saturating_sub(MAX_PENDING_OUTAGES);
+    let reserved = reserved_flags(&runner.states, &runner.pending);
+    let shared = reserved.iter().filter(|is_reserved| !**is_reserved).count();
+    let excess = shared.saturating_sub(MAX_PENDING_OUTAGES);
     let mut to_drop = excess;
     runner.pending = std::mem::take(&mut runner.pending)
         .into_iter()
-        .zip(current)
-        .filter(|(_outage, is_current)| {
-            let drop_it = !*is_current && to_drop > 0;
+        .zip(reserved)
+        .filter(|(_outage, is_reserved)| {
+            let drop_it = !*is_reserved && to_drop > 0;
             to_drop -= usize::from(drop_it);
             !drop_it
         })
-        .map(|(outage, _is_current)| outage)
+        .map(|(outage, _is_reserved)| outage)
         .collect();
     runner.counters.pending_dropped += excess as u64;
 }
@@ -287,7 +292,7 @@ pub fn mark_raised(runner: &mut Runner, stored: Vec<Outage>) {
         runner
             .states
             .iter_mut()
-            .filter(|state| state.check.name == outage.check && state.run_started == Some(outage.since))
+            .filter(|state| state.check.name == outage.check && state.check.kind == outage.kind && state.run_started == Some(outage.since))
             .for_each(|state| state.raised = true);
     });
 }
