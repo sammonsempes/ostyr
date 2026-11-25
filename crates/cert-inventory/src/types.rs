@@ -13,3 +13,12 @@ pub type ListFn = Arc<dyn Fn(TenantScope, ListRequest) -> ApiFuture<CertPage> + 
 
 
 pub type GetFn = Arc<dyn Fn(TenantScope, String) -> ApiFuture<Option<CertDetail>> + Send + Sync>;
+
+
+pub type InterruptWait = Pin<Box<dyn Future<Output = std::io::Result<()>>>>;
+
+
+pub type InterruptFn = fn() -> std::io::Result<InterruptWait>;
+
+
+pub type WaitFn = fn(std::time::Duration) -> Pin<Box<dyn Future<Output = ()>>>;
