@@ -431,6 +431,7 @@ fn every_failure_has_a_fixed_class() -> TestResult {
     assert_eq!(fetch(FetchError::TooLarge), "too_large");
     assert_eq!(fetch(FetchError::TooManyPoints), "too_large");
     assert_eq!(fetch(FetchError::Malformed(LineFaults::default())), "malformed");
+    assert_eq!(fetch(FetchError::Stopped), "stopped");
     assert_eq!(fetch(FetchError::User), "settings");
     assert_eq!(class_of(&RoundFault::Query(RuleError::TimeOutOfRange)), "query");
     Ok(())

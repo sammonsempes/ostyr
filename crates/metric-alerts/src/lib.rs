@@ -12,6 +12,8 @@ pub mod query;
 pub mod recover;
 pub mod round;
 pub mod rules;
+pub mod serve;
+pub mod service;
 pub mod state;
 pub mod token;
 pub mod types;
