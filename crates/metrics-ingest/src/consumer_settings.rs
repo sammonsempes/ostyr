@@ -24,18 +24,22 @@ pub const INGEST_SECTION: &str = "ingest";
 pub const LIMITS_SECTION: &str = "limits";
 
 
+pub const AUDIT_FILE_KEY: &str = "audit_file";
+
+
 pub const MAX_METRICS_BATCH_MESSAGES: usize = 1_000;
 
 
 pub const OTHER_DURABLES: [&str; 2] = ["siem-ingest", "detection"];
 
 
-/// The consumer's settings file: `ingest` is siem-ingest's own settings (NATS and ClickHouse, nothing copied), `limits` the decode and batch caps.
+/// The consumer's settings file: `ingest` is siem-ingest's own settings (NATS and ClickHouse, nothing copied), `limits` the decode and batch caps, `audit_file` the append-only audit log (read at start only).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ConsumerFile {
     pub ingest: IngestSettings,
     pub limits: Limits,
+    pub audit_file: PathBuf,
 }
 
 
@@ -126,12 +130,44 @@ pub fn shared_audit(audit: &Arc<SharedAuditFn>) -> Box<SharedAuditFn> {
 }
 
 
+/// A reload whose file names another audit log is refused whole: the log is opened once at start.
+pub fn same_audit_file(loaded: &ConsumerFile, running: &Path) -> Result<(), ConfigError> {
+    if loaded.audit_file == running {
+        Ok(())
+    } else {
+        Err(ConfigError::WatchedFile {
+            file: AUDIT_FILE_KEY.to_owned(),
+            reason: "audit_file is read at start only, restart to change it".to_owned(),
+        })
+    }
+}
+
+
+/// The audit log must be an absolute path: a relative one would follow the working directory.
+pub fn validate_audit_file(audit_file: &Path) -> Result<(), ConsumerSettingsError> {
+    if audit_file.is_absolute() {
+        Ok(())
+    } else {
+        Err(ConsumerSettingsError::Refused {
+            field: AUDIT_FILE_KEY,
+            reason: "is required and must be an absolute path",
+        })
+    }
+}
+
+
 /// The first load of an engine is the part already parsed and validated, so the file is read once at open; later loads read the file again.
-pub fn first_then_file<Part: Send + 'static>(first: Part, path: PathBuf, pick: fn(ConsumerFile) -> Part) -> Box<LoaderFn<Part>> {
+pub fn first_then_file<Part: Send + 'static>(
+    first: Part,
+    (path, audit_file): (PathBuf, PathBuf),
+    pick: fn(ConsumerFile) -> Part,
+) -> Box<LoaderFn<Part>> {
     let pending = Mutex::new(Some(first));
     Box::new(move || match pending.lock().unwrap_or_else(PoisonError::into_inner).take() {
         Some(part) => Ok(part),
-        None => load_file::<ConsumerFile>(&path).map(pick),
+        None => load_file::<ConsumerFile>(&path)
+            .and_then(|loaded| same_audit_file(&loaded, &audit_file).map(|()| loaded))
+            .map(pick),
     })
 }
 
@@ -139,10 +175,17 @@ pub fn first_then_file<Part: Send + 'static>(first: Part, path: PathBuf, pick: f
 /// Both engines start from one read of the file; a first file that is unreadable or invalid fails here, a later one is refused by `reload`.
 pub fn open_consumer(path: PathBuf, audit: &Arc<SharedAuditFn>) -> Result<Engines, OpenError> {
     let file = load_file::<ConsumerFile>(&path)?;
+    validate_audit_file(&file.audit_file)?;
+    open_engines(path, file, audit)
+}
+
+
+/// The engines of an already parsed file, so a caller that needs `audit_file` first reads the file once.
+pub fn open_engines(path: PathBuf, file: ConsumerFile, audit: &Arc<SharedAuditFn>) -> Result<Engines, OpenError> {
     validate_consumer(&file.ingest)?;
     validate_limits(&file.limits)?;
     let ingest = open_engine(
-        first_then_file(file.ingest, path.clone(), |loaded| loaded.ingest),
+        first_then_file(file.ingest, (path.clone(), file.audit_file.clone()), |loaded| loaded.ingest),
         settings_state,
         vec![Subscriber {
             section: INGEST_SECTION.to_owned(),
@@ -154,7 +197,7 @@ pub fn open_consumer(path: PathBuf, audit: &Arc<SharedAuditFn>) -> Result<Engine
     )
     .map_err(OpenError::from);
     let limits = open_engine(
-        first_then_file(file.limits, path.clone(), |loaded| loaded.limits),
+        first_then_file(file.limits, (path.clone(), file.audit_file), |loaded| loaded.limits),
         limits_state,
         vec![Subscriber {
             section: LIMITS_SECTION.to_owned(),

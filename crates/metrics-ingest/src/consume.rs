@@ -7,7 +7,7 @@ use crate::model::{HostCaller, Refusal};
 use crate::send::clickhouse_sender;
 use crate::settings::MetricsSettings;
 use crate::types::{Dropped, NowFn, StoreFn, Tally};
-use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
+use core_config::reload::current_config;
 use core_config::types::BoxError;
 use siem_ingest::batcher::backoff_delay;
 use siem_ingest::dead::{log_dead_groups, record_dead_letter};
@@ -281,23 +281,12 @@ pub fn clickhouse_store(settings: &MetricsSettings, batches: &[Batch]) -> Result
 }
 
 
-/// A refused reload is loud and keeps the old settings.
-pub fn reload_logged<Config>(engine: &ReloadEngine<Config>, name: &'static str) {
-    if let ReloadOutcome::Refused { reason } = reload(engine) {
-        let text = truncate_reason(&reason);
-        warn!(name, reason = %text, "settings reload refused, the old settings stay");
-    }
-}
-
-
-/// Cycles until `stop`; a failed fetch or insert backs off with the ingest delay and restarts from the first one after a success.
+/// Cycles until `stop` (settings are reloaded by the watcher and the signal, never here); a failed fetch or insert backs off with the ingest delay and restarts from the first one after a success.
 pub fn run_loop(wiring: &mut Wiring, engines: &Engines, state: &mut CardinalityState, (hooks, stop): (&Hooks, &StopFn)) -> LoopSummary {
     let mut summary = LoopSummary::default();
     let mut streak: u32 = 0;
     while !stop() && summary.cycles < hooks.max_cycles.min(MAX_LOOP_CYCLES) {
         summary.cycles += 1;
-        reload_logged(&engines.ingest, "ingest");
-        reload_logged(&engines.limits, "limits");
         let ingest = current_config(&engines.ingest);
         let metrics = metrics_view(&ingest, &current_config(&engines.limits));
         match run_cycle(wiring, (&ingest, &metrics), state, ((hooks.now)(), hooks.send)) {

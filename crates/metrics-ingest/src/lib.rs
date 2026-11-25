@@ -12,5 +12,7 @@ pub mod model;
 pub mod run;
 pub mod scan;
 pub mod send;
+#[cfg(unix)]
+pub mod serve;
 pub mod settings;
 pub mod types;
