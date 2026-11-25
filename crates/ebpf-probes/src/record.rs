@@ -1,4 +1,4 @@
-//! Exec record shared with the kernel program: little-endian `pid u32, ppid u32, uid u32, gid u32, monotonic_ns u64, comm [u8; 16]`.
+//! Records shared with the kernel programs; the byte layouts are listed in the crate rules file.
 
 use std::io::Read;
 
@@ -10,6 +10,24 @@ pub const COMM_BYTES: usize = 16;
 
 
 pub const WORD_BYTES: usize = 4;
+
+
+pub const FILE_RECORD_KIND: u32 = 2;
+
+
+pub const FILE_HEADER_WORDS: usize = 7;
+
+
+pub const FILE_PATH_BYTES: usize = 256;
+
+
+pub const FILE_RECORD_BYTES: usize = FILE_HEADER_WORDS * WORD_BYTES + FILE_PATH_BYTES;
+
+
+pub const STATUS_CUT: u32 = 1;
+
+
+pub const STATUS_UNREADABLE: u32 = 2;
 
 
 pub const RECORD_WORDS: usize = EXEC_RECORD_BYTES / WORD_BYTES;
@@ -26,9 +44,24 @@ pub struct ExecRecord {
 }
 
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileRecord {
+    pub pid: u32,
+    pub uid: u32,
+    pub flags: u32,
+    pub cut: bool,
+    pub unreadable: bool,
+    pub monotonic_ns: u64,
+    pub path: String,
+}
+
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
     WrongSize { got: usize },
+    FileWrongSize { got: usize },
+    FileWrongKind { got: u32 },
+    FileUnknownStatus { got: u32 },
 }
 
 
@@ -36,6 +69,9 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::WrongSize { got } => write!(formatter, "exec record has {got} bytes, expected {EXEC_RECORD_BYTES}"),
+            DecodeError::FileWrongSize { got } => write!(formatter, "file record has {got} bytes, expected {FILE_RECORD_BYTES}"),
+            DecodeError::FileWrongKind { got } => write!(formatter, "file record has kind {got}, expected {FILE_RECORD_KIND}"),
+            DecodeError::FileUnknownStatus { got } => write!(formatter, "file record has unknown status bits {got}"),
         }
     }
 }
@@ -80,4 +116,43 @@ fn escape_byte(byte: u8) -> String {
     } else {
         format!("\\x{byte:02x}")
     }
+}
+
+
+/// Decodes one file-open record: any other length, kind or status bit is refused by name; the path keeps every byte up to its last non-NUL one, escaped as `escape_comm` does but without cutting at a NUL.
+pub fn decode_file(bytes: &[u8]) -> Result<FileRecord, DecodeError> {
+    let wrong_size = DecodeError::FileWrongSize { got: bytes.len() };
+    let mut rest = bytes;
+    let mut words = [[0u8; WORD_BYTES]; FILE_HEADER_WORDS];
+    words.iter_mut().try_for_each(|word| rest.read_exact(word)).map_err(|_| wrong_size)?;
+    let [kind, pid, uid, flags, status, ns_low, ns_high] = words.map(u32::from_le_bytes);
+    (rest.len() == FILE_PATH_BYTES).then_some(()).ok_or(wrong_size)?;
+    let known_status = STATUS_CUT | STATUS_UNREADABLE;
+    let path_len = rest.iter().rposition(|byte| *byte != 0).map_or(0, |last| last.saturating_add(1));
+    let path: String = rest.iter().take(path_len).map(|byte| escape_byte(*byte)).collect();
+    (kind == FILE_RECORD_KIND).then_some(()).ok_or(DecodeError::FileWrongKind { got: kind })?;
+    (status & !known_status == 0)
+        .then_some(())
+        .ok_or(DecodeError::FileUnknownStatus { got: status })?;
+    Ok(FileRecord {
+        pid,
+        uid,
+        flags,
+        cut: status & STATUS_CUT != 0,
+        unreadable: status & STATUS_UNREADABLE != 0,
+        monotonic_ns: u64::from(ns_low) | (u64::from(ns_high) << u32::BITS),
+        path,
+    })
+}
+
+
+/// The kernel time of an exec record, for the limiter.
+pub fn exec_time(record: &ExecRecord) -> u64 {
+    record.monotonic_ns
+}
+
+
+/// The kernel time of a file record, for the limiter.
+pub fn file_time(record: &FileRecord) -> u64 {
+    record.monotonic_ns
 }
