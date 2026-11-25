@@ -1,6 +1,7 @@
 use crate::fixture::{config_in, keep, seed_reader, Fixture, PASSWORD, READER};
 use crate::http::{audit_lines, body_json, client, login_body, login_token, request, send_from};
 use crate::limits::with_limits;
+use crate::logging::capture_dispatch;
 use crate::types::{TestError, TestResult};
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
@@ -19,10 +20,11 @@ use core_api::types::{AccessTable, ServerHandle, SharedState};
 use core_audit::log::append_declared;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use std::convert::Infallible;
+use std::fs::{self, File};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use time::OffsetDateTime;
@@ -33,6 +35,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tower::ServiceExt;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -60,6 +63,12 @@ const TWO_STARTED: u32 = 2;
 
 
 const REFUSALS: u64 = 3;
+
+
+const READ_WARNING: &str = "detached read pool full, request refused";
+
+
+const WRITE_WARNING: &str = "detached write pool full, request refused";
 
 
 const ROUTE_HOLD: &str = "/example/hold";
@@ -430,6 +439,11 @@ async fn read_flood() -> TestResult {
 
 #[tokio::test]
 async fn a_full_global_read_pool_answers_busy_without_touching_the_writes() -> TestResult {
+    guarded(full_read_pool()).await?
+}
+
+
+async fn full_read_pool() -> TestResult {
     let holds = holds();
     let fx = fixture_over(&holds, |state| {
         Ok(ApiState {
@@ -473,6 +487,29 @@ async fn read_refusals_are_counted_apart_from_the_writes() -> TestResult {
     assert_eq!(note_detached_refused(&fx.state), 1);
     assert_eq!(fx.state.detached_reads_refused.load(Ordering::SeqCst), REFUSALS);
     Ok(())
+}
+
+
+#[tokio::test]
+async fn a_read_refusal_warns_with_the_read_text_and_a_write_refusal_with_the_write_text() -> TestResult {
+    let read_log = refusal_log(note_detached_read_refused)?;
+    assert!(read_log.contains(READ_WARNING));
+    assert!(!read_log.contains(WRITE_WARNING));
+    let write_log = refusal_log(note_detached_refused)?;
+    assert!(write_log.contains(WRITE_WARNING));
+    assert!(!write_log.contains(READ_WARNING));
+    Ok(())
+}
+
+
+fn refusal_log(note: fn(&ApiState) -> u64) -> Result<String, TestError> {
+    let log_dir = tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = capture_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
+    let holds = holds();
+    let fx = fixture_over(&holds, |state| Ok(ApiState { dispatch, ..state }))?;
+    assert_eq!(note(&fx.state), 1);
+    Ok(fs::read_to_string(&log_path)?)
 }
 
 
