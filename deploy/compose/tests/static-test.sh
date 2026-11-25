@@ -11,8 +11,9 @@ readonly COMPOSE_FILE="${STATIC_TEST_COMPOSE_FILE:-$COMPOSE_DIR/compose.yaml}"
 readonly CH_INIT_FILE="${STATIC_TEST_INIT_FILE:-$COMPOSE_DIR/init.sh}"
 readonly CH_CONFIG_FILE="${STATIC_TEST_CH_CONFIG_FILE:-$COMPOSE_DIR/config/clickhouse-config.xml}"
 readonly CH_SCHEMA_FILE="${STATIC_TEST_CH_SCHEMA_FILE:-$COMPOSE_DIR/config/clickhouse-schema.sql}"
+readonly CONFIG_DIR="${STATIC_TEST_CONFIG_DIR:-$COMPOSE_DIR/config}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE ${STATIC_TEST_EXTRA_KEYS:-}"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE siem metrics metricalerts siemstate metricsstate alertsstate clickhouse_ingest_password clickhouse_metrics_password nats_siem_password nats_metrics_password metricalerts_pg_password metricalerts_clickhouse_password ${STATIC_TEST_EXTRA_KEYS:-}"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
 readonly BLOCK_KEYS="ports volumes services networks"
 failures=0
@@ -73,6 +74,59 @@ clickhouse_service() {
 
 chschema_service() {
     awk '/^  chschema:$/ {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+named_service() {
+    awk -v name="  $1:" '$0 == name {inside = 1; print; next} /^  [^ ]/ || /^[^ ]/ {inside = 0} inside' "$COMPOSE_FILE"
+}
+
+consumer_is_hardened() {
+    local name="$1" uid="$2" secrets="$3" command="$4" state="$5" block
+    block="$(named_service "$name")"
+    grep -qx '    read_only: true' <<<"$block" && grep -qx '    cap_drop: \[ALL\]' <<<"$block" && grep -qF 'no-new-privileges:true' <<<"$block" \
+        && grep -qx "    user: $uid:$uid" <<<"$block" && grep -qxF "    secrets: [$secrets]" <<<"$block" \
+        && grep -qxF "    command: [$command]" <<<"$block" && grep -qx '    image: ostyr-platform:local' <<<"$block" \
+        && [[ "$(service_items "$name" volumes)" == '      - ./config:/etc/ostyr:ro'$'\n'"      - $state" ]] \
+        && ! grep -q -e '^    ports:' -e 'cap_add' -e 'network_mode' -e 'store_key' -e 'api_tls' -e 'gateway_tls' -e 'nats_conf' -e 'nats_admin' -e 'nats_gateway' <<<"$block"
+}
+
+siem_is_hardened() {
+    consumer_is_hardened siem 65529 'pg_ca, clickhouse_ingest_password, nats_siem_password' '"/usr/local/bin/ostyr-siem-ingest", "/etc/ostyr/siem-ingest.yaml"' siemstate:/var/lib/ostyr-siem \
+        && ! named_service siem | grep -q -e clickhouse_metrics -e nats_metrics -e metricalerts -e pg_service_password -e clickhouse_users -e clickhouse_schema
+}
+
+metrics_is_hardened() {
+    consumer_is_hardened metrics 65528 'pg_ca, clickhouse_metrics_password, nats_metrics_password' '"/usr/local/bin/ostyr-metrics-ingest", "/etc/ostyr/metrics-ingest.yaml"' \
+        metricsstate:/var/lib/ostyr-metrics \
+        && ! named_service metrics | grep -q -e clickhouse_ingest -e nats_siem -e metricalerts -e pg_service_password -e clickhouse_users -e clickhouse_schema
+}
+
+metricalerts_is_hardened() {
+    consumer_is_hardened metricalerts 65527 'pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password' \
+        '"/usr/local/bin/ostyr-metric-alerts", "/etc/ostyr/metric-alerts.yaml"' alertsstate:/var/lib/ostyr-metric-alerts \
+        && ! named_service metricalerts | grep -q -e clickhouse_ingest -e clickhouse_metrics -e nats_ -e pg_service_password -e clickhouse_users -e clickhouse_schema
+}
+
+ingest_files_use_only_their_secrets() {
+    ! grep -h -o '/run/secrets/[a-z_.]*' "$CONFIG_DIR/siem-ingest.yaml" | grep -v -x -e /run/secrets/pg_ca -e /run/secrets/clickhouse_ingest_password -e /run/secrets/nats_siem_password \
+        && ! grep -h -o '/run/secrets/[a-z_.]*' "$CONFIG_DIR/metrics-ingest.yaml" | grep -v -x -e /run/secrets/pg_ca -e /run/secrets/clickhouse_metrics_password -e /run/secrets/nats_metrics_password \
+        && ! grep -h -o '/run/secrets/[a-z_.]*' "$CONFIG_DIR"/metric-alerts*.yaml | grep -v -x -e /run/secrets/pg_ca -e /run/secrets/metricalerts_pg_password -e /run/secrets/metricalerts_clickhouse_password \
+        && ! grep -h -o '/var/lib/[a-z-]*' "$CONFIG_DIR/siem-ingest.yaml" | grep -v -x /var/lib/ostyr-siem \
+        && ! grep -h -o '/var/lib/[a-z-]*' "$CONFIG_DIR/metrics-ingest.yaml" | grep -v -x /var/lib/ostyr-metrics \
+        && ! grep -h -o '/var/lib/[a-z-]*' "$CONFIG_DIR"/metric-alerts*.yaml | grep -v -x /var/lib/ostyr-metric-alerts
+}
+
+ingest_files_use_their_own_clickhouse_user() {
+    grep -qx 'clickhouse_user: ingest' "$CONFIG_DIR/siem-ingest.yaml" && grep -qx '  clickhouse_user: metrics' "$CONFIG_DIR/metrics-ingest.yaml" \
+        && grep -qx 'user: reader' "$CONFIG_DIR/metric-alerts-fetch.yaml" && grep -qx 'nats_user: siem_ingest' "$CONFIG_DIR/siem-ingest.yaml" \
+        && grep -qx '  nats_user: metrics_ingest' "$CONFIG_DIR/metrics-ingest.yaml"
+}
+
+nats_consumer_accounts_are_scoped() {
+    grep -qF 'readonly NATS_CONSUMERS=(SIEM:siem_ingest:siem-ingest METRICS:metrics_ingest:metrics-ingest)' "$CH_INIT_FILE" \
+        && grep -qF 'accounts: [$account] }' "$CH_INIT_FILE" && grep -qF '{ service: "$NATS_DEAD_SUBJECT", accounts: [SIEM, METRICS] }' "$CH_INIT_FILE" \
+        && grep -qF 'response_type: stream, response_threshold: "$NATS_PULL_THRESHOLD"' "$CH_INIT_FILE" \
+        && grep -qF 'subscribe: { allow: ["_INBOX_$user.>"] }' "$CH_INIT_FILE" && ! grep -q -e 'CONSUMER.CREATE' -e 'CONSUMER.DURABLE' -e 'STREAM.PURGE' -e 'JS.API.>' "$CH_INIT_FILE"
 }
 
 clickhouse_has() {
@@ -397,7 +451,10 @@ each_service_publishes_only_its_port() {
 every_service_mounts_only_its_volumes() {
     [[ "$(service_items postgres volumes)" == '      - pgdata:/var/lib/postgresql/data'$'\n''      - ./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro'$'\n''      - ./config/pg-init-service-role.sh:/docker-entrypoint-initdb.d/10-service-role.sh:ro' \
         && "$(service_items platform volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - state:/var/lib/ostyr' ]] && web_mounts_only_settings_and_state \
-        && playbooks_mounts_only_settings_and_its_state && agent_path_mounts_only_its_volumes && clickhouse_mounts_only_its_volumes
+        && playbooks_mounts_only_settings_and_its_state && agent_path_mounts_only_its_volumes && clickhouse_mounts_only_its_volumes \
+        && [[ "$(service_items siem volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - siemstate:/var/lib/ostyr-siem' ]] \
+        && [[ "$(service_items metrics volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - metricsstate:/var/lib/ostyr-metrics' ]] \
+        && [[ "$(service_items metricalerts volumes)" == '      - ./config:/etc/ostyr:ro'$'\n''      - alertsstate:/var/lib/ostyr-metric-alerts' ]]
 }
 
 clickhouse_mounts_only_its_volumes() {
@@ -406,6 +463,11 @@ clickhouse_mounts_only_its_volumes() {
 }
 
 only_postgres_adds_capabilities() {
+    ! service_has_key siem cap_add && ! service_has_key metrics cap_add && ! service_has_key metricalerts cap_add && ! service_has_key siem ports && ! service_has_key metrics ports \
+        && ! service_has_key metricalerts ports && only_postgres_adds_capabilities_listed
+}
+
+only_postgres_adds_capabilities_listed() {
     [[ "$(count_lines 'cap_add')" -eq 1 ]] && service_has_key postgres cap_add && ! service_has_key platform cap_add && ! service_has_key web cap_add && ! service_has_key playbooks cap_add \
         && ! service_has_key nats cap_add && ! service_has_key gateway cap_add && ! service_has_key relay cap_add \
         && ! service_has_key clickhouse cap_add && ! service_has_key chschema cap_add
@@ -413,7 +475,7 @@ only_postgres_adds_capabilities() {
 
 definitions_are_pinned() {
     local expected
-    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' '  natsdata: {}' '  gatewaystate: {}' '  relaystate: {}' '  chdata: {}' 'secrets:' \
+    expected="$(printf '%s\n' 'volumes:' '  pgdata: {}' '  state: {}' '  webstate: {}' '  playbooksstate: {}' '  natsdata: {}' '  gatewaystate: {}' '  relaystate: {}' '  chdata: {}' '  siemstate: {}' '  metricsstate: {}' '  alertsstate: {}' 'secrets:' \
         '  pg_password:' '    file: ./secrets/pg_password' '  pg_service_password:' '    file: ./secrets/pg_service_password' \
         '  pg_server_key:' '    file: ./secrets/pg_server.key' '  pg_server_cert:' '    file: ./secrets/pg_server.crt' \
         '  pg_ca:' '    file: ./secrets/ca.crt' '  playbooks_pg_password:' '    file: ./secrets/playbooks_pg_password' '  api_tls_key:' '    file: ./secrets/api_tls.key' '  api_tls_cert:' '    file: ./secrets/api_tls.crt' \
@@ -421,7 +483,10 @@ definitions_are_pinned() {
         '  nats_server_key:' '    file: ./secrets/nats_server.key' '  nats_server_cert:' '    file: ./secrets/nats_server.crt' '  nats_conf:' '    file: ./secrets/nats.conf' \
         '  agent_ca:' '    file: ./secrets/agent_ca.crt' '  nats_gateway_password:' '    file: ./secrets/nats_gateway_password' \
         '  clickhouse_server_key:' '    file: ./secrets/clickhouse_server.key' '  clickhouse_server_cert:' '    file: ./secrets/clickhouse_server.crt' \
-        '  clickhouse_users:' '    file: ./secrets/clickhouse_users' '  clickhouse_schema_password:' '    file: ./secrets/clickhouse_schema_password')"
+        '  clickhouse_users:' '    file: ./secrets/clickhouse_users' '  clickhouse_schema_password:' '    file: ./secrets/clickhouse_schema_password' \
+        '  clickhouse_ingest_password:' '    file: ./secrets/clickhouse_ingest_password' '  clickhouse_metrics_password:' '    file: ./secrets/clickhouse_metrics_password' \
+        '  nats_siem_password:' '    file: ./secrets/nats_siem_password' '  nats_metrics_password:' '    file: ./secrets/nats_metrics_password' \
+        '  metricalerts_pg_password:' '    file: ./secrets/metricalerts_pg_password' '  metricalerts_clickhouse_password:' '    file: ./secrets/metricalerts_clickhouse_password')"
     [[ "$(sed -n '/^volumes:$/,$p' "$COMPOSE_FILE")" == "$expected" && "$(count_lines '^ *name:')" -eq 1 && "$(count_lines '^name: ostyr$')" -eq 1 ]]
 }
 
@@ -524,7 +589,7 @@ compose_config_accepts() {
     local scratch name
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password clickhouse_ingest_password clickhouse_metrics_password nats_siem_password nats_metrics_password metricalerts_pg_password metricalerts_clickhouse_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -537,7 +602,7 @@ parsed_config_passes() {
     local scratch name status=0
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key playbooks_pg_password gateway_tls.key gateway_tls.crt nats_server.key nats_server.crt nats.conf agent_ca.crt nats_gateway_password clickhouse_server.key clickhouse_server.crt clickhouse_users clickhouse_schema_password clickhouse_ingest_password clickhouse_metrics_password nats_siem_password nats_metrics_password metricalerts_pg_password metricalerts_clickhouse_password; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_DIR/config" "$scratch/"
@@ -568,7 +633,7 @@ else
     printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
-    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$COMPOSE_DIR/config/clickhouse-apply.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/clickhouse-proof.sh" "$TESTS_DIR/mutation-test.sh"
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$COMPOSE_DIR/config/clickhouse-apply.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/clickhouse-proof.sh" "$TESTS_DIR/ingest-proof.sh" "$TESTS_DIR/mutation-test.sh"
 else
     printf 'info shellcheck is not installed: skipped\n'
 fi
@@ -604,10 +669,16 @@ expect "the NATS user gateway publishes events.* only and subscribes to its own 
     grep -qF 'permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }' "$COMPOSE_DIR/init.sh"
 expect "the gateway certificate names DNS:gateway only" grep -qF 'make_leaf gateway_tls ostyr-gateway DNS:gateway "$scratch"' "$CH_INIT_FILE"
 expect "init.sh refuses every compose service name as the public host name" \
-    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)' "$CH_INIT_FILE"
+    grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema siem metrics metricalerts)' "$CH_INIT_FILE"
 expect "init.sh lists exactly the services of compose.yaml" init_lists_compose_services
 expect "init.sh warns by name about an unbounded nats.conf and a gateway certificate with more names, and changes no file" init_warnings_behave
 expect "init.sh warns by name about a nats.conf without max_file_store and a gateway certificate with more names" init_warns_on_old_files
+expect "the siem service is hardened, runs as 65529 and holds only the CA and its two passwords" siem_is_hardened
+expect "the metrics service is hardened, runs as 65528 and holds only the CA and its two passwords" metrics_is_hardened
+expect "the metricalerts service is hardened, runs as 65527 and holds only the CA and its two password copies" metricalerts_is_hardened
+expect "the ingest settings files name only their own secrets and state directory" ingest_files_use_only_their_secrets
+expect "the ingest settings files name their own ClickHouse and NATS users" ingest_files_use_their_own_clickhouse_user
+expect "the NATS consumer accounts are scoped to one durable each and have no create or purge subject" nats_consumer_accounts_are_scoped
 expect "the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets" clickhouse_is_hardened
 expect "the chschema service is hardened, runs as 65530 and holds only the CA and its password" chschema_is_hardened
 expect "both ClickHouse services use one pinned image" clickhouse_one_image

@@ -23,6 +23,12 @@ readonly GATEWAY_HARD="the gateway service is hardened, runs as 65534 and holds 
 readonly RELAY_HARD="the relay service is hardened, runs as 65531 and holds no secret"
 readonly CH_HARD="the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets"
 readonly CHSCHEMA_HARD="the chschema service is hardened, runs as 65530 and holds only the CA and its password"
+readonly SIEM_HARD="the siem service is hardened, runs as 65529 and holds only the CA and its two passwords"
+readonly METRICS_HARD="the metrics service is hardened, runs as 65528 and holds only the CA and its two passwords"
+readonly ALERTS_HARD="the metricalerts service is hardened, runs as 65527 and holds only the CA and its two password copies"
+readonly INGEST_SECRETS="the ingest settings files name only their own secrets and state directory"
+readonly INGEST_USERS="the ingest settings files name their own ClickHouse and NATS users"
+readonly NATS_SCOPED="the NATS consumer accounts are scoped to one durable each and have no create or purge subject"
 readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
 readonly CH_USERS="ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader"
 readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
@@ -68,6 +74,12 @@ declare -A STATIC_REFUSAL=(
     [relay_state_shared]="$BINDS" [relay_root]="$RELAY_HARD" [relay_ip_moved]="$RELAY_HARD"
     [clickhouse_cap_add]="$CAPS" [clickhouse_publish]="$CH_HARD" [clickhouse_secret_extra]="$CH_HARD" [clickhouse_bind_secrets]="$BINDS"
     [clickhouse_state_shared]="$BINDS" [clickhouse_unpinned]="$PINNED" [clickhouse_root]="$CH_HARD" [clickhouse_writable]="$HARDENED"
+    [siem_cap_add]="$CAPS" [siem_publish]="$SIEM_HARD" [siem_secret_metrics]="$SIEM_HARD" [siem_secret_admin]="$SIEM_HARD" [siem_bind_secrets]="$BINDS"
+    [siem_state_shared]="$BINDS" [siem_root]="$SIEM_HARD"
+    [metrics_cap_add]="$CAPS" [metrics_publish]="$METRICS_HARD" [metrics_secret_ingest]="$METRICS_HARD" [metrics_bind_secrets]="$BINDS"
+    [metrics_state_shared]="$BINDS" [metrics_root]="$METRICS_HARD"
+    [metricalerts_cap_add]="$CAPS" [metricalerts_publish]="$ALERTS_HARD" [metricalerts_secret_pg]="$ALERTS_HARD" [metricalerts_secret_nats]="$ALERTS_HARD"
+    [metricalerts_bind_secrets]="$BINDS" [metricalerts_state_shared]="$BINDS" [metricalerts_root]="$ALERTS_HARD"
     [chschema_cap_add]="$CAPS" [chschema_secret_extra]="$CHSCHEMA_HARD" [chschema_bind_secrets]="$BINDS" [chschema_root]="$CHSCHEMA_HARD"
     [chschema_image_other]="$CH_ONE_IMAGE" [chschema_anonymous_volume]="the chschema service keeps its data and log directories on tmpfs"
 )
@@ -145,6 +157,20 @@ file_static_run() {
     fi
 }
 
+config_static_run() {
+    local name="$1" file="$2" expression="$3" expected="$4" output
+    rm -rf "${scratch:?}/config-$name"
+    cp -r "$COMPOSE_DIR/config" "$scratch/config-$name"
+    sed -i "$expression" "$scratch/config-$name/$file"
+    if cmp -s "$COMPOSE_DIR/config/$file" "$scratch/config-$name/$file"; then
+        printf 'FAIL config %s: the mutation changed nothing\n' "$name"
+        failures=$((failures + 1))
+    else
+        output="$(STATIC_TEST_CONFIG_DIR="$scratch/config-$name" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+        report "static $name" "$output" "$expected"
+    fi
+}
+
 file_static_runs() {
     local init="$COMPOSE_DIR/init.sh" compose="$COMPOSE_DIR/compose.yaml" config="$COMPOSE_DIR/config/clickhouse-config.xml" schema="$COMPOSE_DIR/config/clickhouse-schema.sql"
     file_static_run metrics_select_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples|GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples|' "$CH_USERS"
@@ -153,12 +179,22 @@ file_static_runs() {
     file_static_run handlers_defaults_back STATIC_TEST_CH_CONFIG_FILE "$config" 's|<http_handlers>|<http_handlers><defaults/>|' "$CH_NO_PAGE"
     file_static_run handlers_play_added STATIC_TEST_CH_CONFIG_FILE "$config" 's|<url>/ping</url>|<url>/play</url>|' "$CH_NO_PAGE"
     file_static_run gateway_san_widened STATIC_TEST_INIT_FILE "$init" 's|DNS:gateway "$scratch"|DNS:gateway,DNS:platform "$scratch"|' "$GATEWAY_SAN"
-    file_static_run service_name_dropped STATIC_TEST_INIT_FILE "$init" '/^readonly SERVICE_NAMES=/s| chschema)|)|' "$INIT_SERVICES"
+    file_static_run service_name_dropped STATIC_TEST_INIT_FILE "$init" '/^readonly SERVICE_NAMES=/s| metricalerts)|)|' "$INIT_SERVICES"
     file_static_run compose_service_added STATIC_TEST_COMPOSE_FILE "$compose" 's|^  chschema:$|  state:\n    image: x\n&|' "$INIT_SERVICES"
     file_static_run compose_digit_service_added STATIC_TEST_COMPOSE_FILE "$compose" 's|^  chschema:$|  redis2:\n    image: x\n&|' "$INIT_SERVICES" redis2
     file_static_run gateway_condition_disabled STATIC_TEST_INIT_FILE "$init" 's|if \[\[ "$actual" != "$expected" \]\]; then|if false; then|' "$INIT_BEHAVES"
     file_static_run nats_condition_disabled STATIC_TEST_INIT_FILE "$init" 's|if ! grep -qE .*max_file_store.*; then|if false; then|' "$INIT_BEHAVES"
     file_static_run nats_warning_removed STATIC_TEST_INIT_FILE "$init" 's|has no max_file_store, so JetStream|has no bound, so JetStream|' "$INIT_WARNS"
+    file_static_run nats_create_export STATIC_TEST_INIT_FILE "$init" 's|accounts: \[$account\] }$|&\n        { service: "$JS.API.CONSUMER.CREATE.x", accounts: [$account] }|' "$NATS_SCOPED"
+    file_static_run nats_dead_to_gateway STATIC_TEST_INIT_FILE "$init" 's|accounts: \[SIEM, METRICS\] }|accounts: [SIEM, METRICS, GATEWAY] }|' "$NATS_SCOPED"
+    file_static_run nats_inbox_shared STATIC_TEST_INIT_FILE "$init" 's|"_INBOX_$user.>"|"_INBOX.>"|' "$NATS_SCOPED"
+    file_static_run nats_durable_shared STATIC_TEST_INIT_FILE "$init" 's|METRICS:metrics_ingest:metrics-ingest)|METRICS:metrics_ingest:siem-ingest)|' "$NATS_SCOPED"
+    config_static_run siem_admin_clickhouse siem-ingest.yaml 's|^clickhouse_user: ingest|clickhouse_user: schema|' "$INGEST_USERS"
+    config_static_run metrics_nats_siem metrics-ingest.yaml 's|nats_user: metrics_ingest|nats_user: siem_ingest|' "$INGEST_USERS"
+    config_static_run alerts_writer_clickhouse metric-alerts-fetch.yaml 's|^user: reader|user: ingest|' "$INGEST_USERS"
+    config_static_run siem_foreign_secret siem-ingest.yaml 's|/run/secrets/nats_siem_password|/run/secrets/nats_metrics_password|' "$INGEST_SECRETS"
+    config_static_run alerts_foreign_state metric-alerts.yaml 's|/var/lib/ostyr-metric-alerts/|/var/lib/ostyr-siem/|' "$INGEST_SECRETS"
+    config_static_run alerts_pg_superuser_secret metric-alerts-pg.yaml 's|/run/secrets/metricalerts_pg_password|/run/secrets/pg_password|' "$INGEST_SECRETS"
     file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
 }
 

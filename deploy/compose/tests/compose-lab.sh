@@ -390,6 +390,14 @@ expect "the relay logs no start error" absent remote "cd compose && sudo docker 
 nats_box admin nats_admin_password stream add events --subjects "'events.>'" --storage file --retention limits --discard old --max-msgs=-1 --max-bytes=1073741824 \
     --max-age=-1 --max-msg-size=-1 --max-msgs-per-subject=-1 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
 expect "the events stream exists in the events account" nats_box admin nats_admin_password stream info events
+nats_box admin nats_admin_password stream add dead --subjects "'dead.events.*'" --storage file --retention limits --discard old --max-msgs=16000 --max-bytes=134217728 \
+    --max-age=0 --max-msg-size=8192 --max-msgs-per-subject=1000 --dupe-window 2m --replicas 1 --no-allow-rollup --no-deny-delete --no-deny-purge >/dev/null
+for durable in siem-ingest metrics-ingest; do
+    nats_box admin nats_admin_password consumer add events "$durable" --pull --deliver all --ack explicit --filter "'events.>'" --replay instant --max-deliver=-1 --max-pending 1000 \
+        --no-headers-only --wait 30s --defaults >/dev/null
+    expect "the durable $durable exists on the events stream" nats_box admin nats_admin_password consumer info events "$durable"
+done
+expect "the dead stream exists" nats_box admin nats_admin_password stream info dead
 expect "the gateway user cannot publish outside events.*" test "$(nats_box gateway nats_gateway_password pub other.subject x 2>&1 | grep -c -i 'permissions violation')" -ge 1
 expect "the gateway user cannot call the JetStream API" test "$(nats_box gateway nats_gateway_password pub "'\$JS.API.STREAM.LIST'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
 expect "the gateway user cannot publish on a nested events subject" test "$(nats_box gateway nats_gateway_password pub events.a.b x 2>&1 | grep -c -i 'permissions violation')" -ge 1
@@ -402,22 +410,68 @@ agent_value() {
     printf '%s\n' "$agent_proofs" | sed -n "s/^$1 //p"
 }
 expect "the proof agent sent its batch through the relay port (exit 0)" test "$(agent_value agent_exit)" = 0
-expect "the agent run acknowledged one batch" grep -q 'acknowledged 1 batches' <<<"$(agent_value agent_out)"
+expect "the agent run acknowledged its two spooled batches (a log line and a host metrics line)" grep -q 'acknowledged 2 batches' <<<"$(agent_value agent_out)"
 expect "the spool is empty after the acknowledgement" test "$(agent_value spool_left)" = 0
 expect "a client without a certificate reached the gateway through the relay (server certificate received)" test "$(agent_value no_certificate_out)" -ge 1
 stream_view="$(NATS_BOX_TTY=-t nats_box admin nats_admin_password stream view events --raw 2>&1 || true)"
 printf '%s\n' "$stream_view"
 expect "nats stream view shows the batch on events.default" grep -q 't853 batch through the relay' <<<"$stream_view"
 stream_messages="$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
-expect "the events stream holds exactly one message" test "$stream_messages" = 1
+expect "the events stream holds exactly the two events of the batch (a log line and a host metrics line)" test "$stream_messages" = 2
 expect "the gateway logged both refused clients (none, other CA) as failed handshakes" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do [ \$(sudo docker compose logs gateway 2>&1 | grep -c 'TLS handshake failed') -ge 2 ] && exit 0; sleep 2; done; exit 1"
-expect "the gateway published exactly one batch" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 1
+expect "the gateway published exactly two batches" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 2
 remote "cd compose && sudo docker compose logs gateway 2>&1 | tail -n 20"
-expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 1
+expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 2
 expect "a container that is not the relay is dropped by the gateway relay port before the handshake (curl exit 35)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.63.11:7443/; echo \$?")" = 35
 expect "NATS is closed from the host network" absent remote "nc -z -w 3 $vm_address $NATS_PORT || nc -z -w 3 127.0.0.1 $NATS_PORT"
 expect "the gateway ports are closed from the host network" absent remote "nc -z -w 3 127.0.0.1 7444 || nc -z -w 3 $vm_address 7444"
-for service_name in postgres platform web playbooks nats gateway relay clickhouse chschema; do
+for service in siem metrics metricalerts; do
+    expect "the $service service is running" test "$(inspect_service "$service" '{{.State.Running}}')" = true
+    expect "the $service root filesystem is read-only" test "$(inspect_service "$service" '{{.HostConfig.ReadonlyRootfs}}')" = true
+    expect "the $service service drops every capability" test "$(inspect_service "$service" '{{.HostConfig.CapDrop}}')" = "[ALL]"
+    expect "the $service service has no-new-privileges" test "$(inspect_service "$service" '{{.HostConfig.SecurityOpt}}')" = "[no-new-privileges:true]"
+    expect "the $service service publishes no port" test -z "$(published_ports "$service")"
+    expect "no secret value is in the $service environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $(service_container "$service") | grep -i -e password -e BEGIN"
+done
+expect "siem, metrics and metricalerts run as 65529, 65528 and 65527" test "$(inspect_service siem '{{.Config.User}}') $(inspect_service metrics '{{.Config.User}}') $(inspect_service metricalerts '{{.Config.User}}')" \
+    = "65529:65529 65528:65528 65527:65527"
+expect "siem mounts exactly its three secrets" test "$(service_secret_files siem)" = "ca.crt clickhouse_ingest_password nats_siem_password"
+expect "metrics mounts exactly its three secrets" test "$(service_secret_files metrics)" = "ca.crt clickhouse_metrics_password nats_metrics_password"
+expect "metricalerts mounts exactly its three secrets" test "$(service_secret_files metricalerts)" = "ca.crt metricalerts_clickhouse_password metricalerts_pg_password"
+expect "the ingest secret files have the expected owners and modes" test "$(remote "cd compose && sudo stat -c '%n %a %u:%g' secrets/clickhouse_ingest_password secrets/nats_siem_password secrets/clickhouse_metrics_password \
+    secrets/nats_metrics_password secrets/metricalerts_pg_password secrets/metricalerts_clickhouse_password | sed 's#secrets/##' | xargs")" \
+    = "clickhouse_ingest_password 600 65529:65529 nats_siem_password 600 65529:65529 clickhouse_metrics_password 600 65528:65528 nats_metrics_password 600 65528:65528 metricalerts_pg_password 400 65527:65527 metricalerts_clickhouse_password 400 65527:65527"
+expect "the metricalerts copies equal their sources" remote "cd compose && sudo cmp secrets/metricalerts_pg_password secrets/pg_service_password && sudo cmp secrets/metricalerts_clickhouse_password secrets/clickhouse_reader_password"
+events_before_attacks="$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)"
+expect "siem_ingest cannot publish an event" test "$(nats_box siem_ingest nats_siem_password pub events.default x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot purge the stream" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.API.STREAM.PURGE.events'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot create a consumer" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.API.CONSUMER.CREATE.events'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot read the metrics durable" test "$(nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.metrics-ingest'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "siem_ingest cannot ack the metrics durable" test "$(nats_box siem_ingest nats_siem_password pub "'\$JS.ACK.events.metrics-ingest.1.1.1.1.1'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot publish an event" test "$(nats_box metrics_ingest nats_metrics_password pub events.default x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot read the siem durable" test "$(nats_box metrics_ingest nats_metrics_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.siem-ingest'" x 2>&1 | grep -c -i 'permissions violation')" -ge 1
+expect "metrics_ingest cannot subscribe to another inbox" test "$(nats_box metrics_ingest nats_metrics_password sub "'_INBOX_siem_ingest.>'" --count 1 --timeout 3s 2>&1 | grep -c -i 'permissions violation')" -ge 1
+nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.INFO.events.siem-ingest'" '' --reply events.victim >/dev/null 2>&1
+nats_box siem_ingest nats_siem_password pub "'JS.EVENTS.API.CONSUMER.MSG.NEXT.events.siem-ingest'" '' --reply events.victim >/dev/null 2>&1
+expect "a reply subject named as events.victim stores nothing on the stream" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = "$events_before_attacks"
+expect "no consumer was created by the refused subjects" test "$(nats_box admin nats_admin_password consumer ls events --names 2>&1 | grep -c -e siem-ingest -e metrics-ingest)" -eq 2
+ingest_proofs="$(remote_stdin "cd compose && sudo bash -s -- $NATS_BOX_IMAGE" <"$TESTS_DIR/ingest-proof.sh")"
+printf '%s\n' "$ingest_proofs"
+ingest_value() {
+    printf '%s\n' "$ingest_proofs" | sed -n "s/^$1 //p"
+}
+expect "siem stored the agent's log event in ClickHouse (read back as the reader)" test "$(ingest_value events_rows)" = 1
+expect "siem skipped the host metrics event (no row with that dataset in events)" test "$(ingest_value host_event_rows_in_events)" = 0
+expect "metrics stored the host metric sample for the proof tenant" test "$(ingest_value metric_rows)" = 1
+expect "the stored sample value is the agent's 0.97" test "$(ingest_value metric_value)" = 0.97
+expect "the sample belongs to the tenant of the agent certificate only" test "$(ingest_value metric_tenants)" = "['default']"
+expect "the threshold rule raised exactly one alert row for the proof tenant" test "$(ingest_value alert_rows)" = 1
+for volume in siemstate metricsstate alertsstate; do
+    expect "$volume: the reload after SIGHUP is audited under the non-customer tenant all" test "$(ingest_value "${volume}_audit_all")" -ge 1
+    expect "$volume: no audit line carries a customer tenant" test "$(ingest_value "${volume}_audit_other")" = 0
+done
+compose logs siem metrics metricalerts 2>&1 | tail -n 40
+for service_name in postgres platform web playbooks nats gateway relay clickhouse chschema siem metrics metricalerts; do
     expect "init.sh refuses the service name $service_name as the public host name" remote "cd compose && sudo ./init.sh $service_name 2>&1 | grep -q 'is a compose service name'"
 done
 expect "the events stream has the byte limit" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"max_bytes": *\([0-9]*\).*/\1/p' | head -n 1)" = 1073741824

@@ -1,0 +1,7 @@
+rules:
+  - id: host.cpu.high
+    metric: system.cpu.utilization
+    condition: {kind: threshold, direction: above, threshold: 0.9, clear: 0.8}
+    close_after: 300
+    severity: high
+    runbook: https://runbooks.example.org/host-cpu-high

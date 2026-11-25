@@ -35,6 +35,12 @@ CH_SECRETS = "    secrets: [clickhouse_server_key, clickhouse_server_cert, click
 CH_VOLUME = "      - chdata:/var/lib/clickhouse\n"
 CHSCHEMA_SECRETS = "    secrets: [pg_ca, clickhouse_schema_password]\n"
 CHSCHEMA_VOLUME = "      - ./config/clickhouse-schema.sql:/etc/ostyr-schema/schema.sql:ro\n"
+SIEM_SECRETS = "    secrets: [pg_ca, clickhouse_ingest_password, nats_siem_password]\n"
+SIEM_VOLUME = "      - siemstate:/var/lib/ostyr-siem\n"
+METRICS_SECRETS = "    secrets: [pg_ca, clickhouse_metrics_password, nats_metrics_password]\n"
+METRICS_VOLUME = "      - metricsstate:/var/lib/ostyr-metrics\n"
+ALERTS_SECRETS = "    secrets: [pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password]\n"
+ALERTS_VOLUME = "      - alertsstate:/var/lib/ostyr-metric-alerts\n"
 RELAY_PORT = '    ports:\n      - "0.0.0.0:7443:7443"\n'
 
 
@@ -164,6 +170,32 @@ MUTANTS = {
     "chschema_anonymous_volume": lambda text: replace_once(text, "      - /var/lib/clickhouse\n", ""),
     "chschema_root": lambda text: replace_once(text, "    user: 65530:65530\n", "    user: 0:0\n"),
     "chschema_image_other": lambda text: replace_in_service(text, "  chschema:\n", CH_IMAGE % DIGEST, CH_IMAGE % ("0" * 64)),
+    "siem_cap_add": lambda text: replace_once(text, SIEM_SECRETS, SIEM_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "siem_publish": lambda text: replace_once(text, SIEM_SECRETS, SIEM_SECRETS + '    ports:\n      - "0.0.0.0:7000:7000"\n'),
+    "siem_secret_metrics": lambda text: replace_once(text, SIEM_SECRETS, "    secrets: [pg_ca, clickhouse_ingest_password, nats_siem_password, nats_metrics_password]\n"),
+    "siem_secret_admin": lambda text: replace_once(text, SIEM_SECRETS, "    secrets: [pg_ca, clickhouse_ingest_password, nats_siem_password, nats_conf]\n"),
+    "siem_bind_secrets": lambda text: replace_once(text, SIEM_VOLUME, SIEM_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "siem_state_shared": lambda text: replace_once(text, SIEM_VOLUME, "      - metricsstate:/var/lib/ostyr-siem\n"),
+    "siem_root": lambda text: replace_once(text, "    user: 65529:65529\n", "    user: 0:0\n"),
+    "metrics_cap_add": lambda text: replace_once(text, METRICS_SECRETS, METRICS_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "metrics_publish": lambda text: replace_once(text, METRICS_SECRETS, METRICS_SECRETS + '    ports:\n      - "0.0.0.0:7001:7001"\n'),
+    "metrics_secret_ingest": lambda text: replace_once(
+        text, METRICS_SECRETS, "    secrets: [pg_ca, clickhouse_metrics_password, nats_metrics_password, clickhouse_ingest_password]\n"
+    ),
+    "metrics_bind_secrets": lambda text: replace_once(text, METRICS_VOLUME, METRICS_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "metrics_state_shared": lambda text: replace_once(text, METRICS_VOLUME, "      - siemstate:/var/lib/ostyr-metrics\n"),
+    "metrics_root": lambda text: replace_once(text, "    user: 65528:65528\n", "    user: 0:0\n"),
+    "metricalerts_cap_add": lambda text: replace_once(text, ALERTS_SECRETS, ALERTS_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
+    "metricalerts_publish": lambda text: replace_once(text, ALERTS_SECRETS, ALERTS_SECRETS + '    ports:\n      - "0.0.0.0:7002:7002"\n'),
+    "metricalerts_secret_pg": lambda text: replace_once(
+        text, ALERTS_SECRETS, "    secrets: [pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password, pg_service_password]\n"
+    ),
+    "metricalerts_secret_nats": lambda text: replace_once(
+        text, ALERTS_SECRETS, "    secrets: [pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password, nats_siem_password]\n"
+    ),
+    "metricalerts_bind_secrets": lambda text: replace_once(text, ALERTS_VOLUME, ALERTS_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
+    "metricalerts_state_shared": lambda text: replace_once(text, ALERTS_VOLUME, "      - state:/var/lib/ostyr-metric-alerts\n"),
+    "metricalerts_root": lambda text: replace_once(text, "    user: 65527:65527\n", "    user: 0:0\n"),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),
 }
 

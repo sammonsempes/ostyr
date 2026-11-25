@@ -1,0 +1,14 @@
+clickhouse_url: "https://clickhouse:8443"
+clickhouse_database: ostyr
+clickhouse_table: events
+clickhouse_user: ingest
+clickhouse_password_file: /run/secrets/clickhouse_ingest_password
+clickhouse_ca_file: /run/secrets/pg_ca
+audit_file: /var/lib/ostyr-siem/audit.log
+nats_url: "tls://nats:4222"
+nats_tls_first: true
+nats_ca_file: /run/secrets/pg_ca
+nats_user: siem_ingest
+nats_password_file: /run/secrets/nats_siem_password
+nats_stream: events
+nats_consumer: siem-ingest
