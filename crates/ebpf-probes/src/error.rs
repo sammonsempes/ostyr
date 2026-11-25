@@ -3,7 +3,7 @@
 
 use crate::btf::Unsupported;
 use crate::object::ObjectError;
-use crate::shape::{ShapeError, PROGRAM_NAME};
+use crate::shape::ShapeError;
 use aya::maps::MapError;
 use aya::EbpfError;
 use std::fmt;
@@ -19,8 +19,8 @@ pub enum LoadError {
     MapCreate { errno: Option<i32> },
     ProgramLoad { errno: Option<i32> },
     Attach { errno: Option<i32> },
-    MissingProgram,
-    WrongProgramType,
+    MissingProgram(&'static str),
+    WrongProgramType(&'static str),
     TakeMap(&'static str),
     NotBuilt,
 }
@@ -36,8 +36,8 @@ impl fmt::Display for LoadError {
             LoadError::MapCreate { errno } => write!(formatter, "exec map cannot be created (errno {errno:?})"),
             LoadError::ProgramLoad { errno } => write!(formatter, "exec program cannot be loaded (errno {errno:?})"),
             LoadError::Attach { errno } => write!(formatter, "exec program cannot be attached (errno {errno:?})"),
-            LoadError::MissingProgram => write!(formatter, "program {PROGRAM_NAME} is missing"),
-            LoadError::WrongProgramType => write!(formatter, "program {PROGRAM_NAME} is not a tracepoint"),
+            LoadError::MissingProgram(name) => write!(formatter, "program {name} is missing"),
+            LoadError::WrongProgramType(name) => write!(formatter, "program {name} has the wrong attach type"),
             LoadError::TakeMap(name) => write!(formatter, "map {name} is missing or has the wrong type"),
             LoadError::NotBuilt => write!(formatter, "exec probe is not built into this agent"),
         }
@@ -122,8 +122,8 @@ pub fn load_error_name(error: &LoadError) -> &'static str {
         LoadError::MapCreate { .. } => "MapCreate",
         LoadError::ProgramLoad { .. } => "ProgramLoad",
         LoadError::Attach { .. } => "Attach",
-        LoadError::MissingProgram => "MissingProgram",
-        LoadError::WrongProgramType => "WrongProgramType",
+        LoadError::MissingProgram(_) => "MissingProgram",
+        LoadError::WrongProgramType(_) => "WrongProgramType",
         LoadError::TakeMap(_) => "TakeMap",
         LoadError::NotBuilt => "NotBuilt",
     }
