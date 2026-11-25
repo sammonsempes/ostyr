@@ -9,8 +9,9 @@ use crate::probe::{
     ProbeOutcome, MAX_REDIRECTS, MAX_RESPONSE_BYTES, UNPARSEABLE_TARGET,
 };
 use crate::round::{new_runner, reload_checks, run_round, RoundContext, RoundReport, Runner};
+use crate::samples::{probed_of, record, sample_rows, send_round, Probed, SampleTotals};
 use crate::target::guard_address_nat64;
-use crate::types::{Clock, Connect, Handshake, Ping, Resolve, RootedFetch, Sleep, StartRead, StopSource};
+use crate::types::{Clock, Connect, Handshake, Ping, Resolve, RootedFetch, SendBatches, Sleep, StartRead, StopSource, WallNanos};
 use alerts::error::StoreError;
 use alerts::model::Alert;
 use alerts::pg::pg_executor;
@@ -97,6 +98,8 @@ pub struct ServiceSettings {
     pub checks_file: PathBuf,
     pub pg_settings: PathBuf,
     pub audit_file: PathBuf,
+    #[serde(default)]
+    pub clickhouse_settings: Option<PathBuf>,
 }
 
 
@@ -151,6 +154,9 @@ pub struct ProbeTools<'a> {
     pub ping: &'a Ping<'a>,
     pub handshake: &'a Handshake<'a>,
     pub clock: &'a Clock<'a>,
+    pub wall_nanos: &'a WallNanos<'a>,
+    pub send: &'a SendBatches<'a>,
+    pub samples: &'a SampleTotals,
 }
 
 
@@ -199,6 +205,8 @@ pub fn validate_service(settings: &ServiceSettings) -> Result<(), ConfigError> {
         Err(setting_error("pg_settings", "must be an absolute path"))
     } else if !settings.checks_file.is_absolute() {
         Err(setting_error("checks_file", "must be an absolute path"))
+    } else if settings.clickhouse_settings.as_ref().is_some_and(|file| !file.is_absolute()) {
+        Err(setting_error("clickhouse_settings", "must be an absolute path"))
     } else {
         Ok(())
     }
@@ -246,7 +254,7 @@ pub fn live_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn<Liv
         if settings != baseline {
             Err(setting_error(
                 "start-only",
-                "tenant, location, checks_file, pg_settings and audit_file are read at start only, restart the service to change them",
+                "tenant, location, checks_file, pg_settings, clickhouse_settings and audit_file are read at start only, restart the service to change them",
             ))
         } else {
             let (checks, skipped) = skip_refused_literals(load_checks(&settings.checks_file)?);
@@ -557,6 +565,7 @@ pub fn serve_rounds(
     store: &crate::types::Store<'_>,
     tools: &ProbeTools,
     control: &RunControl,
+    samples_file: Option<&Path>,
 ) -> Finish {
     let refusals = Refusals::default();
     let mut applied = Applied::default();
@@ -565,7 +574,13 @@ pub fn serve_rounds(
     (0..limit).take_while(|_round| !control.stop.load(Ordering::Relaxed)).for_each(|_round| {
         let live = current_config(engine);
         applied = apply_live(runner, &live, applied);
-        let probe = |check: &Check| probe_check(check, &live, tools, &refusals);
+        let probed: Mutex<Vec<Probed>> = Mutex::new(Vec::new());
+        let probe = |check: &Check| {
+            let succeeded = probe_check(check, &live, tools, &refusals);
+            let result = probed_of(&check.name, check.kind, succeeded, tools.wall_nanos);
+            probed.lock().unwrap_or_else(PoisonError::into_inner).push(result);
+            succeeded
+        };
         let refused = |check: &Check| last_refused(&refusals, check);
         let stopped = || control.stop.load(Ordering::Relaxed);
         let context = RoundContext {
@@ -578,6 +593,8 @@ pub fn serve_rounds(
             stopped: &stopped,
         };
         let report = run_round(runner, &context);
+        let results = std::mem::take(&mut *probed.lock().unwrap_or_else(PoisonError::into_inner));
+        send_samples(samples_file, scope, &runner.location, &results, tools);
         idle = log_round(&report, refusals.total.load(Ordering::Relaxed), idle);
         pause(control, ROUND_PAUSE);
     });
@@ -586,6 +603,21 @@ pub fn serve_rounds(
     } else {
         warn!("round_cap_reached, exiting so the supervisor restarts the runner");
         Finish::RoundCap
+    }
+}
+
+
+/// Sends the round's results as samples when a settings file is declared; a round with no result reads nothing.
+pub fn send_samples(file: Option<&Path>, scope: &TenantScope, location: &str, results: &[Probed], tools: &ProbeTools) {
+    if let Some(settings_file) = file.filter(|_declared| !results.is_empty()) {
+        let rows = sample_rows(scope, location, results);
+        let timeless = (results.len() - rows.len()) as u64;
+        let begun = (tools.clock)();
+        let elapsed = || (tools.clock)().saturating_sub(begun);
+        record(
+            tools.samples,
+            &send_round(settings_file, &rows, timeless, tools.wall_nanos, &elapsed, tools.send),
+        );
     }
 }
 
@@ -665,6 +697,7 @@ pub fn run_service(arguments: &[String], stop_source: StopSource) -> Result<Fini
 pub fn start(settings_file: &Path, rounds: usize, stop: &AtomicBool, sleep: &Sleep<'_>) -> Result<Finish, Box<dyn Error>> {
     let origin = Instant::now();
     let clock = move || origin.elapsed();
+    let totals = SampleTotals::default();
     let tools = ProbeTools {
         resolve: &system_resolve,
         fetch: &crate::http::http_fetch,
@@ -672,6 +705,9 @@ pub fn start(settings_file: &Path, rounds: usize, stop: &AtomicBool, sleep: &Sle
         ping: &crate::transport::icmp_echo,
         handshake: &crate::http::tls_handshake,
         clock: &clock,
+        wall_nanos: &crate::samples::wall_nanos,
+        send: &crate::samples::post_batches,
+        samples: &totals,
     };
     start_with(load_service, settings_file, &RunControl { rounds, stop, sleep }, &tools)
 }
@@ -698,8 +734,20 @@ pub fn start_with(first_read: StartRead, settings_file: &Path, control: &RunCont
     ))?;
     let session = Mutex::new(Some(first));
     let store = |alerts: &[Alert]| store_alerts(&runtime, &session, &pg, &scope, alerts);
+    match &baseline.clickhouse_settings {
+        Some(_file) => info!("samples enabled"),
+        None => info!("samples disabled: no clickhouse_settings"),
+    }
     info!("serving");
-    Ok(serve_rounds(&mut runner, &engine, &scope, &store, tools, control))
+    Ok(serve_rounds(
+        &mut runner,
+        &engine,
+        &scope,
+        &store,
+        tools,
+        control,
+        baseline.clickhouse_settings.as_deref(),
+    ))
 }
 
 
