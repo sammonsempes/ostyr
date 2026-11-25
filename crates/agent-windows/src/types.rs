@@ -25,3 +25,15 @@ pub type Fingerprint = Result<Vec<u8>, String>;
 
 /// The loader's record shared with the round loop.
 pub type SharedObserved = std::sync::Arc<std::sync::Mutex<crate::settings::Observed>>;
+
+
+/// The production runner or a test double, as a plain function pointer.
+pub type RunFn = fn(&RunRequest<'_>, &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError>;
+
+
+/// Seconds of a wait as a duration: seconds in production, zero in a test.
+pub type Pace = fn(u64) -> std::time::Duration;
+
+
+/// Resolves when the process is asked to stop.
+pub type InterruptWait = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>>>>;

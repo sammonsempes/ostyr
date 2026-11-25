@@ -4,7 +4,7 @@ use crate::types::{Fingerprint, SharedObserved};
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_bytes_capped};
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
-use core_config::types::{BoxError, ConfigState, SharedAuditFn};
+use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -63,6 +63,15 @@ pub const MIN_SPOOL_BYTES: u64 = 1_048_576;
 pub const MAX_SPOOL_BYTES_CEILING: u64 = 1_073_741_824;
 
 
+pub const MAX_AUDIT_FILE_BYTES: usize = 64;
+
+
+pub const DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+    "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+
 /// The settings file: every key optional, each defaulting to the value the agent used before the file existed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -74,6 +83,7 @@ pub struct Settings {
     pub max_output_bytes: usize,
     pub deadline_seconds: u64,
     pub max_spool_bytes: u64,
+    pub audit_file: Option<String>,
 }
 
 
@@ -87,6 +97,7 @@ impl Default for Settings {
             max_output_bytes: MAX_OUTPUT_BYTES,
             deadline_seconds: QUERY_DEADLINE_SECONDS,
             max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
+            audit_file: None,
         }
     }
 }
@@ -105,6 +116,12 @@ pub enum SettingsError {
     UnknownChannel { index: usize },
     #[error("setting `channels[{index}]` repeats an earlier entry")]
     DuplicateChannel { index: usize },
+    #[error("setting `audit_file` is missing")]
+    NoAuditFile,
+    #[error("setting `audit_file` is not a plain file name")]
+    BadAuditFile,
+    #[error("setting `audit_file` is read at start only")]
+    AuditFileChanged,
 }
 
 
@@ -241,9 +258,28 @@ pub fn validate_channels(names: &[String]) -> Result<(), SettingsError> {
 }
 
 
+/// A bare file name under the state directory: ASCII letters, digits, `-` and `_` only (no dot, so no cursor, settings or temporary file can be named), no leading `-`, no Windows device name.
+pub fn validate_audit_file(name: &str) -> Result<(), SettingsError> {
+    let plain = name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    let device = DEVICE_NAMES.contains(&name.to_ascii_lowercase().as_str());
+    if name.is_empty() || name.len() > MAX_AUDIT_FILE_BYTES || name.starts_with('-') || !plain || device {
+        Err(SettingsError::BadAuditFile)
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The audit file name the start needs: a settings file without one is refused.
+pub fn audit_file_of(settings: &Settings) -> Result<&str, SettingsError> {
+    settings.audit_file.as_deref().ok_or(SettingsError::NoAuditFile)
+}
+
+
 /// The first refused field is named, never clamped.
 pub fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
     validate_channels(&settings.channels)?;
+    settings.audit_file.as_deref().map_or(Ok(()), validate_audit_file)?;
     let checks = [
         (
             "poll_interval_seconds",
@@ -293,6 +329,7 @@ pub fn settings_state(settings: &Settings) -> ConfigState {
         ("max_output_bytes", settings.max_output_bytes.to_string()),
         ("deadline_seconds", settings.deadline_seconds.to_string()),
         ("max_spool_bytes", settings.max_spool_bytes.to_string()),
+        ("audit_file", settings.audit_file.as_deref().unwrap_or("").to_owned()),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
@@ -306,8 +343,16 @@ pub fn settings_subscriber(observed: SharedObserved) -> Subscriber<Settings> {
     Subscriber {
         section: SETTINGS_SECTION.to_owned(),
         validate: Box::new(move |settings| {
-            validate_settings(settings).map_err(|error| {
-                observation(&validating).file_fault = true;
+            let mut state = observation(&validating);
+            let judged = validate_settings(settings).and_then(|()| {
+                if settings.audit_file == state.good.audit_file {
+                    Ok(())
+                } else {
+                    Err(SettingsError::AuditFileChanged)
+                }
+            });
+            judged.map_err(|error| {
+                state.file_fault = true;
                 BoxError::from(error)
             })
         }),
@@ -327,17 +372,29 @@ pub fn open_settings(
     context: ReloadContext,
     observed: SharedObserved,
 ) -> Result<ReloadEngine<Settings>, OpenError> {
+    let first = observed_load(&path, &observed)?;
+    open_settings_from(path, first, audit, context, observed)
+}
+
+
+/// `first` is the one start read (`observed_load` on `path`, so its bytes are recorded): the engine opens on it without reading the file again, so the audit path taken from it and the baseline are one read.
+pub fn open_settings_from(
+    path: PathBuf,
+    first: Settings,
+    audit: Box<SharedAuditFn>,
+    context: ReloadContext,
+    observed: SharedObserved,
+) -> Result<ReloadEngine<Settings>, OpenError> {
     let loading = Arc::clone(&observed);
-    let mut engine = open_engine(
-        Box::new(move || observed_load(&path, &loading)),
-        settings_state,
-        Vec::new(),
-        audit,
-        context,
-    )?;
-    let first = current_config(&engine);
-    validate_settings(&first)?;
-    observation(&observed).good = Settings::clone(&first);
+    let start = Mutex::new(Some(first));
+    let loader: Box<LoaderFn<Settings>> = Box::new(move || match start.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        Some(read) => Ok(read),
+        None => observed_load(&path, &loading),
+    });
+    let mut engine = open_engine(loader, settings_state, Vec::new(), audit, context)?;
+    let in_force = current_config(&engine);
+    validate_settings(&in_force)?;
+    observation(&observed).good = Settings::clone(&in_force);
     engine.subscribers.push(settings_subscriber(observed));
     Ok(engine)
 }
