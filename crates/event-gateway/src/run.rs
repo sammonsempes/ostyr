@@ -1,5 +1,5 @@
 use crate::error::GatewayError;
-use crate::model::{GatewayFile, AUDIT_TENANT, MODULE, RELOAD_REQUEST_ID, SUMMARY_INTERVAL_MS};
+use crate::model::{GatewayFile, MODULE, RELOAD_REQUEST_ID, SUMMARY_INTERVAL_MS};
 use crate::publish::{gateway_sink, spawn_summary};
 use crate::session::new_gateway;
 use crate::settings::open_settings;
@@ -7,6 +7,7 @@ use agent_channel::app::{alerting_audit, debounce, keep_signals, reload_context,
 use agent_channel::server_app::{run_server, ServerFile};
 use agent_channel::types::{ReadySender, ShutdownSignal};
 use core_audit::log::open_file_log;
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
 use siem_ingest::nats::millis;
@@ -36,7 +37,7 @@ pub async fn run_gateway(
     let engine = Arc::new(open_settings(
         gateway.settings_file.clone(),
         alerting_audit(shared_log_audit(&log)),
-        reload_context(&gateway.settings_file, MODULE, AUDIT_TENANT, RELOAD_REQUEST_ID),
+        reload_context(&gateway.settings_file, MODULE, PLATFORM_TENANT, RELOAD_REQUEST_ID),
     )?);
     let _watch = watch_files(Arc::clone(&engine), std::slice::from_ref(&gateway.settings_file), debounce())?;
     let _signals = keep_signals(Arc::clone(&engine))?;

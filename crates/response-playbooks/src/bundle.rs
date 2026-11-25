@@ -4,6 +4,7 @@ use crate::model::{Catalogue, Inventory, Playbook, SimulationInput, Trace};
 use crate::simulate::simulate;
 use crate::validate::playbook_problems;
 use core_audit::model::NewEntry;
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{check_watched_files, current_config, open_engine, ReloadContext, ReloadEngine, Subscriber, FILE_KEY_SEPARATOR};
@@ -218,7 +219,7 @@ pub fn open_playbooks(settings: PlaybookSettings) -> Result<ReloadEngine<Bundle>
     check_watched_files(&known_files)?;
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant: "all".to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: settings.catalogue_path.display().to_string(),
         request_id: RELOAD_REQUEST_ID.to_owned(),

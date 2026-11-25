@@ -6,7 +6,7 @@ use agent_channel::model::{Counters, ServerState, ServerTlsPaths, ShellInput, Sh
 use agent_channel::presence::watch_silence;
 use agent_channel::revocation::open_revocation_engine;
 use agent_channel::server::serve;
-use agent_channel::server_app::{file_events, load_server_file, SERVER_MODULE, SERVER_TENANT};
+use agent_channel::server_app::{file_events, load_server_file, SERVER_MODULE};
 use agent_channel::settings::open_settings_engine;
 use agent_channel::shell::shell_router;
 use agent_channel::shell_gate::{gate_add, new_gate};
@@ -14,6 +14,7 @@ use agent_channel::tls::server_config;
 use agent_channel::types::{ShellInputStream, ShellSink, ShellSource};
 use agent_command::cli::seconds_since_epoch;
 use core_audit::log::open_file_log;
+use core_audit::tenant::PLATFORM_TENANT;
 use futures_util::{stream, FutureExt, StreamExt};
 use std::error::Error;
 use std::io::{stdout, Write};
@@ -88,13 +89,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (settings_engine, settings) = open_settings_engine(
         file.settings_file.clone(),
         shared_log_audit(&log),
-        reload_context(&file.settings_file, SERVER_MODULE, SERVER_TENANT, "settings-reload"),
+        reload_context(&file.settings_file, SERVER_MODULE, PLATFORM_TENANT, "settings-reload"),
         false,
     )?;
     let (revocation_engine, revocations) = open_revocation_engine(
         file.revocation_file.clone(),
         alerting_audit(shared_log_audit(&log)),
-        reload_context(&file.revocation_file, SERVER_MODULE, SERVER_TENANT, "revocation-reload"),
+        reload_context(&file.revocation_file, SERVER_MODULE, PLATFORM_TENANT, "revocation-reload"),
     )?;
     let state = Arc::new(ServerState {
         settings,

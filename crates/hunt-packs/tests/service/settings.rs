@@ -133,7 +133,7 @@ fn the_engine_baseline_is_the_value_the_caller_read_not_a_second_read() -> TestR
     let log = genesis_log(io::sink());
     let context = ReloadContext {
         actor_id: "t".to_owned(),
-        tenant: "all".to_owned(),
+        tenant: core_audit::tenant::AUDIT_TENANT.to_owned(),
         module: "t".to_owned(),
         target: "t".to_owned(),
         request_id: "t".to_owned(),

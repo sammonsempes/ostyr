@@ -16,6 +16,7 @@ use chrono::Utc;
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_audit::tenant::AUDIT_TENANT;
 use core_audit::types::ParameterMap;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
@@ -60,9 +61,6 @@ pub const PURGE_REQUEST: &str = "purge";
 
 
 pub const SETTINGS_REQUEST: &str = "settings";
-
-
-pub const AUDIT_TENANT: &str = "all";
 
 
 pub const PURGE_KEYS: [&str; 3] = ["rows", "tenants", "detail"];

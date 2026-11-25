@@ -187,7 +187,7 @@ fn rig(text: &str) -> Result<Rig, Box<dyn Error + Send + Sync>> {
         }),
         ReloadContext {
             actor_id: "test".to_owned(),
-            tenant: "platform".to_owned(),
+            tenant: core_audit::tenant::PLATFORM_TENANT.to_owned(),
             module: "event-gateway".to_owned(),
             target: path.display().to_string(),
             request_id: "test".to_owned(),
@@ -894,7 +894,7 @@ fn a_first_settings_file_that_does_not_parse_is_refused() -> TestResult {
     fs::write(&path, "unknown_key: 1\n")?;
     let context = ReloadContext {
         actor_id: "test".to_owned(),
-        tenant: "platform".to_owned(),
+        tenant: core_audit::tenant::PLATFORM_TENANT.to_owned(),
         module: "event-gateway".to_owned(),
         target: path.display().to_string(),
         request_id: "test".to_owned(),

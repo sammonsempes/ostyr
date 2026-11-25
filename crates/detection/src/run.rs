@@ -1,8 +1,8 @@
 use crate::detect::{checkpoint_if_dirty, detection_sink, new_detector, save_all};
 use crate::error::DetectionError;
 use crate::model::{
-    AlertStore, CommitPolicy, Detector, SinkKind, AUDIT_TENANT, INGEST_REQUEST_ID, MAX_ALERTS_PER_BATCH, MAX_COMMIT_ATTEMPTS, MAX_ROTATED_FILES,
-    MAX_STORED_ALERTS, MAX_TENANTS, MODULE, PG_REQUEST_ID, RULES_REQUEST_ID,
+    AlertStore, CommitPolicy, Detector, SinkKind, INGEST_REQUEST_ID, MAX_ALERTS_PER_BATCH, MAX_COMMIT_ATTEMPTS, MAX_ROTATED_FILES, MAX_STORED_ALERTS,
+    MAX_TENANTS, MODULE, PG_REQUEST_ID, RULES_REQUEST_ID,
 };
 use crate::pg::{open_pg_store, system_micros};
 use crate::settings::{fixed_paths, load_detection_file, open_ingest, open_pg_engine, open_rules_engine};
@@ -10,6 +10,7 @@ use crate::store::open_alert_store;
 use crate::types::{AlertSinkFn, ClockFn, SharedStopFn, SleepFn};
 use agent_channel::app::{alerting_audit, debounce, keep_signals, reload_context, shared_log_audit};
 use core_audit::log::open_file_log;
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::reload::ReloadEngine;
 use core_config::watch::watch_files;
 use siem_ingest::batcher::{new_batcher, real_sleep, system_clock};

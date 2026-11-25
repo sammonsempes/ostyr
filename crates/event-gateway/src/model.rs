@@ -19,9 +19,6 @@ pub const SECTION: &str = "gateway";
 pub const RELOAD_REQUEST_ID: &str = "gateway-reload";
 
 
-pub const AUDIT_TENANT: &str = "platform";
-
-
 pub const DEFAULT_NATS_URL: &str = "tls://127.0.0.1:4222";
 
 
