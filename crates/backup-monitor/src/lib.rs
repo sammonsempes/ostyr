@@ -2,6 +2,8 @@
 
 #[cfg(unix)]
 pub mod borg;
+#[cfg(unix)]
+pub mod check;
 pub mod compare;
 pub mod coverage;
 pub mod declarations;
@@ -16,6 +18,8 @@ pub mod report;
 pub mod restic;
 #[cfg(unix)]
 pub mod restore;
+#[cfg(unix)]
+pub mod secrets;
 #[cfg(unix)]
 pub mod store;
 pub mod text;

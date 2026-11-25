@@ -177,23 +177,28 @@ printf '[{"time":"%s","paths":["/data"],"hostname":"web1","id":"%s","short_id":"
 printf '%s\n' "$snapshot_id" >"$fake/list.txt"
 printf 'hunter2\n' >"$fake/password"
 chmod 600 "$fake/password"
+chmod 700 "$fake"
 digest="$(sha256sum "$fake/canary" | cut -d' ' -f1)"
-{
-    echo "tenant: live2"
-    echo "repositories:"
-    for name in main second; do
-        printf '  - repository: %s\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/%s\n      password_file: %s/password\n' "$name" "$name" "$fake"
-        printf '    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: %s\n      max_bytes: 100\n' "$digest"
-    done
-} >"$work/declarations.yaml"
+for kind in current published; do
+    password="password"
+    [[ "$kind" == published ]] && password="$fake/password"
+    {
+        echo "tenant: live2"
+        echo "repositories:"
+        for name in main second; do
+            printf '  - repository: %s\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/%s\n      password_file: %s\n' "$name" "$name" "$password"
+            printf '    restore_test:\n      host: web1\n      path: /data/.ostyr-restore-canary\n      sha256: %s\n      max_bytes: 100\n' "$digest"
+        done
+    } >"$work/declarations-$kind.yaml"
+done
 X() { psql -X -q -tA -h "$DATASTORE_DOMAIN" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$XDB" -c "$1"; }
 if [[ -x /tmp/backup_run_published ]]; then
-    published="$(/tmp/backup_run_published restore-test "$work/declarations.yaml" "$fake/restic" --store "$work/pg.yaml" | tail -1)"
+    published="$(/tmp/backup_run_published restore-test "$work/declarations-published.yaml" "$fake/restic" --store "$work/pg.yaml" | tail -1)"
     echo "$published"
     check "published build migrated the database" "backup_0001" "$(X "SELECT string_agg(version, ',' ORDER BY version) FROM public.schema_migrations WHERE namespace = 'backup'")"
     check "published build stored both tests" "2" "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'restored'")"
 fi
-first="$(/tmp/backup_run restore-test "$work/declarations.yaml" "$fake/restic" --store "$work/pg.yaml" | tail -1)"
+first="$(/tmp/backup_run restore-test "$work/declarations-current.yaml" "$fake/restic" "$fake" --store "$work/pg.yaml" | tail -1)"
 echo "$first"
 check "example first run stores both tests" '{"store":{"config_changed":0,"pruned":0,"run_error":0,"skipped_invalid":0,"stale_write":0,"written":2}}' "$first"
 if [[ -x /tmp/backup_run_published ]]; then
@@ -202,7 +207,7 @@ if [[ -x /tmp/backup_run_published ]]; then
 fi
 check "example rows restored" "2" "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'restored' AND restored_config_id IS NOT NULL")"
 touch "$fake/config.fail"
-second="$(/tmp/backup_run restore-test "$work/declarations.yaml" "$fake/restic" --store "$work/pg.yaml" | tail -1)"
+second="$(/tmp/backup_run restore-test "$work/declarations-current.yaml" "$fake/restic" "$fake" --store "$work/pg.yaml" | tail -1)"
 echo "$second"
 check "example config failure stores a run error per test" '{"store":{"config_changed":0,"pruned":0,"run_error":2,"skipped_invalid":0,"stale_write":0,"written":2}}' "$second"
 check "example rows are run errors that keep the last pass" "2" \

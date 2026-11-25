@@ -4,8 +4,9 @@ use crate::compare::{below_floor, below_floor_named, compare};
 use crate::error::BackupError;
 use crate::model::{Declarations, Finding, Limits, Listing, ResticSource};
 use crate::parse::parse_restic;
+use crate::secrets::{open_secret_in, secret_path, secret_refusal, valid_secret_name, SecretsDir};
 use crate::text::{valid_id, valid_text};
-use core_config::secret_file::{open_secret, SecretFileError};
+use core_config::secret_file::SecretFileError;
 use net_topology::model::RunFailure;
 use net_topology::runner::run_command;
 use serde::Deserialize;
@@ -15,6 +16,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::debug;
+
+
+pub const RESTIC_PROGRAM: &str = "/usr/bin/restic";
 
 
 pub const MAX_LOCATION_BYTES: usize = 1024;
@@ -178,7 +182,7 @@ pub fn valid_location(text: &str) -> bool {
 
 
 pub fn valid_source(source: &ResticSource) -> bool {
-    valid_location(&source.location) && source.password_file.len() <= MAX_LOCATION_BYTES && valid_path(&source.password_file)
+    valid_location(&source.location) && valid_secret_name(&source.password_file)
 }
 
 
@@ -211,8 +215,7 @@ pub fn plan(declarations: &Declarations) -> ResticPlan<'_> {
 
 
 pub fn password_failure(error: SecretFileError) -> ResticError {
-    let refusal = error.to_string();
-    debug!(refusal, "password file refused");
+    secret_refusal(&error);
     ResticError::PasswordFile
 }
 
@@ -228,11 +231,11 @@ pub fn sftp_transport(location: &str) -> Vec<String> {
 }
 
 
-pub fn command_arguments<'a>(source: &'a ResticSource, transport: &'a [String], verb: &[&'a str]) -> Vec<&'a str> {
+pub fn command_arguments<'a>(source: &'a ResticSource, password: &'a str, transport: &'a [String], verb: &[&'a str]) -> Vec<&'a str> {
     transport
         .iter()
         .map(String::as_str)
-        .chain(["-r", source.location.as_str(), "--password-file", source.password_file.as_str()])
+        .chain(["-r", source.location.as_str(), "--password-file", password])
         .chain(COMMON_FLAGS)
         .chain(verb.iter().copied())
         .collect()
@@ -273,24 +276,30 @@ pub fn unchanged(checked: &File, path: &str) -> Result<(), ResticError> {
 
 
 /// Runs `cat config` then `snapshots` (cleared environment, own process group, capped stdout) within `deadline` in total.
-pub fn run_raw(program: &Path, source: &ResticSource, limits: &Limits, deadline: Duration) -> Result<RawRun, ResticError> {
-    if !valid_source(source) {
-        Err(ResticError::Refused)
-    } else {
-        let checked = open_secret(Path::new(&source.password_file)).map_err(password_failure)?;
+pub fn run_raw(program: &Path, secrets: &SecretsDir, source: &ResticSource, limits: &Limits, deadline: Duration) -> Result<RawRun, ResticError> {
+    let password_text = secret_path(secrets, &source.password_file).filter(|_| valid_source(source));
+    if let Some(password) = password_text {
+        let checked = open_secret_in(secrets, &source.password_file, rustix::process::geteuid().as_raw()).map_err(password_failure)?;
         let transport = sftp_transport(&source.location);
         let start = Instant::now();
-        let config = run_command(program, &command_arguments(source, &transport, &CONFIG_VERB), CONFIG_CAP_BYTES, deadline)?;
+        let config = run_command(
+            program,
+            &command_arguments(source, &password, &transport, &CONFIG_VERB),
+            CONFIG_CAP_BYTES,
+            deadline,
+        )?;
         let key = config_id(&config)?;
         let remaining = deadline.saturating_sub(start.elapsed());
         let snapshots = run_command(
             program,
-            &command_arguments(source, &transport, &SNAPSHOTS_VERB),
+            &command_arguments(source, &password, &transport, &SNAPSHOTS_VERB),
             limits.max_bytes,
             remaining,
         )?;
-        unchanged(&checked, &source.password_file)?;
+        unchanged(&checked, &password)?;
         Ok(RawRun { key, snapshots })
+    } else {
+        Err(ResticError::Refused)
     }
 }
 
@@ -301,8 +310,14 @@ pub fn parse_run(raw: &RawRun, limits: &Limits) -> Result<Listing, ResticError> 
 }
 
 
-pub fn snapshot_listing(program: &Path, source: &ResticSource, limits: &Limits, deadline: Duration) -> Result<Listing, ResticError> {
-    parse_run(&run_raw(program, source, limits, deadline)?, limits)
+pub fn snapshot_listing(
+    program: &Path,
+    secrets: &SecretsDir,
+    source: &ResticSource,
+    limits: &Limits,
+    deadline: Duration,
+) -> Result<Listing, ResticError> {
+    parse_run(&run_raw(program, secrets, source, limits, deadline)?, limits)
 }
 
 

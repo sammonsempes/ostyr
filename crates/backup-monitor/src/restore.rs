@@ -7,9 +7,9 @@ use crate::restic::{
     command_arguments, config_id, password_failure, sftp_transport, unchanged, valid_path, valid_source, ResticError, CONFIG_CAP_BYTES, CONFIG_VERB,
     MAX_HOST_BYTES, MAX_LOCATION_BYTES, SNAPSHOTS_VERB,
 };
+use crate::secrets::{open_secret_in, secret_path, SecretsDir};
 use crate::text::{valid_id, valid_text};
 use crate::types::{Clock, SkipCounts};
-use core_config::secret_file::open_secret;
 use core_pg::scope::TenantScope;
 use net_topology::model::RunFailure;
 use net_topology::runner::run_command;
@@ -35,6 +35,15 @@ pub const LIST_FLAGS: [&str; 4] = ["--no-cache", "--no-lock", "list", "snapshots
 
 /// One 64-hex id and its newline.
 pub const ID_LINE_BYTES: u64 = 65;
+
+
+/// What one restore test runs against: the tenant, the restic source and the declared test.
+#[derive(Debug, Clone, Copy)]
+pub struct RestoreTarget<'a> {
+    pub tenant: &'a TenantScope,
+    pub source: &'a ResticSource,
+    pub test: &'a RestoreTest,
+}
 
 
 /// One fixed outcome per test; only `Restored` is a success.
@@ -248,11 +257,11 @@ pub fn judge(dump: Result<Vec<u8>, RunFailure>, test: &RestoreTest) -> Result<Re
 
 
 /// The common prefix without `--json`, then `--no-cache --no-lock dump <snapshot id> <path>`.
-pub fn dump_arguments<'a>(source: &'a ResticSource, transport: &'a [String], snapshot_id: &'a str, path: &'a str) -> Vec<&'a str> {
+pub fn dump_arguments<'a>(source: &'a ResticSource, password: &'a str, transport: &'a [String], snapshot_id: &'a str, path: &'a str) -> Vec<&'a str> {
     transport
         .iter()
         .map(String::as_str)
-        .chain(["-r", source.location.as_str(), "--password-file", source.password_file.as_str()])
+        .chain(["-r", source.location.as_str(), "--password-file", password])
         .chain(DUMP_FLAGS)
         .chain([snapshot_id, path])
         .collect()
@@ -260,11 +269,11 @@ pub fn dump_arguments<'a>(source: &'a ResticSource, transport: &'a [String], sna
 
 
 /// The common prefix without `--json`, then `--no-cache --no-lock list snapshots`.
-pub fn list_arguments<'a>(source: &'a ResticSource, transport: &'a [String]) -> Vec<&'a str> {
+pub fn list_arguments<'a>(source: &'a ResticSource, password: &'a str, transport: &'a [String]) -> Vec<&'a str> {
     transport
         .iter()
         .map(String::as_str)
-        .chain(["-r", source.location.as_str(), "--password-file", source.password_file.as_str()])
+        .chain(["-r", source.location.as_str(), "--password-file", password])
         .chain(LIST_FLAGS)
         .collect()
 }
@@ -273,28 +282,34 @@ pub fn list_arguments<'a>(source: &'a ResticSource, transport: &'a [String]) -> 
 /// Runs `cat config`, `snapshots`, `list snapshots` and one `dump` within `deadline` in total; the password file is checked again afterwards.
 pub fn restore_test(
     program: &Path,
-    tenant: &TenantScope,
-    source: &ResticSource,
-    test: &RestoreTest,
+    secrets: &SecretsDir,
+    target: &RestoreTarget<'_>,
     limits: &Limits,
     deadline: Duration,
     clock: Clock,
 ) -> Result<RestoreResult, ResticError> {
-    if valid_source(source) && valid_test(test) {
-        let checked = open_secret(Path::new(&source.password_file)).map_err(password_failure)?;
+    let (tenant, source, test) = (target.tenant, target.source, target.test);
+    let password_text = secret_path(secrets, &source.password_file).filter(|_| valid_source(source) && valid_test(test));
+    if let Some(password) = password_text {
+        let checked = open_secret_in(secrets, &source.password_file, rustix::process::geteuid().as_raw()).map_err(password_failure)?;
         let transport = sftp_transport(&source.location);
         let start = Instant::now();
-        let config = run_command(program, &command_arguments(source, &transport, &CONFIG_VERB), CONFIG_CAP_BYTES, deadline)?;
+        let config = run_command(
+            program,
+            &command_arguments(source, &password, &transport, &CONFIG_VERB),
+            CONFIG_CAP_BYTES,
+            deadline,
+        )?;
         let key = config_id(&config)?;
         let snapshots = run_command(
             program,
-            &command_arguments(source, &transport, &SNAPSHOTS_VERB),
+            &command_arguments(source, &password, &transport, &SNAPSHOTS_VERB),
             limits.max_bytes,
             deadline.saturating_sub(start.elapsed()),
         )?;
         let ids = run_command(
             program,
-            &list_arguments(source, &transport),
+            &list_arguments(source, &password, &transport),
             list_cap(limits),
             deadline.saturating_sub(start.elapsed()),
         )?;
@@ -310,14 +325,14 @@ pub fn restore_test(
             (None, Some(snapshot)) => judge(
                 run_command(
                     program,
-                    &dump_arguments(source, &transport, &snapshot.id, &test.path),
+                    &dump_arguments(source, &password, &transport, &snapshot.id, &test.path),
                     test.max_bytes,
                     deadline.saturating_sub(start.elapsed()),
                 ),
                 test,
             )?,
         };
-        unchanged(&checked, &source.password_file)?;
+        unchanged(&checked, &password)?;
         Ok(RestoreResult {
             tenant: tenant.clone(),
             config_id: key,

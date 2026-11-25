@@ -1,15 +1,14 @@
-//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> [--store <pg.yaml> [--cap <rows>]] prints one JSON line per declared restore test (times as RFC 3339) and, with `--store`, writes the results to PostgreSQL and prints the write counts; backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
+//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> <secrets-dir> [--store <pg.yaml> [--cap <rows>]] prints one JSON line per declared restore test (times as RFC 3339) and, with `--store`, writes the results to PostgreSQL and prints the write counts; backup_run <declarations.yaml> <restic-binary> <secrets-dir> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
-    use backup_monitor::borg::{plan as borg_plan, run_raw as borg_run, BORG_PROGRAM};
-    use backup_monitor::coverage::coverage;
+    use backup_monitor::borg::BORG_PROGRAM;
+    use backup_monitor::check::{run_round, RoundContext};
     use backup_monitor::declarations::load_declarations;
-    use backup_monitor::model::{BorgSource, CoverageStatus, Declarations, FindingKind, Limits, Listing};
-    use backup_monitor::parse::{parse_borg, parse_restic};
-    use backup_monitor::report::{read_report, report_directory, write_report};
-    use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
-    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, skip_label, RestoreOutcome, RestoreResult};
+    use backup_monitor::model::{CoverageStatus, Finding, FindingKind, Limits};
+    use backup_monitor::report::report_directory;
+    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, skip_label, RestoreOutcome, RestoreResult, RestoreTarget};
+    use backup_monitor::secrets::open_secrets_dir;
     use backup_monitor::store::{
         record_restore_results_with_cap, run_error_category, test_key, RunErrorRecord, TestKey, MAX_RESTORE_ROWS, MIGRATIONS, MIGRATION_NAMESPACE,
     };
@@ -26,7 +25,6 @@ mod run {
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::io::{stdout, Stdout, Write};
-    use std::os::fd::OwnedFd;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use time::OffsetDateTime;
@@ -39,7 +37,10 @@ mod run {
     const ARGUMENT_PROGRAM: usize = 2;
 
 
-    const ARGUMENT_STATE: usize = 3;
+    const ARGUMENT_SECRETS: usize = 3;
+
+
+    const ARGUMENT_STATE: usize = 4;
 
 
     const DEADLINE_SECONDS: u64 = 120;
@@ -48,7 +49,7 @@ mod run {
     const STORE_DEADLINE_SECONDS: u64 = 30;
 
 
-    const ARGUMENT_STORE_FLAG: usize = 4;
+    const ARGUMENT_STORE_FLAG: usize = 5;
 
 
     const STORE_CAP_FLAG_OFFSET: usize = 2;
@@ -63,47 +64,10 @@ mod run {
     const GAP_COUNTERS: usize = 3;
 
 
-    const MAX_KEY_BYTES: u64 = 256;
-
-
     const RESTORE_MODE: &str = "restore-test";
 
 
-    const USAGE: &str = "usage: backup_run [restore-test] <declarations.yaml> <restic-binary> [absolute-state-dir]";
-
-
-    fn previous_listing(reports: Option<&OwnedFd>, name: &str, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
-        let cap = limits.max_bytes.saturating_add(1);
-        reports.map_or(Ok(None), |directory| {
-            let stored_key = read_report(directory, &format!("{name}.restic.id"), euid(), MAX_KEY_BYTES)?;
-            let stored = read_report(directory, &format!("{name}.restic.snapshots"), euid(), cap)?;
-            Ok(stored_key
-                .zip(stored)
-                .and_then(|(id, listing)| parse_restic(listing.as_slice(), String::from_utf8_lossy(&id).trim(), limits).ok()))
-        })
-    }
-
-
-    fn previous_borg(reports: Option<&OwnedFd>, name: &str, source: &BorgSource, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
-        let cap = limits.max_bytes.saturating_add(1);
-        reports.map_or(Ok(None), |directory| {
-            let stored = read_report(directory, &format!("{name}.borg.snapshots"), euid(), cap)?;
-            Ok(stored.and_then(|listing| parse_borg(listing.as_slice(), source.hostname_from_name, limits).ok()))
-        })
-    }
-
-
-    fn save_borg(reports: Option<&OwnedFd>, name: &str, raw: &[u8]) -> Result<(), Box<dyn Error>> {
-        reports.map_or(Ok(()), |directory| Ok(write_report(directory, &format!("{name}.borg.snapshots"), raw)?))
-    }
-
-
-    fn save(reports: Option<&OwnedFd>, name: &str, raw: &RawRun) -> Result<(), Box<dyn Error>> {
-        reports.map_or(Ok(()), |directory| {
-            write_report(directory, &format!("{name}.restic.id"), raw.key.as_bytes())?;
-            Ok(write_report(directory, &format!("{name}.restic.snapshots"), &raw.snapshots)?)
-        })
-    }
+    const USAGE: &str = "usage: backup_run [restore-test] <declarations.yaml> <restic-binary> <absolute-secrets-dir> [absolute-state-dir]";
 
 
     fn euid() -> u32 {
@@ -111,28 +75,21 @@ mod run {
     }
 
 
-    fn print_findings(
-        out: &mut Stdout,
-        name: &str,
-        previous: Option<&Listing>,
-        current: &Listing,
-        declarations: &Declarations,
-    ) -> std::io::Result<()> {
-        findings(name, previous, current, declarations)
-            .iter()
-            .try_for_each(|finding| match &finding.kind {
-                FindingKind::Deleted { id, time, host } => writeln!(out, "finding {name} deleted {id} time {time} host {host:?}"),
-                FindingKind::RetentionBelowFloor { count, floor } => {
-                    writeln!(out, "finding {name} retention below floor: {count} snapshots, floor {floor}")
-                }
-                FindingKind::RepositoryChanged { previous: old, current: new } => writeln!(out, "finding {name} repository changed {old} -> {new}"),
-            })
+    fn print_findings(out: &mut Stdout, name: &str, found: &[Finding]) -> std::io::Result<()> {
+        found.iter().try_for_each(|finding| match &finding.kind {
+            FindingKind::Deleted { id, time, host } => writeln!(out, "finding {name} deleted {id} time {time} host {host:?}"),
+            FindingKind::RetentionBelowFloor { count, floor } => {
+                writeln!(out, "finding {name} retention below floor: {count} snapshots, floor {floor}")
+            }
+            FindingKind::RepositoryChanged { previous: old, current: new } => writeln!(out, "finding {name} repository changed {old} -> {new}"),
+        })
     }
 
 
     fn restore_mode(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         let declarations_path = arguments.get(ARGUMENT_DECLARATIONS + 1).ok_or(USAGE)?;
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM + 1).ok_or(USAGE)?);
+        let secrets = open_secrets_dir(Path::new(arguments.get(ARGUMENT_SECRETS + 1).ok_or(USAGE)?), euid())?;
         let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
         let limits = Limits::default();
         let store_options = arguments.get(ARGUMENT_STORE_FLAG..);
@@ -158,7 +115,18 @@ mod run {
             .try_for_each(|index| writeln!(out, "{}", serde_json::json!({"refused_entry": index})))?;
         runs.runnable.iter().try_for_each(|(name, source, test)| -> Result<(), Box<dyn Error>> {
             let deadline = Duration::from_secs(DEADLINE_SECONDS);
-            match restore_test(&program, &declarations.tenant, source, test, &limits, deadline, OffsetDateTime::now_utc) {
+            match restore_test(
+                &program,
+                &secrets,
+                &RestoreTarget {
+                    tenant: &declarations.tenant,
+                    source,
+                    test,
+                },
+                &limits,
+                deadline,
+                OffsetDateTime::now_utc,
+            ) {
                 Ok(result) => {
                     stored.push((test_key(name, test), result.clone()));
                     let snapshot_time = result.snapshot_time.map(rfc3339_text);
@@ -270,84 +238,53 @@ mod run {
     fn execute_runs(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         let declarations_path = arguments.get(ARGUMENT_DECLARATIONS).ok_or(USAGE)?;
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM).ok_or(USAGE)?);
+        let secrets = open_secrets_dir(Path::new(arguments.get(ARGUMENT_SECRETS).ok_or(USAGE)?), euid())?;
         let base_state = arguments.get(ARGUMENT_STATE).map(Path::new);
         let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
         let reports_handle = base_state
             .map(|state| report_directory(state, &declarations.tenant, euid()))
             .transpose()?;
-        let state = reports_handle.as_ref();
         let limits = Limits::default();
+        let context = RoundContext {
+            restic_program: &program,
+            borg_program: Path::new(BORG_PROGRAM),
+            secrets: &secrets,
+            state: base_state,
+            reports: reports_handle.as_ref(),
+            limits: &limits,
+            deadline: Duration::from_secs(DEADLINE_SECONDS),
+            euid: euid(),
+            clock: OffsetDateTime::now_utc,
+        };
         let mut out = stdout();
         writeln!(out, "tenant {}", tenant_of(&declarations.tenant))?;
-        let runs = plan(&declarations);
-        runs.refused
+        let round = run_round(&context, &declarations);
+        round
+            .refused_restic
             .iter()
+            .chain(round.refused_borg.iter())
             .try_for_each(|index| writeln!(out, "refused repository entry {index}"))?;
-        let mut listings = Vec::new();
-        runs.runnable.iter().try_for_each(|(name, source)| -> Result<(), Box<dyn Error>> {
-            let outcome = run_raw(&program, source, &limits, Duration::from_secs(DEADLINE_SECONDS))
-                .and_then(|raw| parse_run(&raw, &limits).map(|listing| (raw, listing)));
-            match outcome {
-                Ok((raw, current)) => {
-                    writeln!(
-                        out,
-                        "repository {name} key {} snapshots {} skipped {:?}",
-                        current.repository,
-                        current.snapshots.len(),
-                        current.skipped
-                    )?;
-                    let previous = previous_listing(state, name, &limits)?;
-                    print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
-                    save(state, name, &raw)?;
-                    listings.push(current);
+        round.repositories.iter().try_for_each(|(name, result)| match result {
+            Ok(check) => {
+                writeln!(
+                    out,
+                    "repository {name} key {} snapshots {} skipped {:?}",
+                    check.listing.repository,
+                    check.listing.snapshots.len(),
+                    check.listing.skipped
+                )?;
+                if check.previous_unreadable {
+                    writeln!(out, "repository {name} previous_unreadable")?;
                 }
-                Err(error) => writeln!(out, "repository {name} failed: {error}")?,
+                print_findings(&mut out, name, &check.findings)
             }
-            Ok(())
+            Err(error) => writeln!(out, "repository {name} failed: {error}"),
         })?;
-        let borg = borg_plan(&declarations);
-        borg.refused
-            .iter()
-            .try_for_each(|index| writeln!(out, "refused repository entry {index}"))?;
-        borg.runnable.iter().try_for_each(|(name, source)| -> Result<(), Box<dyn Error>> {
-            let outcome = base_state.ok_or("borg needs a state directory".into()).and_then(|directory: &Path| {
-                borg_run(
-                    Path::new(BORG_PROGRAM),
-                    source,
-                    &declarations.tenant,
-                    name,
-                    directory,
-                    &limits,
-                    Duration::from_secs(DEADLINE_SECONDS),
-                )
-                .map_err(Box::<dyn Error>::from)
-                .and_then(|raw| Ok((parse_borg(raw.as_slice(), source.hostname_from_name, &limits)?, raw)))
-            });
-            match outcome {
-                Ok((current, raw)) => {
-                    writeln!(
-                        out,
-                        "repository {name} key {} snapshots {} skipped {:?}",
-                        current.repository,
-                        current.snapshots.len(),
-                        current.skipped
-                    )?;
-                    let previous = previous_borg(state, name, source, &limits)?;
-                    print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
-                    save_borg(state, name, &raw)?;
-                    listings.push(current);
-                }
-                Err(error) => writeln!(out, "repository {name} failed: {error}")?,
-            }
-            Ok(())
+        round.coverage.iter().try_for_each(|entry| match &entry.status {
+            CoverageStatus::Ok => writeln!(out, "coverage {} ok", entry.host),
+            CoverageStatus::Stale { age } => writeln!(out, "coverage {} stale age {age}", entry.host),
+            CoverageStatus::Missing => writeln!(out, "coverage {} missing", entry.host),
         })?;
-        coverage(&listings, &declarations, OffsetDateTime::now_utc())
-            .iter()
-            .try_for_each(|entry| match &entry.status {
-                CoverageStatus::Ok => writeln!(out, "coverage {} ok", entry.host),
-                CoverageStatus::Stale { age } => writeln!(out, "coverage {} stale age {age}", entry.host),
-                CoverageStatus::Missing => writeln!(out, "coverage {} missing", entry.host),
-            })?;
         Ok(())
     }
 }
