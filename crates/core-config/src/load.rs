@@ -2,6 +2,7 @@ use crate::error::ConfigError;
 use crate::merge::merge_documents;
 use crate::model::{ModuleConfig, PlatformConfig};
 use crate::parse::{parse_document, read_file};
+use core_audit::tenant::{is_reserved_tenant, is_valid_tenant_grammar};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
@@ -18,7 +19,34 @@ pub fn load_platform(path: &Path) -> Result<PlatformConfig, ConfigError> {
 
 
 pub fn load_module(path: &Path) -> Result<ModuleConfig, ConfigError> {
-    load_file(path)
+    check_module_tenant(load_file(path)?, &path.display().to_string())
+}
+
+
+pub const TENANT_RESERVED: &str = "reserved name";
+
+
+pub const TENANT_GRAMMAR: &str = "not a valid tenant name";
+
+
+/// The single point every module `tenant` goes through: a reserved or grammar-invalid name is refused.
+pub fn check_module_tenant(module: ModuleConfig, file: &str) -> Result<ModuleConfig, ConfigError> {
+    let refusal = module.tenant.as_deref().and_then(|tenant| {
+        if is_reserved_tenant(tenant) {
+            Some(TENANT_RESERVED)
+        } else if is_valid_tenant_grammar(tenant) {
+            None
+        } else {
+            Some(TENANT_GRAMMAR)
+        }
+    });
+    match refusal {
+        Some(reason) => Err(ConfigError::Tenant {
+            file: file.to_owned(),
+            reason,
+        }),
+        None => Ok(module),
+    }
 }
 
 
@@ -32,5 +60,5 @@ pub fn load_layered<Document: DeserializeOwned>(base: &Path, tenant: &Path) -> R
 
 
 pub fn load_module_for_tenant(base: &Path, tenant: &Path) -> Result<ModuleConfig, ConfigError> {
-    load_layered(base, tenant)
+    check_module_tenant(load_layered(base, tenant)?, &tenant.display().to_string())
 }

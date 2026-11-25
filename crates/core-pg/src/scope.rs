@@ -1,7 +1,6 @@
 use crate::error::PgError;
-
-
-pub const MAX_TENANT_BYTES: usize = 64;
+use core_audit::tenant::is_customer_tenant;
+pub use core_audit::tenant::MAX_TENANT_BYTES;
 
 
 /// The tenant every store query filters on; only `tenant_scope` builds one.
@@ -12,11 +11,7 @@ pub struct TenantScope {
 
 
 pub fn tenant_scope(tenant: &str) -> Result<TenantScope, PgError> {
-    let mut characters = tenant.chars();
-    let valid = tenant.len() <= MAX_TENANT_BYTES
-        && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
-        && characters.all(|next| next.is_ascii_alphanumeric() || matches!(next, '_' | '.' | '-'));
-    if valid {
+    if is_customer_tenant(tenant) {
         Ok(TenantScope { tenant: tenant.to_owned() })
     } else {
         Err(PgError::InvalidTenant)
