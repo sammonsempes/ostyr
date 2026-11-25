@@ -39,7 +39,15 @@ pub async fn lease(engine: &ReloadEngine<PgSettings>, permits: &Arc<Semaphore>) 
 
 /// Runs the lease and the store call as a task: a client that leaves drops this future, the task goes on and holds its permit until the statement ends.
 pub async fn detached<Reply: Send + 'static>(work: impl Future<Output = Result<Reply, StoreError>> + Send + 'static) -> Result<Reply, StoreError> {
-    let joined = tokio::spawn(work).await;
+    let joined = tokio::spawn(async move {
+        let outcome = work.await;
+        if let Err(error) = &outcome {
+            let category = error.to_string();
+            tracing::debug!(category, "alerts store call ended with an error");
+        }
+        outcome
+    })
+    .await;
     joined.unwrap_or_else(|failure| {
         let panicked = failure.is_panic();
         tracing::warn!(panicked, "alerts store task failed");

@@ -444,6 +444,92 @@ async fn a_dropped_request_keeps_its_permit_until_the_store_call_ends() -> Resul
 }
 
 
+pub fn held_alerts(release: &Arc<Notify>) -> Handler {
+    let held = Arc::clone(release);
+    Arc::new(move |sql| {
+        if sql.contains("FROM alerts") {
+            Reply::Held(Arc::clone(&held))
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+pub const MAX_WAITED_STATEMENTS: usize = 100;
+
+
+pub async fn wait_for_alerts_statement(statements: &mut UnboundedReceiver<String>) -> Result<(), Box<dyn Error>> {
+    let mut seen = false;
+    let mut waited = 0;
+    while !seen && waited < MAX_WAITED_STATEMENTS {
+        waited += 1;
+        let next = statements.recv().await.ok_or("fake closed")?;
+        seen = next.contains("FROM alerts");
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_dropped_list_keeps_its_permit_until_the_statement_ends() -> Result<(), Box<dyn Error>> {
+    let release = Arc::new(Notify::new());
+    let mut served = served(held_alerts(&release)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let list = Arc::clone(&backend.list);
+    let request = tokio::spawn(async move {
+        list(
+            tenant_scope("acme").map_err(|error| error.to_string())?,
+            Page {
+                after: None,
+                size: PAGE_SIZE,
+            },
+        )
+        .await
+        .map(|_page| ())
+        .map_err(|error| error.to_string())
+    });
+    wait_for_alerts_statement(&mut served.fake.statements).await?;
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    request.abort();
+    assert!(request.await.is_err());
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    release.notify_one();
+    let all = permits.acquire_many(u32::try_from(MAX_CONNECTIONS)?).await?;
+    assert_eq!(permits.available_permits(), 0);
+    drop(all);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_dropped_get_keeps_its_permit_until_the_statement_ends() -> Result<(), Box<dyn Error>> {
+    let release = Arc::new(Notify::new());
+    let mut served = served(held_alerts(&release)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let get = Arc::clone(&backend.get);
+    let id = alert_id("acme", "r1", &["e1".to_owned()]);
+    let request = tokio::spawn(async move {
+        get(tenant_scope("acme").map_err(|error| error.to_string())?, id)
+            .await
+            .map(|_found| ())
+            .map_err(|error| error.to_string())
+    });
+    wait_for_alerts_statement(&mut served.fake.statements).await?;
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    request.abort();
+    assert!(request.await.is_err());
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    release.notify_one();
+    let all = permits.acquire_many(u32::try_from(MAX_CONNECTIONS)?).await?;
+    assert_eq!(permits.available_permits(), 0);
+    drop(all);
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn a_panicking_store_task_is_the_fixed_failure() -> Result<(), Box<dyn Error>> {
     let panicked: Result<(), StoreError> = detached(async {
