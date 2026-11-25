@@ -56,6 +56,12 @@ fn write_leaf(dir: &Path, name: &str, issuer: &Issuer<'static, KeyPair>, params:
 }
 
 
+const RELOAD_POLLS: u32 = 200;
+
+
+const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+
 const SERVING_MARKER: &str = "serving";
 
 
@@ -267,28 +273,78 @@ fn a_missing_or_invalid_file_names_the_file() -> TestResult {
 }
 
 
+fn write_gateway_file(dir: &Path, name: &str, audit: &Path) -> Result<PathBuf, Failure> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!("settings_file: {}\naudit_file: {}\n", dir.join("gateway.yaml").display(), audit.display()),
+    )?;
+    Ok(path)
+}
+
+
+fn refused_without_serving(output: &Output, marker: &str) -> TestResult {
+    assert!(!String::from_utf8(output.stderr.clone())?.contains(SERVING_MARKER));
+    refused_with(output, marker)
+}
+
+
 #[test]
 fn an_unwritable_audit_path_or_a_busy_port_or_bad_log_directives_refuse_the_start() -> TestResult {
     let dir = tempdir()?;
     let site = write_site(dir.path(), 1)?;
-    let unwritable = dir.path().join("unwritable.yaml");
-    fs::write(
-        &unwritable,
-        format!(
-            "settings_file: {}\naudit_file: {}\n",
-            dir.path().join("gateway.yaml").display(),
-            dir.path().join("none").join("audit.log").display()
-        ),
-    )?;
-    let output = run_to_end(&[&site.server_file, &unwritable], None)?;
-    assert!(!output.status.success());
+    let unwritable = write_gateway_file(dir.path(), "unwritable.yaml", &dir.path().join("none").join("audit.log"))?;
+    refused_without_serving(&run_to_end(&[&site.server_file, &unwritable], None)?, "none/audit.log")?;
     let held = TcpListener::bind("127.0.0.1:0")?;
     let busy = dir.path().join("busy.yaml");
     let server_text = fs::read_to_string(&site.server_file)?.replace("127.0.0.1:0", &held.local_addr()?.to_string());
     fs::write(&busy, server_text)?;
-    let busy_output = run_to_end(&[&busy, &site.gateway_file], None)?;
-    assert!(!busy_output.status.success());
-    let log_output = run_to_end(&[&site.server_file, &site.gateway_file], Some("info=notalevel"))?;
-    assert!(!log_output.status.success());
-    Ok(())
+    refused_without_serving(&run_to_end(&[&busy, &site.gateway_file], None)?, "in use")?;
+    refused_with(
+        &run_to_end(&[&site.server_file, &site.gateway_file], Some("info=notalevel"))?,
+        "level filter",
+    )
+}
+
+
+#[test]
+fn an_unwritable_server_audit_or_a_bad_revocation_file_refuses_the_start_without_serving() -> TestResult {
+    let dir = tempdir()?;
+    let site = write_site(dir.path(), 1)?;
+    let server_text = fs::read_to_string(&site.server_file)?;
+    let revocation_line = server_text
+        .lines()
+        .find(|line| line.starts_with("revocation_file:"))
+        .ok_or("no revocation_file")?;
+    let audit_line = server_text.lines().find(|line| line.starts_with("audit_file:")).ok_or("no audit_file")?;
+    let bad_revocation = dir.path().join("bad-revocation.yaml");
+    fs::write(
+        &bad_revocation,
+        server_text.replace(revocation_line, "revocation_file: /nonexistent-dir/revoked.yaml"),
+    )?;
+    refused_without_serving(&run_to_end(&[&bad_revocation, &site.gateway_file], None)?, "revoked.yaml")?;
+    let bad_audit = dir.path().join("bad-audit.yaml");
+    fs::write(
+        &bad_audit,
+        server_text.replace(audit_line, "audit_file: /nonexistent-dir/server-audit.log"),
+    )?;
+    refused_without_serving(&run_to_end(&[&bad_audit, &site.gateway_file], None)?, "server-audit.log")
+}
+
+
+#[test]
+fn a_sighup_right_after_serving_reloads_and_keeps_the_gateway_up() -> TestResult {
+    let dir = tempdir()?;
+    let site = write_site(dir.path(), 1)?;
+    let running = start(&site)?;
+    fs::write(dir.path().join("gateway.yaml"), "nats_url: \"nats://127.0.0.1:2\"\n")?;
+    send(&running, "-HUP")?;
+    let audit = dir.path().join("gateway-audit.log");
+    (0..RELOAD_POLLS)
+        .find_map(|_| {
+            std::thread::sleep(RELOAD_POLL);
+            fs::read_to_string(&audit).ok().filter(|text| text.contains("config.reload"))
+        })
+        .ok_or("no reload audit line after SIGHUP")?;
+    stop_with(running, "-TERM")
 }

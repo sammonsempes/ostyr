@@ -28,5 +28,5 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             tracing::warn!(%error, "cannot wait for the stop signal");
         }
     });
-    Ok(run_server(file, listener, relay, shutdown, events).await?)
+    Ok(run_server(file, listener, relay, shutdown, events, None).await?)
 }

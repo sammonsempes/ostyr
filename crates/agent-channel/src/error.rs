@@ -270,6 +270,12 @@ pub enum AppError {
     Config(#[from] core_config::error::ConfigError),
     #[error(transparent)]
     Audit(#[from] AuditError),
+    #[error("audit file {}: {source}", .path.display())]
+    AuditFile {
+        path: PathBuf,
+        #[source]
+        source: AuditError,
+    },
     #[error(transparent)]
     Channel(#[from] ChannelError),
     #[error(transparent)]
