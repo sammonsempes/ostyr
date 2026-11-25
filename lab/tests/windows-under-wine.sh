@@ -35,6 +35,12 @@ readonly SKIPS=(
     "sys-windows|a_parent_keeping_its_inherited_creator_owner_grant_is_refused_by_name|C:\\ is user-owned and icacls is missing"
     "sys-windows|a_locked_parent_owned_by_the_process_user_is_refused_by_name|C:\\ is user-owned and icacls is missing"
     "sys-windows|an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory|C:\\ is user-owned and icacls is missing"
+    "sys-windows|the_shell_runs_inside_a_job_with_the_fixed_limits|Wine reports no job limits"
+    "sys-windows|grandchildren_are_gone_after_the_close|tasklist is missing under Wine"
+    "sys-windows|a_reader_blocked_in_a_read_ends_with_the_close|Wine's pseudo-console delivers no output"
+    "sys-windows|a_shell_computes_a_sum_and_the_result_is_read_back|Wine's pseudo-console delivers no output"
+    "sys-windows|the_shell_environment_is_exactly_the_fixed_list|Wine's pseudo-console delivers no output"
+    "sys-windows|sizes_and_inputs_outside_the_bounds_are_refused_by_name|Wine lacks ResizePseudoConsole (E_NOTIMPL)"
 )
 
 readonly CLIPPY_CRATES=(sys-windows agent-windows agent-channel)

@@ -1,4 +1,5 @@
 use crate::types::{CloseState, ConsoleError, ConsoleSize};
+use crate::walk::split_volume_path;
 
 
 pub const MAX_CONSOLE_COLUMNS: u16 = 500;
@@ -22,26 +23,45 @@ const PAIR: usize = 2;
 pub const MAX_SESSION_LABEL_BYTES: usize = 64;
 
 
+pub const OUTPUT_CHUNK_BYTES: usize = 16_384;
+
+
+pub const INPUT_CHUNK_BYTES: usize = 4_096;
+
+
+pub const PIPE_BUFFER_BYTES: u32 = 65_536;
+
+
+pub const DIRECTORY_UNITS: usize = 260;
+
+
 fn has_nul(text: &str) -> bool {
     text.contains('\0')
 }
 
 
+pub const MAX_DIRECTORY_CHARS: usize = 240;
+
+
+pub const MAX_ERROR_DIRECTORY_CHARS: usize = 64;
+
+
+pub const CUT_MARKER: &str = "...[cut]";
+
+
 fn bad_directory(directory: &str) -> ConsoleError {
-    ConsoleError::BadDirectory(directory.chars().take(MAX_SESSION_LABEL_BYTES).collect())
+    let cut = directory.chars().count() > MAX_ERROR_DIRECTORY_CHARS;
+    let shown = directory.chars().take(MAX_ERROR_DIRECTORY_CHARS).collect::<String>();
+    ConsoleError::BadDirectory(if cut { format!("{shown}{CUT_MARKER}") } else { shown })
 }
 
 
 fn drive_of(directory: &str) -> Result<String, ConsoleError> {
-    let mut characters = directory.chars();
-    let letter = characters.next().filter(char::is_ascii_alphabetic);
-    let colon = characters.next().filter(|character| *character == ':');
-    let separator = characters.next().filter(|character| *character == '\\');
-    let forbidden = directory.contains(['"', ';']) || has_nul(directory);
-    match (letter, colon, separator, forbidden) {
-        (Some(drive_letter), Some(drive_colon), Some(_), false) => Ok(format!("{drive_letter}{drive_colon}")),
-        _ => Err(bad_directory(directory)),
-    }
+    let forbidden = directory.contains(['"', ';', '/']) || directory.chars().count() > MAX_DIRECTORY_CHARS;
+    let split = split_volume_path(directory).ok().filter(|_| !forbidden);
+    split
+        .map(|volume| volume.root.trim_end_matches('\\').to_string())
+        .ok_or_else(|| bad_directory(directory))
 }
 
 
@@ -163,4 +183,42 @@ pub fn close_on_drop(state: &mut CloseState) -> bool {
     let pending = *state == CloseState::Open;
     *state = CloseState::Closed;
     pending
+}
+
+
+/// Refuses an input write larger than `INPUT_CHUNK_BYTES`.
+pub fn check_input_len(bytes: usize) -> Result<(), ConsoleError> {
+    if bytes > INPUT_CHUNK_BYTES {
+        Err(ConsoleError::InputTooLarge {
+            bytes,
+            max_bytes: INPUT_CHUNK_BYTES,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The text of a directory a `Get...DirectoryW` call wrote: its length must be non-zero and below the buffer size.
+pub fn directory_text(operation: &'static str, buffer: &[u16], length: u32) -> Result<String, ConsoleError> {
+    let count = usize::try_from(length).ok().filter(|wanted| *wanted > 0 && *wanted < buffer.len());
+    let units = count.and_then(|wanted| buffer.get(..wanted));
+    units
+        .and_then(|text| String::from_utf16(text).ok())
+        .ok_or(ConsoleError::DirectoryRead { operation })
+}
+
+
+/// UTF-16 text with the terminating NUL a Windows call expects.
+pub fn wide_null(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+
+/// The `COORD` values (columns, rows) of a checked size.
+pub fn coordinates(size: ConsoleSize) -> (i16, i16) {
+    (
+        i16::try_from(size.columns).unwrap_or(i16::MAX),
+        i16::try_from(size.rows).unwrap_or(i16::MAX),
+    )
 }

@@ -1,7 +1,8 @@
 use crate::types::TestResult;
 use sys_windows::console::{
-    begin_close, check_session_label, close_on_drop, command_line, console_size, environment_block, session_environment, MAX_CONSOLE_COLUMNS,
-    MAX_CONSOLE_ROWS, MAX_SESSION_LABEL_BYTES,
+    begin_close, check_input_len, check_session_label, close_on_drop, command_line, console_size, coordinates, directory_text, environment_block,
+    session_environment, wide_null, CUT_MARKER, DIRECTORY_UNITS, INPUT_CHUNK_BYTES, MAX_CONSOLE_COLUMNS, MAX_CONSOLE_ROWS, MAX_DIRECTORY_CHARS,
+    MAX_ERROR_DIRECTORY_CHARS, MAX_SESSION_LABEL_BYTES,
 };
 use sys_windows::types::{CloseState, ConsoleError, ConsoleSize};
 
@@ -13,6 +14,33 @@ const WINDOWS_DIRECTORY: &str = "C:\\Windows";
 
 
 const SAMPLE: u32 = 10;
+
+
+const WINDOWS_TEXT: &str = "C:\\Windows";
+
+
+const WINDOWS_TEXT_UNITS: u32 = 10;
+
+
+const LONE_SURROGATE: u16 = 0xD800;
+
+
+const LETTER_A: u16 = 97;
+
+
+const LETTER_B: u16 = 98;
+
+
+const WIDTH: u16 = 80;
+
+
+const HEIGHT: u16 = 24;
+
+
+const ACCESS_DENIED: u32 = 5;
+
+
+const SOME_MILLIS: u32 = 7;
 
 
 const LONG_FACTOR: usize = 4;
@@ -45,6 +73,12 @@ fn the_command_line_refuses_a_directory_that_is_not_a_clean_drive_path() -> Test
         "C:\\a\0b",
         "C:\\a;b",
         "\\\\server\\share",
+        "C:\\a\\..\\b",
+        "C:\\a/b",
+        "C:\\a\\\\b",
+        "C:\\a:b",
+        "C:\\a<b",
+        "C:\\a.",
     ] {
         assert!(matches!(command_line(bad), Err(ConsoleError::BadDirectory(_))), "{bad}");
     }
@@ -214,9 +248,24 @@ fn the_session_environment_refuses_a_bad_system_directory() -> TestResult {
 
 #[test]
 fn a_long_bad_directory_is_cut_in_the_error() -> TestResult {
-    let long = "x".repeat(MAX_SESSION_LABEL_BYTES * LONG_FACTOR);
+    let long = "x".repeat(MAX_ERROR_DIRECTORY_CHARS * LONG_FACTOR);
     let error = command_line(&long).err().ok_or("accepted")?;
-    assert!(error.to_string().len() < long.len());
+    let expected = format!("{}{}", "x".repeat(MAX_ERROR_DIRECTORY_CHARS), CUT_MARKER);
+    assert!(matches!(error, ConsoleError::BadDirectory(ref shown) if *shown == expected));
+    let exact = "y".repeat(MAX_ERROR_DIRECTORY_CHARS);
+    let uncut = command_line(&exact).err().ok_or("accepted")?;
+    assert!(matches!(uncut, ConsoleError::BadDirectory(ref shown) if *shown == exact));
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_over_the_length_bound_is_refused_and_the_bound_is_accepted() -> TestResult {
+    let filler = MAX_DIRECTORY_CHARS - "C:\\".len();
+    let at_bound = format!("C:\\{}", "d".repeat(filler));
+    command_line(&at_bound)?;
+    let over = format!("{at_bound}d");
+    assert!(matches!(command_line(&over), Err(ConsoleError::BadDirectory(_))));
     Ok(())
 }
 
@@ -275,5 +324,79 @@ fn drop_closes_an_open_console_once() -> TestResult {
     assert!(close_on_drop(&mut state));
     assert!(!close_on_drop(&mut state));
     assert_eq!(state, CloseState::Closed);
+    Ok(())
+}
+
+
+#[test]
+fn an_input_write_over_the_chunk_is_refused_by_name() -> TestResult {
+    check_input_len(0)?;
+    check_input_len(INPUT_CHUNK_BYTES)?;
+    assert!(matches!(
+        check_input_len(INPUT_CHUNK_BYTES + 1),
+        Err(ConsoleError::InputTooLarge { bytes, max_bytes }) if bytes == INPUT_CHUNK_BYTES + 1 && max_bytes == INPUT_CHUNK_BYTES
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_text_needs_a_length_inside_the_buffer() -> TestResult {
+    let mut buffer = vec![0; DIRECTORY_UNITS];
+    for (slot, unit) in buffer.iter_mut().zip(WINDOWS_TEXT.encode_utf16()) {
+        *slot = unit;
+    }
+    assert_eq!(directory_text("op", &buffer, WINDOWS_TEXT_UNITS)?, WINDOWS_TEXT);
+    let last = u32::try_from(DIRECTORY_UNITS - 1)?;
+    assert_eq!(directory_text("op", &buffer, last)?.len(), DIRECTORY_UNITS - 1);
+    for bad in [0, u32::try_from(DIRECTORY_UNITS)?, u32::MAX] {
+        assert!(
+            matches!(directory_text("op", &buffer, bad), Err(ConsoleError::DirectoryRead { operation: "op" })),
+            "{bad}"
+        );
+    }
+    let lone_surrogate = [LONE_SURROGATE, 0, 0];
+    assert!(matches!(
+        directory_text("op", &lone_surrogate, 1),
+        Err(ConsoleError::DirectoryRead { .. })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn wide_text_ends_with_one_nul_and_coordinates_follow_the_size() -> TestResult {
+    assert_eq!(wide_null("ab"), vec![LETTER_A, LETTER_B, 0]);
+    assert_eq!(wide_null(""), vec![0]);
+    assert_eq!(
+        coordinates(ConsoleSize {
+            columns: WIDTH,
+            rows: HEIGHT
+        }),
+        (WIDTH.cast_signed(), HEIGHT.cast_signed())
+    );
+    assert_eq!(coordinates(ConsoleSize { columns: u16::MAX, rows: 1 }), (i16::MAX, 1));
+    Ok(())
+}
+
+
+#[test]
+fn the_new_errors_describe_themselves() -> TestResult {
+    let texts = [
+        ConsoleError::Windows {
+            operation: "Op",
+            code: ACCESS_DENIED,
+        }
+        .to_string(),
+        ConsoleError::Io {
+            operation: "Op",
+            kind: std::io::ErrorKind::BrokenPipe,
+        }
+        .to_string(),
+        ConsoleError::CloseTimeout { millis: SOME_MILLIS }.to_string(),
+        ConsoleError::DrainFailed.to_string(),
+    ];
+    assert!(texts.iter().all(|text| !text.is_empty()));
+    assert!(texts.iter().any(|text| text.contains("0x00000005")));
     Ok(())
 }
