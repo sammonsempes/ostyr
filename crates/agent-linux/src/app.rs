@@ -1,9 +1,8 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
 use crate::error::SourceError;
-#[cfg(target_os = "linux")]
 use crate::exec_events::{system_offset, ExecSink};
-use crate::exec_probe::{end_on_spool_error, run_exec_controller, spawn_thread, ProbeEnv, PRODUCTION_PROBE};
+use crate::exec_probe::{end_on_spool_error, run_exec_controller, spawn_thread, stop_exec_controller, Controller, ProbeEnv, PRODUCTION_PROBE};
 use crate::hostmetrics::statvfs_path;
 use crate::metrics::run_metrics;
 use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
@@ -11,7 +10,7 @@ use crate::run::run_source;
 use crate::sensor::{monotonic_seconds, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
 use crate::shell::{shell_dial, store_path, switch_fn, switch_path};
-use crate::types::{RunFn, SpoolLock};
+use crate::types::{ProbeFn, RunFn, SpoolLock};
 use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
@@ -28,9 +27,11 @@ use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
 use patch_inventory::limits::default_limits;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::signal::unix::{signal, SignalKind};
 
 
 /// Pause between two agent runs; a run ends when its streams end, the next one claims the events spooled meanwhile.
@@ -63,8 +64,25 @@ pub fn source_paths(file: &LinuxFile, agent: &AgentFile) -> Paths {
 }
 
 
-/// The Linux agent: the Tetragon source and the agent channel side by side. Only `settings` of the file is live-reloaded (file watch and `SIGHUP`).
+/// The Linux agent with the production probe, ended cleanly by SIGTERM (the systemd stop): the handler is installed before anything starts.
 pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn) -> Result<Totals, SourceError> {
+    let mut terminated = signal(SignalKind::terminate())?;
+    run_linux_with(path, max_polls, pause, run, PRODUCTION_PROBE, async move {
+        terminated.recv().await;
+    })
+    .await
+}
+
+
+/// The Linux agent: the Tetragon source and the agent channel side by side. Only `settings` of the file is live-reloaded (file watch and `SIGHUP`). Every end (streams done, a producer's error, `terminate`) goes through `stop_exec_controller`, so the probe is stopped and joined and its unload audited before this returns; `terminate` is a clean end.
+pub async fn run_linux_with(
+    path: &Path,
+    max_polls: u64,
+    pause: &PauseFn,
+    run: RunFn,
+    probe: ProbeFn,
+    terminate: impl Future<Output = ()>,
+) -> Result<Totals, SourceError> {
     let file = load_file::<LinuxFile>(path)?;
     let agent = load_agent_file(&file.agent_file)?;
     let dirs = open_spool_dirs(&agent)?;
@@ -164,10 +182,9 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             .await
             .map(|_| ())
     };
-    #[cfg(target_os = "linux")]
     let exec_env = ProbeEnv {
         tenant: agent.tenant.clone(),
-        probe: PRODUCTION_PROBE,
+        probe,
         spawn: spawn_thread,
         sink: ExecSink {
             spool: paths.spool.clone(),
@@ -178,14 +195,34 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             monotonic: monotonic_seconds,
         },
     };
-    #[cfg(target_os = "linux")]
     let exec_audit = shared_log_audit(&log);
+    let mut controller = Controller::default();
     let exec_probe = async {
-        #[cfg(target_os = "linux")]
-        let ended = run_exec_controller(&exec_probe_settings, &exec_env, exec_audit.as_ref(), max_polls, pause, &monotonic_seconds).await;
+        let ended = run_exec_controller(
+            &mut controller,
+            &exec_probe_settings,
+            &exec_env,
+            exec_audit.as_ref(),
+            max_polls,
+            pause,
+            &monotonic_seconds,
+        )
+        .await;
         end_on_spool_error(ended)?;
         Ok::<(), SourceError>(())
     };
-    let (totals, runs, (), (), (), _handled, ()) = tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe)?;
-    Ok(Totals { agent_runs: runs, ..totals })
+    let outcome = tokio::select! {
+        joined = async { tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe) } => Some(joined),
+        () = terminate => None,
+    };
+    let stopped = stop_exec_controller(controller, &exec_env, exec_audit.as_ref(), pause).await;
+    let stop_result = end_on_spool_error(stopped);
+    let finished = match outcome {
+        Some(joined) => joined.map(|(totals, runs, (), (), (), _handled, ())| Totals { agent_runs: runs, ..totals }),
+        None => {
+            tracing::info!("terminated, the agent stops");
+            Ok(Totals::default())
+        }
+    };
+    finished.and_then(|totals| stop_result.map(|()| totals))
 }

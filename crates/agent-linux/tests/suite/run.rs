@@ -1,9 +1,10 @@
 use crate::support::{append, lines, scoped_logging, setup, EXEC, LEN_TWO, LINE_LIMIT, RELOADED_MILLIS, THREE, TWO};
 use crate::types::TestResult;
 use agent_channel::types::{PauseFn, PauseFuture};
-use agent_linux::app::{run_linux, source_paths};
+use agent_linux::app::{run_linux, run_linux_with, source_paths};
 use agent_linux::cursor::write_cursor;
 use agent_linux::error::{SensorError, SourceError};
+use agent_linux::exec_probe::EXEC_PROBE_JOIN_POLL_MILLIS;
 use agent_linux::model::{Cursor, LinuxFile, Report, SourceSettings, Totals, DEFAULT_POLL_MILLIS};
 use agent_linux::run::{run_source, tally};
 use agent_linux::types::RunFuture;
@@ -12,6 +13,7 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tempfile::tempdir;
@@ -283,5 +285,101 @@ async fn a_group_writable_spool_directory_ends_the_start_before_any_spool_file_e
     ));
     assert_eq!(fs::read_dir(&spool_dir)?.count(), 0);
     assert!(!dir.path().join("linux-audit").exists());
+    Ok(())
+}
+
+
+const STOP_SPINS: u32 = 60_000;
+
+
+const JOIN_SLEEP_MILLIS: u64 = 10;
+
+
+const WAIT_ATTEMPTS: u32 = 100_000;
+
+
+fn probe_until_stopped(
+    stop: &AtomicBool,
+    _max_polls: u32,
+    attached: &mut dyn FnMut(),
+    _deliver: &mut dyn FnMut(ebpf_probes::drain::Drained),
+) -> agent_linux::types::ProbeResult {
+    attached();
+    (0..STOP_SPINS)
+        .take_while(|_| !stop.load(Ordering::Relaxed))
+        .for_each(|_| std::thread::sleep(Duration::from_millis(1)));
+    Ok(0)
+}
+
+
+fn joining_pause(delay: Duration) -> PauseFuture {
+    if delay == Duration::from_millis(EXEC_PROBE_JOIN_POLL_MILLIS) {
+        std::thread::sleep(Duration::from_millis(JOIN_SLEEP_MILLIS));
+        Box::pin(async {})
+    } else {
+        Box::pin(tokio::task::yield_now())
+    }
+}
+
+
+fn enable_exec_probe(config: &std::path::Path) -> TestResult {
+    let text = fs::read_to_string(config)?;
+    fs::write(config, format!("{text}exec_probe:\n  enabled: true\n"))?;
+    Ok(())
+}
+
+
+async fn wait_for_text(path: PathBuf, needle: &str) -> bool {
+    let mut found = false;
+    let mut attempts = 0;
+    while !found && attempts < WAIT_ATTEMPTS {
+        found = fs::read_to_string(&path).is_ok_and(|text| text.contains(needle));
+        tokio::task::yield_now().await;
+        attempts += 1;
+    }
+    found
+}
+
+
+#[tokio::test]
+async fn a_producer_failing_after_the_probe_started_still_unloads_it_before_the_agent_ends() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    enable_exec_probe(&config)?;
+    fs::write(dir.path().join("cursor"), "garbage")?;
+    let ended = run_linux_with(
+        &config,
+        u64::MAX,
+        &joining_pause,
+        no_systemctl,
+        probe_until_stopped,
+        std::future::pending(),
+    )
+    .await;
+    assert!(matches!(ended, Err(SourceError::Cursor(_))));
+    let audit = fs::read_to_string(dir.path().join("linux-audit"))?;
+    assert_eq!(audit.matches("exec_probe.unload").count(), 1, "{audit}");
+    assert!(audit.contains("unloaded") && !audit.contains("unload_unknown"), "{audit}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_terminate_request_joins_the_probe_and_ends_the_agent_cleanly() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    enable_exec_probe(&config)?;
+    let audit_path = dir.path().join("linux-audit");
+    let terminate = async {
+        wait_for_text(audit_path.clone(), "exec_probe.load").await;
+    };
+    let ended = run_linux_with(&config, u64::MAX, &joining_pause, no_systemctl, probe_until_stopped, terminate).await?;
+    assert_eq!(ended.agent_runs, 0);
+    let audit = fs::read_to_string(&audit_path)?;
+    assert_eq!(audit.matches("exec_probe.load").count(), 1, "{audit}");
+    assert_eq!(audit.matches("exec_probe.unload").count(), 1, "{audit}");
+    assert!(audit.contains("unloaded"), "{audit}");
     Ok(())
 }
