@@ -30,6 +30,7 @@ readonly CH_NO_PAGE="ClickHouse answers only POST / and GET /ping, no web page"
 readonly CH_REFUSES="init.sh refuses a users file that differs from the rendered one"
 readonly GATEWAY_SAN="the gateway certificate names DNS:gateway only"
 readonly INIT_SERVICES="init.sh lists exactly the services of compose.yaml"
+readonly INIT_BEHAVES="init.sh warns by name about an unbounded nats.conf and a gateway certificate with more names, and changes no file"
 readonly INIT_WARNS="init.sh warns by name about a nats.conf without max_file_store and a gateway certificate with more names"
 readonly PINNED="every image is pinned by digest or built locally"
 readonly HARDENED="every service is read-only, drops capabilities and sets no-new-privileges"
@@ -133,13 +134,13 @@ stray_parsed_run() {
 }
 
 file_static_run() {
-    local name="$1" variable="$2" source="$3" expression="$4" expected="$5" output
+    local name="$1" variable="$2" source="$3" expression="$4" expected="$5" extra_keys="${6:-}" output
     sed "$expression" "$source" >"$scratch/$name.file"
     if cmp -s "$source" "$scratch/$name.file"; then
         printf 'FAIL file %s: the mutation changed nothing\n' "$name"
         failures=$((failures + 1))
     else
-        output="$(env "$variable=$scratch/$name.file" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+        output="$(env "$variable=$scratch/$name.file" "STATIC_TEST_EXTRA_KEYS=$extra_keys" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
         report "static $name" "$output" "$expected"
     fi
 }
@@ -154,6 +155,9 @@ file_static_runs() {
     file_static_run gateway_san_widened STATIC_TEST_INIT_FILE "$init" 's|DNS:gateway "$scratch"|DNS:gateway,DNS:platform "$scratch"|' "$GATEWAY_SAN"
     file_static_run service_name_dropped STATIC_TEST_INIT_FILE "$init" '/^readonly SERVICE_NAMES=/s| chschema)|)|' "$INIT_SERVICES"
     file_static_run compose_service_added STATIC_TEST_COMPOSE_FILE "$compose" 's|^  chschema:$|  state:\n    image: x\n&|' "$INIT_SERVICES"
+    file_static_run compose_digit_service_added STATIC_TEST_COMPOSE_FILE "$compose" 's|^  chschema:$|  redis2:\n    image: x\n&|' "$INIT_SERVICES" redis2
+    file_static_run gateway_condition_disabled STATIC_TEST_INIT_FILE "$init" 's|if \[\[ "$actual" != "$expected" \]\]; then|if false; then|' "$INIT_BEHAVES"
+    file_static_run nats_condition_disabled STATIC_TEST_INIT_FILE "$init" 's|if ! grep -qE .*max_file_store.*; then|if false; then|' "$INIT_BEHAVES"
     file_static_run nats_warning_removed STATIC_TEST_INIT_FILE "$init" 's|has no max_file_store, so JetStream|has no bound, so JetStream|' "$INIT_WARNS"
     file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
 }

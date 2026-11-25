@@ -12,7 +12,7 @@ readonly CH_INIT_FILE="${STATIC_TEST_INIT_FILE:-$COMPOSE_DIR/init.sh}"
 readonly CH_CONFIG_FILE="${STATIC_TEST_CH_CONFIG_FILE:-$COMPOSE_DIR/config/clickhouse-config.xml}"
 readonly CH_SCHEMA_FILE="${STATIC_TEST_CH_SCHEMA_FILE:-$COMPOSE_DIR/config/clickhouse-schema.sql}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE ${STATIC_TEST_EXTRA_KEYS:-}"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
 readonly BLOCK_KEYS="ports volumes services networks"
 failures=0
@@ -426,7 +426,7 @@ definitions_are_pinned() {
 }
 
 compose_service_names() {
-    sed -n '/^services:$/,/^[a-z]/{s/^  \([a-z]*\):$/\1/p}' "$COMPOSE_FILE" | sort | tr '\n' ' '
+    sed -n '/^services:$/,/^[a-z]/{s/^  \([A-Za-z_][A-Za-z0-9_]*\):$/\1/p}' "$COMPOSE_FILE" | sort | tr '\n' ' '
 }
 
 init_service_names() {
@@ -435,6 +435,63 @@ init_service_names() {
 
 init_lists_compose_services() {
     [[ -n "$(compose_service_names)" && "$(compose_service_names)" == "$(init_service_names)" ]]
+}
+
+san_extension_der() {
+    local body="" name hex
+    for name in "$@"; do
+        hex="$(printf '%s' "$name" | od -An -tx1 | tr -d ' \n')"
+        body+="$(printf '82%02x%s' $((${#hex} / 2)) "$hex")"
+    done
+    printf '30%02x%s' $((${#body} / 2)) "$body"
+}
+
+make_san_certificate() {
+    local output="$1" extension="$2"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /dev/null -out "$output" -subj /CN=gateway -addext "subjectAltName=$extension" 2>/dev/null
+}
+
+run_init_function() {
+    local functions="$1" secrets="$2" before
+    shift 2
+    before="$(sha256sum "$secrets"/*)"
+    (
+        SECRETS_DIR="$secrets"
+        TLS_FILES=(a b)
+        export SECRETS_DIR TLS_FILES
+        # shellcheck source=/dev/null
+        source "$functions"
+        "$@"
+    ) 2>&1
+    [[ "$(sha256sum "$secrets"/*)" == "$before" ]] || printf 'CHANGED a file of %s\n' "$secrets"
+}
+
+init_warnings_behave() {
+    local work secrets name outcome=0
+    mkdir -p "$COMPOSE_DIR/../../target"
+    work="$(mktemp -d "$COMPOSE_DIR/../../target/init-warnings.XXXXXX")"
+    secrets="$work/secrets"
+    mkdir "$secrets"
+    for name in warn_without_file_store warn_gateway_san; do
+        sed -n "/^${name}() {/,/^}/p" "$CH_INIT_FILE" >>"$work/functions.sh"
+    done
+    printf 'jetstream {\n    max_file_store: 2G\n}\n' >"$secrets/nats_bounded.conf"
+    printf 'jetstream {\n    store_dir: /data\n}\n' >"$secrets/nats_unbounded.conf"
+    make_san_certificate "$work/good.crt" DNS:gateway
+    make_san_certificate "$work/extra.crt" DNS:gateway,DNS:platform
+    make_san_certificate "$work/newline.crt" "DER:$(san_extension_der $'gateway\nSubject Alternative Name' platform)"
+    [[ -z "$(run_init_function "$work/functions.sh" "$secrets" warn_without_file_store nats_bounded.conf)" ]] || outcome=1
+    run_init_function "$work/functions.sh" "$secrets" warn_without_file_store nats_unbounded.conf | grep -q 'nats_unbounded.conf has no max_file_store' || outcome=1
+    run_init_function "$work/functions.sh" "$secrets" warn_without_file_store nats_unbounded.conf | grep -q CHANGED && outcome=1
+    cp "$work/good.crt" "$secrets/gateway_tls.crt"
+    [[ -z "$(run_init_function "$work/functions.sh" "$secrets" warn_gateway_san)" ]] || outcome=1
+    for name in extra newline; do
+        cp "$work/$name.crt" "$secrets/gateway_tls.crt"
+        run_init_function "$work/functions.sh" "$secrets" warn_gateway_san | grep -q 'gateway_tls.crt names more than DNS:gateway' || outcome=1
+        run_init_function "$work/functions.sh" "$secrets" warn_gateway_san | grep -q CHANGED && outcome=1
+    done
+    rm -rf "$work"
+    [[ "$outcome" -eq 0 ]]
 }
 
 init_warns_on_old_files() {
@@ -549,6 +606,7 @@ expect "the gateway certificate names DNS:gateway only" grep -qF 'make_leaf gate
 expect "init.sh refuses every compose service name as the public host name" \
     grep -qF 'readonly SERVICE_NAMES=(postgres platform web playbooks nats gateway relay clickhouse chschema)' "$CH_INIT_FILE"
 expect "init.sh lists exactly the services of compose.yaml" init_lists_compose_services
+expect "init.sh warns by name about an unbounded nats.conf and a gateway certificate with more names, and changes no file" init_warnings_behave
 expect "init.sh warns by name about a nats.conf without max_file_store and a gateway certificate with more names" init_warns_on_old_files
 expect "the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets" clickhouse_is_hardened
 expect "the chschema service is hardened, runs as 65530 and holds only the CA and its password" chschema_is_hardened
