@@ -244,10 +244,10 @@ pub fn module_router(
     page: Option<&Arc<PageServices>>,
 ) -> Result<Router<SharedState>, PlatformError> {
     match module {
-        Module::Alerts => Ok(alerts::api::alerts_router(alerts::backend::pg_backend(
-            Arc::clone(engine),
-            Arc::clone(permits),
-        ))),
+        Module::Alerts => {
+            let backend = alerts::backend::pg_backend(Arc::clone(engine), Arc::clone(permits));
+            Ok(alerts::api::alerts_router(backend.clone()).merge(alert_grouping::route::alert_groups_router(backend)))
+        }
         Module::Cases => Ok(cases::api::cases_router(cases::backend::pg_backend(
             Arc::clone(engine),
             Arc::clone(permits),
@@ -310,7 +310,10 @@ pub fn module_router(
 
 pub fn module_access(module: Module) -> AccessTable {
     match module {
-        Module::Alerts => alerts::api::alerts_access(),
+        Module::Alerts => alerts::api::alerts_access()
+            .into_iter()
+            .chain(alert_grouping::route::alert_groups_access())
+            .collect(),
         Module::Cases => cases::api::cases_access(),
         Module::Cmdb => cmdb::api::cmdb_access(),
         Module::Risk => risk_access(),
@@ -331,7 +334,11 @@ pub fn module_access(module: Module) -> AccessTable {
 
 pub fn module_document(module: Module) -> OpenApiDocument {
     match module {
-        Module::Alerts => alerts::api::alerts_document(),
+        Module::Alerts => {
+            let mut document = alerts::api::alerts_document();
+            document.merge(alert_grouping::route::alert_groups_document());
+            document
+        }
         Module::Cases => cases::api::cases_document(),
         Module::Cmdb => cmdb::api::cmdb_document(),
         Module::Risk => risk_document(),
