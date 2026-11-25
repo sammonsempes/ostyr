@@ -9,8 +9,8 @@ use status_page::error::{StatusPageError, StoreError};
 use status_page::limiter::new_state;
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
 use status_page::publish::{
-    declared_services, error_class, fetch, first_publish, fit_page, is_clean, omission_changed, omission_reason, publisher, read_within,
-    refuse_unsafe_text, render_class, run_rounds, settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
+    declared_services, error_class, fetch, first_publish, fit_page, is_clean, omission_changed, omission_reason, publish_page, publisher,
+    read_within, refuse_unsafe_text, render_class, run_rounds, settings_cut, tick, MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
 };
 use status_page::settings::{shared_settings, validate_settings};
 use status_page::store_model::PublishedRead;
@@ -759,9 +759,6 @@ const READ_ONGOING: usize = 5;
 const REFUSED_INCIDENTS: usize = 3;
 
 
-const REFUSED_ONGOING: usize = 2;
-
-
 const REFUSED_UPDATES: usize = 2;
 
 
@@ -801,10 +798,8 @@ fn stored_text_with_a_control_bidi_or_blank_character_is_left_out_and_counted() 
     };
     let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(&read);
     assert_eq!((incidents_refused, updates_refused), (REFUSED_INCIDENTS, REFUSED_UPDATES));
-    assert_eq!(
-        (safe.total, safe.ongoing),
-        (READ_TOTAL - REFUSED_INCIDENTS, READ_ONGOING - REFUSED_ONGOING)
-    );
+    assert_eq!((safe.total, safe.ongoing), (READ_TOTAL, READ_ONGOING));
+    assert_eq!(safe.incidents.iter().map(|row| row.omitted_updates).sum::<usize>(), REFUSED_UPDATES);
     let titles: Vec<&str> = safe.incidents.iter().map(|row| row.public_title.as_str()).collect();
     assert_eq!(titles, ["Good title"]);
     let messages: Vec<&str> = safe
@@ -820,6 +815,7 @@ fn stored_text_with_a_control_bidi_or_blank_character_is_left_out_and_counted() 
     };
     let (floored, _incidents, _updates) = refuse_unsafe_text(&floor);
     assert_eq!((floored.total, floored.ongoing), (0, 0));
+    assert!(floored.incidents.is_empty());
     assert!(is_clean("plain", false) && !is_clean("a\nb", false) && is_clean("a\nb", true));
     Ok(())
 }
@@ -845,7 +841,78 @@ async fn the_published_page_never_holds_refused_stored_text() -> TestResult {
         !all.contains('\u{1b}') && !all.contains("\\u001b") && !all.contains('\u{202e}') && !all.contains("\\u202e") && !all.contains('\u{3164}')
     );
     assert!(!all.contains("Payments") && !all.contains("Filler") && !all.contains("Bad "));
-    assert!(!page.json.contains("omitted_incidents"));
+    assert!(page.json.contains("\"omitted_incidents\":3") && page.json.contains("\"omitted_ongoing\":3"));
+    assert!(page.html.contains("3 incidents not shown, 3 of them ongoing.") && page.json.contains("\"omitted_updates\":1"));
+    Ok(())
+}
+
+
+const MARK_RUN: usize = 12;
+
+
+const WRITE_REFUSED_INCIDENTS: usize = 5;
+
+
+const WRITE_REFUSED_UPDATES: usize = 3;
+
+
+#[test]
+fn stored_text_the_write_path_refuses_is_left_out_too() -> TestResult {
+    let marks = format!("x{}", "\u{0301}".repeat(MARK_RUN));
+    let only_marks = "\u{0301}".repeat(MARK_RUN);
+    let mut kept = incident(TENANT, "Good title");
+    kept.updates = vec![update_with("\u{3000}"), update_with(&marks), update_with("   "), update_with("fine")];
+    let read = PublishedRead {
+        incidents: vec![
+            incident(TENANT, "\u{3000}\u{3000}"),
+            incident(TENANT, &marks),
+            incident(TENANT, &only_marks),
+            incident(TENANT, "   "),
+            incident(TENANT, ""),
+            kept,
+        ],
+        total: READ_TOTAL,
+        ongoing: READ_ONGOING,
+    };
+    let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(&read);
+    assert_eq!((incidents_refused, updates_refused), (WRITE_REFUSED_INCIDENTS, WRITE_REFUSED_UPDATES));
+    let titles: Vec<&str> = safe.incidents.iter().map(|row| row.public_title.as_str()).collect();
+    assert_eq!(titles, ["Good title"]);
+    assert!(is_clean("Cafe\u{0301}", false) && !is_clean(&marks, false) && !is_clean("\u{3000}", true) && !is_clean("", true));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_foreign_tenant_row_fails_the_render_even_when_its_text_is_refused() -> TestResult {
+    let _listener = listen();
+    let (state, _clock) = state_with(PageSettings::default());
+    let read = PublishedRead {
+        incidents: vec![incident("globex", CONTROL_TITLE)],
+        total: 1,
+        ongoing: 1,
+    };
+    let refused = publish_page(&config(), &state, &read);
+    assert!(matches!(refused, Err(StatusPageError::TenantMismatch)));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_page_is_marked_unread_until_a_read_succeeds() -> TestResult {
+    let _listener = listen();
+    let (state, _clock) = state_with(PageSettings::default());
+    let shared = shared_with(vec![incident(TENANT, "Website down")]);
+    change(&shared, |fake| fake.fail = true)?;
+    let read = reader(&shared);
+    let scope = tenant_scope(TENANT)?;
+    first_publish(&config(), &state, &read, &scope).await?;
+    let unread = served(&state)?;
+    assert!(unread.json.contains("\"unread\":true") && unread.html.contains("have not been read yet"));
+    change(&shared, |fake| fake.fail = false)?;
+    tick(&config(), &state, &read, &scope).await;
+    let read_page = served(&state)?;
+    assert!(!read_page.json.contains("unread") && !read_page.html.contains("not been read") && read_page.json.contains("Website down"));
     Ok(())
 }
 
@@ -905,14 +972,14 @@ fn the_omission_reason_names_the_size_fit_or_the_read_limit() -> TestResult {
         total: HIDDEN_RESOLVED,
         ongoing: 1,
     };
-    let (_first, omitted) = fit_page(&config(), &read_limit)?;
+    let (_first, omitted) = fit_page(&config(), &read_limit, false)?;
     assert_eq!((omitted.all, omitted.reason), (HIDDEN_RESOLVED - 1, "read_limit"));
     let sized = PublishedRead {
         incidents: resolved_set(),
         total: resolved_set().len(),
         ongoing: 0,
     };
-    let (_second, cut) = fit_page(&config(), &sized)?;
+    let (_second, cut) = fit_page(&config(), &sized, false)?;
     assert!(cut.all > 0 && cut.reason == "size");
     assert_eq!(declared_services(&config()), vec![SERVICE.to_owned()]);
     Ok(())

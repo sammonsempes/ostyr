@@ -172,6 +172,7 @@ pub fn render_omitting(
         incidents: public_incidents,
         omitted_incidents: omitted.all,
         omitted_ongoing: omitted.ongoing,
+        unread: omitted.unread,
     };
     let json = serde_json::to_string(&page)?;
     check_output("json", &json, limits.max_json_bytes)?;

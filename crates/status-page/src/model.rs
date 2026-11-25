@@ -188,6 +188,8 @@ pub struct PublicPage {
     pub omitted_incidents: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted_ongoing: usize,
+    #[serde(skip_serializing_if = "is_false")]
+    pub unread: bool,
 }
 
 
@@ -197,6 +199,12 @@ pub struct Omitted {
     pub all: usize,
     pub ongoing: usize,
     pub reason: &'static str,
+    pub unread: bool,
+}
+
+
+pub fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 

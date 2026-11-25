@@ -2,7 +2,7 @@ use crate::config::load_config;
 use crate::error::StatusPageError;
 use crate::limiter::{new_state, system_millis};
 use crate::model::{ComponentState, IncidentInput, PageConfig, ServiceState, DEFAULT_LIMITS};
-use crate::publish::{publish_page, run_rounds, UNLIMITED_TICKS};
+use crate::publish::{publish_read, run_rounds, UNLIMITED_TICKS};
 use crate::render::render;
 use crate::serve::serve;
 use crate::server::status_router;
@@ -120,7 +120,7 @@ pub async fn run_app(file: AppFile, listener: TcpListener, shutdown: ShutdownSig
 /// Publishes the fixed page without incidents at once, then reads the store in a spawned task (the first read, then the rounds) until it is aborted.
 pub fn start_publisher(config: Arc<PageConfig>, state: SharedState, read: IncidentReadFn) -> Result<JoinHandle<()>, StatusPageError> {
     let scope = tenant_scope(&config.tenant)?;
-    publish_page(&config, &state, &PublishedRead::default())?;
+    publish_read(&config, &state, &PublishedRead::default(), true)?;
     Ok(tokio::spawn(
         async move { run_rounds(&config, &state, &read, &scope, UNLIMITED_TICKS).await },
     ))
