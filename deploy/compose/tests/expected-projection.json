@@ -26,6 +26,22 @@
       "file": "secrets/api_tls.key",
       "name": "ostyr_api_tls_key"
     },
+    "clickhouse_schema_password": {
+      "file": "secrets/clickhouse_schema_password",
+      "name": "ostyr_clickhouse_schema_password"
+    },
+    "clickhouse_server_cert": {
+      "file": "secrets/clickhouse_server.crt",
+      "name": "ostyr_clickhouse_server_cert"
+    },
+    "clickhouse_server_key": {
+      "file": "secrets/clickhouse_server.key",
+      "name": "ostyr_clickhouse_server_key"
+    },
+    "clickhouse_users": {
+      "file": "secrets/clickhouse_users",
+      "name": "ostyr_clickhouse_users"
+    },
     "gateway_tls_cert": {
       "file": "secrets/gateway_tls.crt",
       "name": "ostyr_gateway_tls_cert"
@@ -80,6 +96,133 @@
     }
   },
   "services": {
+    "chschema": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/bin/bash",
+        "/etc/ostyr-schema/apply.sh"
+      ],
+      "depends_on": {
+        "clickhouse": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "clickhouse/clickhouse-server:26.8.46@sha256:e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9",
+      "networks": {
+        "default": null
+      },
+      "read_only": true,
+      "restart": "on-failure:5",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "clickhouse_schema_password",
+          "target": "/run/secrets/clickhouse_schema_password"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp",
+        "/var/lib/clickhouse",
+        "/var/log/clickhouse-server"
+      ],
+      "user": "65530:65530",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config/clickhouse-apply.sh",
+          "target": "/etc/ostyr-schema/apply.sh",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config/clickhouse-schema.sql",
+          "target": "/etc/ostyr-schema/schema.sql",
+          "type": "bind"
+        }
+      ]
+    },
+    "clickhouse": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "clickhouse-server",
+        "--config-file=/etc/clickhouse-server/ostyr-config.xml"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "CLICKHOUSE_WATCHDOG_ENABLE": "0"
+      },
+      "healthcheck": {
+        "interval": "5s",
+        "retries": 30,
+        "test": [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider --no-check-certificate https://localhost:8443/ping"
+        ],
+        "timeout": "5s"
+      },
+      "image": "clickhouse/clickhouse-server:26.8.46@sha256:e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9",
+      "networks": {
+        "default": null
+      },
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "clickhouse_server_key",
+          "target": "/run/secrets/clickhouse_server_key"
+        },
+        {
+          "source": "clickhouse_server_cert",
+          "target": "/run/secrets/clickhouse_server_cert"
+        },
+        {
+          "source": "clickhouse_users",
+          "target": "/run/secrets/clickhouse_users"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp"
+      ],
+      "user": "101:101",
+      "volumes": [
+        {
+          "source": "chdata",
+          "target": "/var/lib/clickhouse",
+          "type": "volume",
+          "volume": {}
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config/clickhouse-config.xml",
+          "target": "/etc/clickhouse-server/ostyr-config.xml",
+          "type": "bind"
+        }
+      ]
+    },
     "gateway": {
       "cap_drop": [
         "ALL"
@@ -550,6 +693,9 @@
     }
   },
   "volumes": {
+    "chdata": {
+      "name": "ostyr_chdata"
+    },
     "gatewaystate": {
       "name": "ostyr_gatewaystate"
     },

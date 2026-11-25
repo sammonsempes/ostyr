@@ -143,6 +143,46 @@ services:
         ipv4_address: 172.29.63.12
     ports:
       - "0.0.0.0:7443:7443"
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.46@sha256:e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9
+    restart: unless-stopped
+    read_only: true
+    user: 101:101
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CLICKHOUSE_WATCHDOG_ENABLE: 0
+    command: ["clickhouse-server", "--config-file=/etc/clickhouse-server/ostyr-config.xml"]
+    secrets: [clickhouse_server_key, clickhouse_server_cert, clickhouse_users]
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./config/clickhouse-config.xml:/etc/clickhouse-server/ostyr-config.xml:ro
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider --no-check-certificate https://localhost:8443/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  chschema:
+    image: clickhouse/clickhouse-server:26.8.46@sha256:e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9
+    restart: on-failure:5
+    read_only: true
+    user: 65530:65530
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/bin/bash", "/etc/ostyr-schema/apply.sh"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    secrets: [pg_ca, clickhouse_schema_password]
+    volumes:
+      - ./config/clickhouse-apply.sh:/etc/ostyr-schema/apply.sh:ro
+      - ./config/clickhouse-schema.sql:/etc/ostyr-schema/schema.sql:ro
+    tmpfs:
+      - /tmp
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
 networks:
   default:
     ipam:
@@ -157,6 +197,7 @@ volumes:
   natsdata: {}
   gatewaystate: {}
   relaystate: {}
+  chdata: {}
 secrets:
   pg_password:
     file: ./secrets/pg_password
@@ -190,3 +231,11 @@ secrets:
     file: ./secrets/agent_ca.crt
   nats_gateway_password:
     file: ./secrets/nats_gateway_password
+  clickhouse_server_key:
+    file: ./secrets/clickhouse_server.key
+  clickhouse_server_cert:
+    file: ./secrets/clickhouse_server.crt
+  clickhouse_users:
+    file: ./secrets/clickhouse_users
+  clickhouse_schema_password:
+    file: ./secrets/clickhouse_schema_password

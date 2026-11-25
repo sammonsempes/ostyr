@@ -63,6 +63,7 @@ pub fn outage(tenant: &str, check: &str, locations: &[&str], since: u64) -> Outa
         kind: CheckKind::Http,
         failing_locations: locations.iter().map(|location| (*location).to_owned()).collect(),
         since,
+        refused: false,
     }
 }
 

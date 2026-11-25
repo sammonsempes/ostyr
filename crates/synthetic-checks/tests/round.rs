@@ -6,7 +6,7 @@ use alerts::error::StoreError;
 use alerts::model::Alert;
 use alerts::types::RowFuture;
 use core_config::parse::parse_document;
-use core_pg::error::PgError;
+use core_pg::error::{PgError, TlsClass};
 use core_pg::scope::{tenant_scope, TenantScope};
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
@@ -16,9 +16,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 use synthetic_checks::alerting::store_outage_alerts;
 use synthetic_checks::load::{text_ok, validate_check};
-use synthetic_checks::model::{Check, CheckFile, CheckKind, RawCheck};
+use synthetic_checks::model::{Check, CheckFile, CheckKind, FailureRun, RawCheck, MAX_CHECKS};
 use synthetic_checks::round::{
-    new_runner, placement_of, reload_checks, run_round, Placement, RoundContext, RoundReport, Runner, MAX_PENDING_OUTAGES, MAX_PROBES_PER_ROUND,
+    new_runner, placement_of, reload_checks, run_round, store_failure_category, Placement, RoundContext, RoundReport, Runner, MAX_PENDING_OUTAGES,
+    MAX_PROBES_PER_ROUND,
 };
 use types::TestResult;
 
@@ -59,6 +60,12 @@ const DAY: u64 = 86_400;
 const FLAP_ROUNDS: usize = 2 * MAX_PENDING_OUTAGES + 20;
 
 
+const FLAP_OUTAGES: usize = FLAP_ROUNDS / 2 + 1;
+
+
+const THREE_FAILURES: u64 = 3;
+
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum StoreMode {
     Accept,
@@ -72,6 +79,7 @@ pub struct Harness {
     pub mono: Cell<u64>,
     pub wall: Cell<u64>,
     pub failing: RefCell<BTreeSet<String>>,
+    pub refused: RefCell<BTreeSet<String>>,
     pub probed: RefCell<Vec<String>>,
     pub stored: RefCell<Vec<Vec<Alert>>>,
     pub mode: Cell<StoreMode>,
@@ -85,6 +93,7 @@ pub fn harness() -> Harness {
         mono: Cell::new(STEP),
         wall: Cell::new(WALL_START),
         failing: RefCell::new(BTreeSet::new()),
+        refused: RefCell::new(BTreeSet::new()),
         probed: RefCell::new(Vec::new()),
         stored: RefCell::new(Vec::new()),
         mode: Cell::new(StoreMode::Accept),
@@ -164,6 +173,7 @@ pub fn round(harness: &Harness, runner: &mut Runner, scope: &TenantScope) -> Rou
         harness.probed.borrow_mut().push(check.name.clone());
         !harness.failing.borrow().contains(&check.name)
     };
+    let refused = |check: &Check| harness.refused.borrow().contains(&check.name);
     let store = |alerts: &[Alert]| match harness.mode.get() {
         StoreMode::Fail => Err(StoreError::TenantMismatch),
         StoreMode::AlreadyThere => Ok(0),
@@ -182,6 +192,7 @@ pub fn round(harness: &Harness, runner: &mut Runner, scope: &TenantScope) -> Rou
         clock: &clock,
         wall: &wall,
         probe: &probe,
+        refused: &refused,
         store: &store,
         stopped: &stopped,
     };
@@ -391,10 +402,13 @@ fn a_flapping_check_cannot_evict_another_checks_single_outage() -> TestResult {
         round(&harness, &mut runner, &scope);
     });
     assert!(runner.counters.pending_dropped > 0);
+    assert_eq!(runner.counters.pending_dropped as usize + runner.pending.len(), FLAP_OUTAGES);
     assert_eq!(runner.pending.iter().filter(|outage| outage.check == "steady").count(), 1);
     assert!(runner.pending.len() <= MAX_PENDING_OUTAGES + TWO);
     harness.mode.set(StoreMode::Accept);
-    round(&harness, &mut runner, &scope);
+    let last = round(&harness, &mut runner, &scope);
+    assert_eq!(last.pending_dropped, 0);
+    assert_eq!(stored_count(&harness) + runner.counters.pending_dropped as usize, FLAP_OUTAGES);
     let steady_stored = harness
         .stored
         .borrow()
@@ -431,12 +445,15 @@ fn a_recovered_check_keeps_its_outage_while_another_flaps() -> TestResult {
         round(&harness, &mut runner, &scope);
     });
     assert!(runner.counters.pending_dropped > 0);
+    assert_eq!(runner.counters.pending_dropped as usize + runner.pending.len(), FLAP_OUTAGES);
     assert!(runner
         .states
         .iter()
         .all(|state| state.run_started.is_none() || state.check.name == "flap"));
     harness.mode.set(StoreMode::Accept);
-    round(&harness, &mut runner, &scope);
+    let last = round(&harness, &mut runner, &scope);
+    assert_eq!(last.pending_dropped, 0);
+    assert_eq!(stored_count(&harness) + runner.counters.pending_dropped as usize, FLAP_OUTAGES);
     let steady_stored = harness
         .stored
         .borrow()
@@ -620,5 +637,112 @@ fn a_stored_outage_never_raises_the_reset_check_that_replaced_its_run() -> TestR
     round(&harness, &mut runner, &scope);
     assert_eq!(stored_count(&harness), 1);
     assert!(!runner.states.first().ok_or("no state")?.raised);
+    Ok(())
+}
+
+
+#[test]
+fn a_dropped_pending_outage_is_reported_by_the_round() -> TestResult {
+    let names: Vec<String> = (0..TWO).map(|i| format!("c{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let scope = tenant_scope("acme")?;
+    let mut runner = new_runner(&scope, "paris")?;
+    reload_checks(&mut runner, &checks(&refs, STEP, 1, "x:1", "[paris]")?)?;
+    let harness = harness();
+    harness.mode.set(StoreMode::Fail);
+    let dropped: usize = (0..FLAP_ROUNDS)
+        .map(|k| {
+            let failing: &[&str] = if k % TWO == 0 { &["c0", "c1"] } else { &["c1"] };
+            fail(&harness, failing);
+            round(&harness, &mut runner, &scope).pending_dropped
+        })
+        .sum();
+    assert_eq!(dropped as u64, runner.counters.pending_dropped);
+    assert!(dropped > 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_kind_change_with_the_same_run_start_is_still_alerted_later() -> TestResult {
+    let (mut runner, scope) = prepared(&["web"])?;
+    let harness = harness();
+    harness.mode.set(StoreMode::Fail);
+    fail(&harness, &["web"]);
+    rounds(&harness, &mut runner, &scope, TWO);
+    let three = FailureRun::try_from(THREE_FAILURES)?;
+    let changed: Vec<Check> = simple(&["web"])?
+        .into_iter()
+        .map(|check| Check {
+            kind: CheckKind::Icmp,
+            target: "127.0.0.1".to_owned(),
+            consecutive_failures: three,
+            ..check
+        })
+        .collect();
+    reload_checks(&mut runner, &changed)?;
+    harness.wall.set(WALL_START);
+    harness.mono.set(harness.mono.get() + DAY);
+    harness.mode.set(StoreMode::Accept);
+    rounds(&harness, &mut runner, &scope, THREE_ROUNDS + 1);
+    assert_eq!(stored_count(&harness), TWO);
+    Ok(())
+}
+
+
+#[test]
+fn more_than_the_maximum_checks_are_refused_by_the_reload() -> TestResult {
+    let template = simple(&["a"])?.into_iter().next().ok_or("no check")?;
+    let many: Vec<Check> = (0..=MAX_CHECKS)
+        .map(|i| Check {
+            name: format!("c{i}"),
+            ..template.clone()
+        })
+        .collect();
+    let scope = tenant_scope("acme")?;
+    let mut runner = new_runner(&scope, "paris")?;
+    assert!(reload_checks(&mut runner, &many).is_err());
+    assert!(runner.states.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_run_refused_by_the_scope_alerts_with_its_own_reason() -> TestResult {
+    let (mut runner, scope) = prepared(&["web", "db"])?;
+    let harness = harness();
+    fail(&harness, &["web", "db"]);
+    harness.refused.borrow_mut().insert("web".to_owned());
+    rounds(&harness, &mut runner, &scope, FIVE);
+    let stored = harness.stored.borrow();
+    let summaries: Vec<(String, String)> = stored
+        .iter()
+        .flatten()
+        .filter_map(|alert| alert.event_ids.first().map(|check| (check.clone(), alert.summary.text.clone())))
+        .collect();
+    assert_eq!(summaries.len(), TWO);
+    let web = summaries.iter().find(|(check, _text)| check == "check:web").ok_or("no web alert")?;
+    let db = summaries.iter().find(|(check, _text)| check == "check:db").ok_or("no db alert")?;
+    assert!(web.1.contains("\"reason\":\"refused_by_scope\""), "{}", web.1);
+    assert!(db.1.contains("\"reason\":\"check_failed\""), "{}", db.1);
+    Ok(())
+}
+
+
+#[test]
+fn a_store_failure_is_logged_under_a_fixed_category() -> TestResult {
+    let category = |failure: StoreError| store_failure_category(&failure);
+    assert_eq!(category(StoreError::Pg(PgError::ConnectTimeout { seconds: 1 })), "connect_timeout");
+    assert_eq!(category(StoreError::Pg(PgError::StatementTimeout { seconds: 1 })), "statement_timeout");
+    assert_eq!(category(StoreError::Pg(PgError::ClientDeadline { seconds: 1 })), "statement_timeout");
+    let server = PgError::Server {
+        code: "23505".to_owned(),
+        class: "integrity",
+    };
+    assert_eq!(category(StoreError::Pg(server)), "integrity");
+    assert_eq!(category(StoreError::Pg(PgError::Tls(rustls::Error::HandshakeNotComplete))), "tls");
+    assert_eq!(category(StoreError::Pg(PgError::Handshake(TlsClass::Alert))), "tls");
+    assert_eq!(category(StoreError::Pg(PgError::InvalidTenant)), "pg_other");
+    assert_eq!(category(StoreError::Busy), "store_other");
     Ok(())
 }

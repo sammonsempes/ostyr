@@ -179,6 +179,13 @@ expect "init.sh refuses a symlink as the lock file" absent remote "cd plant && s
 expect "nothing was created through the lock symlink" absent remote "test -e /tmp/lock-leak"
 remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant/secrets"
 expect "init.sh refuses a secrets directory open to others" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo cp secrets/clickhouse_users /tmp/users-good"
+remote "cd plant && sudo sed 's|^    </users>\$|        <evil><networks><ip>::/0</ip></networks><grants><query>GRANT SELECT ON ostyr.*</query></grants></evil>\n&|' /tmp/users-good | sudo tee secrets/clickhouse_users >/dev/null"
+expect "init.sh refuses a users file with a one-line extra user, by name" remote "cd plant && sudo grep -q evil secrets/clickhouse_users && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'clickhouse_users is not the file init.sh renders'"
+remote "cd plant && sudo sed 's|GRANT INSERT ON ostyr.metric_samples|GRANT INSERT, SELECT ON ostyr.metric_samples|' /tmp/users-good | sudo tee secrets/clickhouse_users >/dev/null"
+expect "init.sh refuses the cycle 1 metrics SELECT grant, by name" remote "cd plant && sudo grep -q 'INSERT, SELECT ON ostyr.metric_samples' secrets/clickhouse_users && sudo ./init.sh plant.example 2>&1 | grep -q 'clickhouse_users is not the file init.sh renders'"
+remote "cd plant && sudo cp /tmp/users-good secrets/clickhouse_users"
+expect "init.sh accepts the file it rendered" remote "cd plant && sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready'"
 expect "the installed certificates verify against the CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/pg_server.crt secrets/api_tls.crt"
 remote "cd compose && sudo find secrets -exec stat -c '%a %u %n' {} +"
 
@@ -410,7 +417,7 @@ expect "no event reached the stream from the clients that were refused" test "$(
 expect "a container that is not the relay is dropped by the gateway relay port before the handshake (curl exit 35)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.63.11:7443/; echo \$?")" = 35
 expect "NATS is closed from the host network" absent remote "nc -z -w 3 $vm_address $NATS_PORT || nc -z -w 3 127.0.0.1 $NATS_PORT"
 expect "the gateway ports are closed from the host network" absent remote "nc -z -w 3 127.0.0.1 7444 || nc -z -w 3 $vm_address 7444"
-for service_name in postgres platform web playbooks nats gateway relay; do
+for service_name in postgres platform web playbooks nats gateway relay clickhouse chschema; do
     expect "init.sh refuses the service name $service_name as the public host name" remote "cd compose && sudo ./init.sh $service_name 2>&1 | grep -q 'is a compose service name'"
 done
 expect "the events stream has the byte limit" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"max_bytes": *\([0-9]*\).*/\1/p' | head -n 1)" = 1073741824
@@ -421,6 +428,44 @@ expect "the gateway key is accepted for the name gateway" remote "cd compose && 
     sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve gateway:9556:127.0.0.1 -o /dev/null https://gateway:9556/"
 expect "the API key fails the name gateway" remote "cd compose && (sudo timeout 20 openssl s_server -accept 9557 -www -cert secrets/api_tls.crt -key secrets/api_tls.key >/dev/null 2>&1 &) ; sleep 2; \
     sudo curl -sS --noproxy '*' --max-time 8 --cacert secrets/ca.crt --resolve gateway:9557:127.0.0.1 -o /dev/null https://gateway:9557/ 2>&1 | tee /dev/stderr | grep -q 'no alternative certificate subject name'"
+expect "chschema finished and exited 0" remote "cd compose && for attempt in \$(seq 1 $LOG_ATTEMPTS); do sudo docker compose ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}' | grep -qx 'chschema exited 0' && exit 0; sleep 2; done; exit 1"
+expect "chschema logged its statement count" remote "cd compose && sudo docker compose logs chschema 2>&1 | grep -q 'schema applied: 9 statements'"
+expect "chschema runs again with no error (idempotent)" remote "cd compose && sudo docker compose run --rm chschema 2>&1 | grep -q 'schema applied: 9 statements'"
+expect "clickhouse is healthy" remote "cd compose && sudo docker compose ps clickhouse --format '{{.Health}}' | grep -qx healthy"
+expect "clickhouse publishes no port" absent remote "cd compose && sudo docker compose port clickhouse 8443 | grep -q ."
+expect "clickhouse key and users file belong to uid 101 and are mode 600" test "$(remote "cd compose && sudo stat -c '%u %a' secrets/clickhouse_server.key secrets/clickhouse_users | sort -u")" = "101 600"
+expect "the ClickHouse certificate names only DNS:clickhouse" test "$(remote "cd compose && sudo openssl x509 -in secrets/clickhouse_server.crt -noout -ext subjectAltName | grep -c 'DNS:clickhouse$'")" = 1
+expect "the ClickHouse certificate verifies against the compose CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/clickhouse_server.crt"
+clickhouse_proofs="$(remote_stdin "cd compose && sudo bash -s -- $NATS_BOX_IMAGE" <"$TESTS_DIR/clickhouse-proof.sh")"
+printf '%s\n' "$clickhouse_proofs"
+clickhouse_value() {
+    printf '%s\n' "$clickhouse_proofs" | sed -n "s/^$1 //p"
+}
+expect "the schema holds 9 objects (6 tables, 3 views)" test "$(clickhouse_value objects)" = 9
+expect "the reader reads events (0 rows)" test "$(clickhouse_value reader_select)" = 0
+expect "the reader INSERT is refused (497: no grant, and readonly=2 besides)" test "$(clickhouse_value reader_insert_code)" = 497
+expect "the reader cannot lift readonly=2 (164)" test "$(clickhouse_value reader_lift_readonly_code)" = 164
+expect "the refused INSERT wrote nothing" test "$(clickhouse_value reader_count_after_refused)" = 0
+expect "the ingest writer inserts into events" test "$(clickhouse_value ingest_insert)" = 0
+expect "the reader sees the ingested row" test "$(clickhouse_value reader_count_after_insert)" = 1
+expect "the ingest writer cannot read events (497)" test "$(clickhouse_value ingest_select_code)" = 497
+expect "the metrics writer inserts a sample and the rollup view fills" test "$(clickhouse_value metrics_insert)" = 0 -a "$(clickhouse_value rollup_rows)" = 1
+expect "the metrics writer cannot read samples and cannot write a rollup (497 and 497)" test "$(clickhouse_value metrics_select_code)/$(clickhouse_value metrics_rollup_insert_code)" = "497/497"
+expect "the refused rollup INSERT left the rollup at one row" test "$(clickhouse_value rollup_rows_after_forgery)" = 1
+expect "no ClickHouse web page answers (404 for /play, /dashboard, /js)" test "$(clickhouse_value page_play)/$(clickhouse_value page_dashboard)/$(clickhouse_value page_js)" = "404/404/404"
+expect "a GET query on / gets 404, only POST is served" test "$(clickhouse_value get_root_select)" = 404
+expect "the metrics writer cannot write events (497)" test "$(clickhouse_value metrics_events_code)" = 497
+expect "the ingest writer cannot write metrics (497)" test "$(clickhouse_value ingest_metrics_code)" = 497
+expect "neither the reader nor the ingest writer can DROP" test "$(clickhouse_value reader_ddl_code)/$(clickhouse_value ingest_ddl_code)" = "497/497"
+expect "the reader profile changes only readonly" test "$(clickhouse_value reader_changed_settings)" = "readonly,database,"
+expect "the reader runs under readonly=2" test "$(clickhouse_value reader_readonly)" = 2
+expect "a wrong password is refused (516)" test "$(clickhouse_value wrong_password_code)" = 516
+expect "no default user answers (194 password required, with no and an empty password)" test "$(clickhouse_value default_user_code)/$(clickhouse_value default_empty_password_code)" = "194/194"
+expect "the ping answers over verified TLS for the name clickhouse" test "$(clickhouse_value name_check)" = "Ok."
+expect "another name fails the certificate check" test "$(clickhouse_value wrong_name)" = 1
+expect "plain HTTP 8123 is refused inside the network (curl exit 7)" test "$(clickhouse_value plain_http_8123)" = 7
+expect "the native, TLS native, MySQL and PostgreSQL ports are refused (curl exit 7)" test "$(clickhouse_value native_9000)$(clickhouse_value native_tls_9440)$(clickhouse_value mysql_9004)$(clickhouse_value postgres_9005)" = 7777
+expect "plain HTTP on the TLS port gets no answer (curl exit not 0)" test "$(clickhouse_value plain_on_tls_port)" != 0
 remote "sudo ss -ltnp"
 
 if [[ "$failures" -ne 0 ]]; then

@@ -24,7 +24,13 @@ pub const MORE_FIXED_CHARS: usize = 9;
 pub const MICROS_PER_SECOND: u64 = 1_000_000;
 
 
-/// One outage of a check: `since` is the first failure of the current run, in seconds.
+pub const REASON_REFUSED: &str = "refused_by_scope";
+
+
+pub const REASON_FAILED: &str = "check_failed";
+
+
+/// One outage of a check: `since` is the first failure of the current run, in seconds; `refused` is true when the last failure was a scope refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outage {
     pub tenant: String,
@@ -32,6 +38,7 @@ pub struct Outage {
     pub kind: CheckKind,
     pub failing_locations: Vec<String>,
     pub since: u64,
+    pub refused: bool,
 }
 
 
@@ -111,6 +118,7 @@ pub fn alert_of(scope: &TenantScope, outage: &Outage, now: u64) -> Option<Alert>
             "locations": listed,
             "locations_omitted": omitted,
             "since": outage.since,
+            "reason": if outage.refused { REASON_REFUSED } else { REASON_FAILED },
         })),
     })
 }
