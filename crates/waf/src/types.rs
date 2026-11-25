@@ -16,3 +16,7 @@ pub type RunnerFn = fn(&OwnedFd, &Path, &[String], Duration) -> io::Result<Comma
 
 /// Waits for the child up to the deadline; injected so a test can make the wait itself fail.
 pub type WaitFn = fn(&mut Child, Duration) -> io::Result<Option<ExitStatus>>;
+
+
+/// Blocks until the process must stop; production waits for SIGINT or SIGTERM, tests return at once.
+pub type InterruptFn<'a> = dyn Fn() -> io::Result<()> + 'a;

@@ -86,3 +86,25 @@ impl From<rustix::io::Errno> for DeliverError {
         Self::Write(errno.into())
     }
 }
+
+
+/// Why `ostyr-waf` stopped; every text is fixed.
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("usage: ostyr-waf <settings.yaml>")]
+    Usage,
+    #[error("cannot install the log subscriber")]
+    Logging(#[from] tracing::subscriber::SetGlobalDefaultError),
+    #[error("the settings file was refused")]
+    Settings(#[from] core_config::error::ConfigError),
+    #[error("the settings file names no audit_file")]
+    NoAuditFile,
+    #[error("audit_file changed between two reads of the settings file")]
+    AuditPathChanged,
+    #[error("the start was refused")]
+    Open(#[from] OpenError),
+    #[error("cannot watch the settings and routes files")]
+    Watch(#[from] core_config::error::WatchError),
+    #[error("cannot wait for signals")]
+    Signal(#[from] std::io::Error),
+}
