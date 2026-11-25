@@ -1,4 +1,4 @@
-use crate::model::{ApiState, ConnectionGuard, Limits, Listener, PreparedAudit, PreparedKey, Rule, Sockets, Window};
+use crate::model::{ApiState, ConnectionGuard, Limits, Listener, PreparedAudit, PreparedKey, Rule, SenderSlot, Sockets, Window};
 use arc_swap::ArcSwap;
 use axum::Router;
 use core_auth::error::AuthError;
@@ -26,6 +26,18 @@ pub type StartupReloadFn = Box<dyn Fn() -> ReloadOutcome + Send + Sync>;
 
 /// The global slot and the per-source slot a detached write holds until its audit record is written.
 pub type DetachedPermit = (OwnedSemaphorePermit, ConnectionGuard);
+
+
+/// The per-sender slot, dropped first, then the global permit: a pool fully free means every slot is released. A decode holds until its blocking task ends (T889A).
+pub type SenderPermit = (SenderSlot, OwnedSemaphorePermit);
+
+
+/// SHA-256 hex of an ingest token to the sender name; replaced whole at a reload.
+pub type SenderTable = BTreeMap<String, String>;
+
+
+/// Live decode slots per sender name.
+pub type SenderSlots = Arc<Mutex<BTreeMap<String, usize>>>;
 
 
 pub type PendingGenerations = Mutex<BTreeMap<String, u64>>;

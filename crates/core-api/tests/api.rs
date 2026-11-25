@@ -10,6 +10,8 @@ mod limits;
 mod logging;
 #[path = "support/passkey.rs"]
 mod passkey;
+#[path = "sender/mod.rs"]
+mod sender;
 #[path = "support/types.rs"]
 mod types;
 

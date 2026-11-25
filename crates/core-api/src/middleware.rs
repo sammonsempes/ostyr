@@ -1,17 +1,19 @@
 use crate::failure::{auth_failure, error_response};
 use crate::model::{
-    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, DetachedPool, Exchange, ForwardedBy, Limits, RequestId, Requirement,
-    Rule, Window,
+    AdmittedSender, ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, DetachedPool, Exchange, ForwardedBy, Limits, RequestId,
+    Requirement, Rule, SenderSlot, Window,
 };
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
 use crate::server::admit_connection;
-use crate::state::{lock_auth, refresh_accounts, session_revoked, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_READS_PER_SOURCE};
-use crate::types::{ConnectionTable, DetachedPermit, SharedState};
+use crate::state::{
+    lock_auth, refresh_accounts, session_revoked, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_READS_PER_SOURCE, MAX_TRACE_DECODES_PER_SENDER,
+};
+use crate::types::{ConnectionTable, DetachedPermit, SenderPermit, SharedState};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
-    HeaderName, AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, FORWARDED, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
-    X_FRAME_OPTIONS,
+    HeaderName, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_SECURITY_POLICY, CONTENT_TYPE, FORWARDED, REFERRER_POLICY,
+    STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
@@ -29,6 +31,7 @@ use core_config::reload::{bounded_text, bounded_value};
 use data_encoding::HEXLOWER;
 use http_body_util::LengthLimitError;
 use secrecy::SecretString;
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +66,19 @@ pub const KNOWN_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DE
 
 
 pub const BEARER_PREFIX: &[u8] = b"Bearer ";
+
+
+/// Length of an ingest token in characters: 32 random bytes in lower-case hex.
+pub const SENDER_TOKEN_LENGTH: usize = 64;
+
+
+pub const SENDER_CONTENT_TYPE: &[u8] = b"application/x-protobuf";
+
+
+pub const SENDER_ENCODING_IDENTITY: &[u8] = b"identity";
+
+
+pub const SENDER_ACTOR_PREFIX: &str = "sender:";
 
 
 pub const ACTION_REQUEST: &str = "api.request";
@@ -468,6 +484,98 @@ pub fn audit_response(app: &ApiState, template: Exchange, response: Response) ->
 }
 
 
+/// The digest of the ingest token in `headers`: exactly one `Authorization` header, `Bearer ` and 64 lower-case hex characters, else `None`.
+pub fn sender_digest(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    match (values.next(), values.next()) {
+        (Some(value), None) => value
+            .as_bytes()
+            .strip_prefix(BEARER_PREFIX)
+            .filter(|token| token.len() == SENDER_TOKEN_LENGTH && token.iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+            .map(|token| HEXLOWER.encode(&Sha256::digest(token))),
+        _ => None,
+    }
+}
+
+
+/// `Content-Type` exactly `application/x-protobuf` and `Content-Encoding` absent or `identity`, each at most once.
+pub fn sender_media_ok(headers: &HeaderMap) -> bool {
+    let mut types = headers.get_all(CONTENT_TYPE).iter();
+    let mut encodings = headers.get_all(CONTENT_ENCODING).iter();
+    let type_ok = matches!((types.next(), types.next()), (Some(value), None) if value.as_bytes() == SENDER_CONTENT_TYPE);
+    let encoding_ok = match (encodings.next(), encodings.next()) {
+        (None, None) => true,
+        (Some(value), None) => value.as_bytes() == SENDER_ENCODING_IDENTITY,
+        _ => false,
+    };
+    type_ok && encoding_ok
+}
+
+
+/// Takes the sender's slot then a global permit of the decode pool, never queueing; `None` when either is full.
+pub fn admit_sender(app: &ApiState, name: &str) -> Option<SenderPermit> {
+    let taken = {
+        let mut table = app.sender_slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = table.get(name).copied().unwrap_or(0);
+        (held < MAX_TRACE_DECODES_PER_SENDER)
+            .then(|| table.insert(name.to_owned(), held + 1))
+            .is_some()
+    };
+    taken
+        .then(|| SenderSlot {
+            table: app.sender_slots.clone(),
+            name: name.to_owned(),
+        })
+        .and_then(|slot| {
+            app.sender_pool
+                .permits
+                .clone()
+                .try_acquire_owned()
+                .inspect_err(|error| tracing::debug!(%error, "decode pool full"))
+                .ok()
+                .map(|permit| (slot, permit))
+        })
+}
+
+
+/// Counts a refused sender request and warns when the count is a power of two; never the token or its digest.
+pub fn note_sender_refused(app: &ApiState) -> u64 {
+    let count = count_refusal(&app.sender_refused);
+    if count.is_power_of_two() {
+        tracing::dispatcher::with_default(&app.dispatch, || {
+            tracing::warn!(count, "sender requests refused");
+        });
+    }
+    count
+}
+
+
+/// Admission of an ingest sender on headers only, before any body byte: token (401), media type (415), slots (429).
+pub fn sender_decision(app: &ApiState, headers: &HeaderMap) -> (Decision, Option<AdmittedSender>) {
+    let name = sender_digest(headers).and_then(|digest| app.senders.load().get(&digest).cloned());
+    let actor = name
+        .as_ref()
+        .map_or_else(|| ANONYMOUS_ACTOR.to_owned(), |found| format!("{SENDER_ACTOR_PREFIX}{found}"));
+    let outcome = match name {
+        None => Err(ApiError::Unauthorized),
+        Some(_) if !sender_media_ok(headers) => Err(ApiError::UnsupportedMediaType),
+        Some(found) => admit_sender(app, &found)
+            .map(|permit| AdmittedSender {
+                name: found,
+                permit: Arc::new(permit),
+            })
+            .ok_or(ApiError::SenderBusy),
+    };
+    match outcome {
+        Ok(sender) => (admit(&actor, None), Some(sender)),
+        Err(error) => {
+            note_sender_refused(app);
+            (deny(&actor, error), None)
+        }
+    }
+}
+
+
 /// A request under a session or a permission runs detached, whatever its method (T769, T883); public routes (login, OIDC) never do.
 pub fn detaches(rule: Option<&Rule>) -> bool {
     matches!(
@@ -588,7 +696,10 @@ pub async fn guard(
 ) -> Response {
     let route = route_of(&request);
     let rule = app.access.get(&route);
-    let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
+    let (decision, sender) = match rule.map(|found| &found.requirement) {
+        Some(Requirement::Sender(_)) => sender_decision(&app, request.headers()),
+        requirement => (decide(&app, requirement, bearer_token(request.headers()), (app.clock)()), None),
+    };
     let identity = decision.identity.clone().unwrap_or_else(|| app.identity.load_full());
     let state_changing = !request.method().is_safe();
     let detach = detaches(rule);
@@ -608,11 +719,14 @@ pub async fn guard(
         Some(error) => audit_response(&app, template, error_response(&error)),
         None => {
             request.extensions_mut().insert(identity.clone());
+            sender.into_iter().for_each(|admitted| {
+                request.extensions_mut().insert(admitted);
+            });
             decision.session.into_iter().for_each(|session| {
                 request.extensions_mut().insert(session);
             });
             if detach {
-                match buffer_body(&app, request).await {
+                match buffer_body(&app, request, BODY_LIMIT_BYTES).await {
                     Ok(buffered) => run_detached(app.clone(), buffered, next, template, peer.ip()).await,
                     Err(refusal) => audit_response(&app, template, error_response(&refusal)),
                 }
@@ -636,9 +750,9 @@ pub fn body_failure(error: &axum::Error) -> ApiError {
 
 
 /// Reads the whole body within the body read timeout, so a detached slot is never held by a slow body; the error is the refusal to send.
-pub async fn buffer_body(app: &ApiState, request: Request) -> Result<Request, ApiError> {
+pub async fn buffer_body(app: &ApiState, request: Request, limit: usize) -> Result<Request, ApiError> {
     let (parts, body) = request.into_parts();
-    match tokio::time::timeout(app.limits.load().body_read_timeout, to_bytes(body, BODY_LIMIT_BYTES)).await {
+    match tokio::time::timeout(app.limits.load().body_read_timeout, to_bytes(body, limit)).await {
         Err(_) => Err(ApiError::RequestTimeout),
         Ok(Err(error)) => Err(body_failure(&error)),
         Ok(Ok(bytes)) => Ok(Request::from_parts(parts, Body::from(bytes))),
@@ -646,8 +760,18 @@ pub async fn buffer_body(app: &ApiState, request: Request) -> Result<Request, Ap
 }
 
 
+/// The body limit of the matched route: its `Sender` ceiling, else `BODY_LIMIT_BYTES`.
+pub fn body_limit(app: &ApiState, request: &Request) -> usize {
+    match app.access.get(&route_of(request)).map(|found| &found.requirement) {
+        Some(Requirement::Sender(ceiling)) => *ceiling,
+        _ => BODY_LIMIT_BYTES,
+    }
+}
+
+
 pub async fn body_deadline(State(app): State<SharedState>, request: Request, next: Next) -> Response {
-    match buffer_body(&app, request).await {
+    let limit = body_limit(&app, &request);
+    match buffer_body(&app, request, limit).await {
         Ok(buffered) => next.run(buffered).await,
         Err(refusal) => error_response(&refusal),
     }
