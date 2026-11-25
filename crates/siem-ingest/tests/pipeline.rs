@@ -6,7 +6,9 @@ use siem_ingest::dead::{MAX_DEAD_LETTER_GROUPS, SUMMARY_SECONDS};
 use siem_ingest::error::{InsertClass, InsertError, PipelineError};
 use siem_ingest::model::{AckAction, CycleReport, Delivery, FlushReport, LoopReport, Message, Pipeline, Wiring};
 use siem_ingest::parse::{is_host_metrics, HOST_DATASET};
-use siem_ingest::pipeline::{dead_letter, new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, settle, MAX_LOOP_CYCLES, POISON_REASON};
+use siem_ingest::pipeline::{
+    dead_letter, new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, run_loop_capped, settle, MAX_LOOP_CYCLES, POISON_REASON,
+};
 use siem_ingest::settings::open_settings;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -445,6 +447,7 @@ fn the_loop_backs_off_on_a_dead_bus_and_restarts_after_a_success() -> Result<(),
             host_metrics_skipped: 0,
             dead_lettered: 0,
             dead_letter_failed: 0,
+            dead_letter_backoffs: 0,
             pull_byte_cap: 0,
             head_pulled_alone: 0,
         }
@@ -874,5 +877,60 @@ fn the_summary_line_carries_the_pull_counts() -> Result<(), Box<dyn Error>> {
         logs.contains("ingest pull summary") && logs.contains("pull_byte_cap=2") && logs.contains("head_pulled_alone=0"),
         "{logs}"
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_dead_letter_publish_backs_off_by_name_and_is_counted() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    rig.dead_fails.store(true, Ordering::SeqCst);
+    (1..=THREE as u64).try_for_each(|token| enqueue(&rig, vec![delivery("events.tenant-a", "not json", token)]))?;
+    let (summary, logs) = captured(|| run_loop(&mut rig.pipeline, &stop_after(THREE as u64 + 1)))?;
+    assert_eq!(summary.dead_letter_backoffs, THREE as u64);
+    assert_eq!(summary.dead_letter_failed, THREE as u64);
+    assert_eq!(summary.fetch_failures, 0);
+    let expected: Vec<Duration> = [FIRST_DELAY_MS, SECOND_DELAY_MS, THIRD_DELAY_MS]
+        .into_iter()
+        .map(Duration::from_millis)
+        .collect();
+    assert_eq!(delays(&rig)?, expected);
+    assert!(logs.contains("dead-letter publish failed, backing off"), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn a_clean_cycle_after_a_failed_dead_letter_publish_restarts_the_delays() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 1\n")?;
+    rig.dead_fails.store(true, Ordering::SeqCst);
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_ONE)])?;
+    run_loop(&mut rig.pipeline, &stop_after(TWO as u64));
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_TWO)])?;
+    run_loop(&mut rig.pipeline, &stop_after(1));
+    assert_eq!(delays(&rig)?, vec![Duration::from_millis(FIRST_DELAY_MS); TWO]);
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_fetch_cycle_still_adds_what_it_settled_to_the_loop_report() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_age_seconds: 1\nmax_batch_messages: 100\n")?;
+    enqueue(&rig, vec![delivery("events.tenant-a", "not json", TOKEN_ONE)])?;
+    run_cycle(&mut rig.pipeline)?;
+    rig.clock.fetch_add(LATER, Ordering::SeqCst);
+    rig.queue.items.lock().map_err(|_| "poisoned")?.push_back(Err("bus down".to_owned()));
+    let summary = run_loop(&mut rig.pipeline, &stop_after(1));
+    assert_eq!(summary.fetch_failures, 1);
+    assert_eq!(summary.dead_lettered, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_capped_loop_returns_at_its_given_cap() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("")?;
+    let summary = run_loop_capped(&mut rig.pipeline, &|| false, THREE as u64);
+    assert_eq!(summary.cycles, THREE as u64);
     Ok(())
 }

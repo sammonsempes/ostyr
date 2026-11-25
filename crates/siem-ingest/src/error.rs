@@ -1,8 +1,11 @@
-use core_config::error::ConfigError;
+use core_audit::error::AuditError;
+use core_config::error::{ConfigError, WatchError};
 use core_config::types::BoxError;
 use std::error::Error;
 use std::io;
 use thiserror::Error;
+use tracing::subscriber::SetGlobalDefaultError;
+use tracing_subscriber::filter::ParseError;
 
 
 #[derive(Debug, Error)]
@@ -211,4 +214,28 @@ pub fn without_peer_text(error: BoxError) -> BoxError {
         .or_else(|| io_kind(error.as_ref()).map(PeerFailure::Io))
         .unwrap_or(PeerFailure::Other);
     BoxError::from(failure)
+}
+
+
+/// What stops `ostyr-siem-ingest` before its loop runs; every text is fixed or comes from a file path or a typed setting error.
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("usage: ostyr-siem-ingest <settings.yaml>")]
+    Usage,
+    #[error("the settings file names no `audit_file`")]
+    NoAuditFile,
+    #[error("the log filter is invalid")]
+    LogFilter(#[source] ParseError),
+    #[error("a log subscriber is already installed")]
+    Subscriber(#[source] SetGlobalDefaultError),
+    #[error("signal handlers could not be installed")]
+    Signals(#[source] io::Error),
+    #[error(transparent)]
+    Settings(#[from] IngestError),
+    #[error("audit log: {0}")]
+    Audit(#[from] AuditError),
+    #[error("{0}")]
+    Nats(#[from] NatsError),
+    #[error("watching the settings file: {0}")]
+    Watch(#[from] WatchError),
 }

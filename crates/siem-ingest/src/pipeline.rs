@@ -187,6 +187,13 @@ pub fn accept(pipeline: &mut Pipeline, settings: &IngestSettings, delivery: Deli
 
 /// One pass: carried messages, then a fetch, then the age check. A fetch error is returned and nothing is lost.
 pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> {
+    let (report, outcome) = run_cycle_parts(pipeline);
+    outcome.map(|()| report)
+}
+
+
+/// The cycle's counts and the fetch outcome apart, so a failed fetch still reports what the carried messages and the age check settled.
+pub fn run_cycle_parts(pipeline: &mut Pipeline) -> (CycleReport, Result<(), PipelineError>) {
     let settings = current_config(&pipeline.batcher.settings);
     let mut report = CycleReport::default();
     let carried = std::mem::take(&mut pipeline.carry);
@@ -203,7 +210,7 @@ pub fn run_cycle(pipeline: &mut Pipeline) -> Result<CycleReport, PipelineError> 
     let aged = tick(&mut pipeline.batcher);
     aged.into_iter().for_each(|done| settle(pipeline, done, &mut report));
     log_dead_groups(&mut pipeline.dead_groups);
-    outcome.map(|()| report)
+    (report, outcome)
 }
 
 
@@ -218,29 +225,53 @@ pub fn drain_pull_counts(pipeline: &Pipeline, report: &mut CycleReport) {
 }
 
 
-/// Runs cycles until `stop`; a failing fetch backs off with the batcher delay, restarting from the first one after a success.
+/// Adds one cycle's counts to the loop's totals.
+pub fn add_cycle(summary: &mut LoopReport, cycle: &CycleReport) {
+    summary.host_metrics_skipped = summary.host_metrics_skipped.saturating_add(cycle.skipped as u64);
+    summary.dead_lettered = summary.dead_lettered.saturating_add(cycle.dead_lettered as u64);
+    summary.dead_letter_failed = summary.dead_letter_failed.saturating_add(cycle.dead_letter_failed as u64);
+    summary.pull_byte_cap = summary.pull_byte_cap.saturating_add(cycle.pull_byte_cap);
+    summary.head_pulled_alone = summary.head_pulled_alone.saturating_add(cycle.head_pulled_alone);
+}
+
+
+/// Sleeps the batcher delay for this streak position and moves the streak on.
+pub fn back_off(pipeline: &Pipeline, streak: &mut u32) {
+    let settings = current_config(&pipeline.batcher.settings);
+    (pipeline.batcher.sleep)(backoff_delay(&settings, *streak));
+    *streak = streak.saturating_add(1);
+}
+
+
+/// Runs cycles until `stop` or `MAX_LOOP_CYCLES`; a failing fetch or a failed dead-letter publish backs off, restarting from the first delay after a clean cycle.
 pub fn run_loop(pipeline: &mut Pipeline, stop: &StopFn) -> LoopReport {
+    run_loop_capped(pipeline, stop, MAX_LOOP_CYCLES)
+}
+
+
+/// `run_loop` with an explicit cycle cap.
+pub fn run_loop_capped(pipeline: &mut Pipeline, stop: &StopFn, cap: u64) -> LoopReport {
     let mut summary = LoopReport::default();
     let mut streak: u32 = 0;
     let mut last_summary = (pipeline.batcher.clock)();
-    while !stop() && summary.cycles < MAX_LOOP_CYCLES {
+    while !stop() && summary.cycles < cap.min(MAX_LOOP_CYCLES) {
         summary.cycles += 1;
-        match run_cycle(pipeline) {
-            Ok(cycle) => {
-                streak = 0;
-                summary.host_metrics_skipped = summary.host_metrics_skipped.saturating_add(cycle.skipped as u64);
-                summary.dead_lettered = summary.dead_lettered.saturating_add(cycle.dead_lettered as u64);
-                summary.dead_letter_failed = summary.dead_letter_failed.saturating_add(cycle.dead_letter_failed as u64);
-                summary.pull_byte_cap = summary.pull_byte_cap.saturating_add(cycle.pull_byte_cap);
-                summary.head_pulled_alone = summary.head_pulled_alone.saturating_add(cycle.head_pulled_alone);
-            }
+        let (cycle, outcome) = run_cycle_parts(pipeline);
+        add_cycle(&mut summary, &cycle);
+        match outcome {
             Err(error) => {
-                let settings = current_config(&pipeline.batcher.settings);
-                warn!(error = %truncate_reason(&error.to_string()), streak, "bus fetch failed, backing off");
-                (pipeline.batcher.sleep)(backoff_delay(&settings, streak));
-                streak = streak.saturating_add(1);
+                let reason = truncate_reason(&error.to_string());
+                warn!(error = %reason, streak, "bus fetch failed, backing off");
+                back_off(pipeline, &mut streak);
                 summary.fetch_failures += 1;
             }
+            Ok(()) if cycle.dead_letter_failed > 0 => {
+                let failed = cycle.dead_letter_failed;
+                warn!(failed, streak, "dead-letter publish failed, backing off");
+                back_off(pipeline, &mut streak);
+                summary.dead_letter_backoffs += 1;
+            }
+            Ok(()) => streak = 0,
         }
         let now = (pipeline.batcher.clock)();
         if summary_due(last_summary, now) {
