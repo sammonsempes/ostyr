@@ -1,4 +1,5 @@
 use crate::error::ScanError;
+use crate::kubeconfig::{check_content, read_checked, seal_bytes};
 use crate::limits::Limits;
 use crate::model::{Cluster, Findings, KubeconfigFault};
 use crate::prowler::parse_prowler_ocsf;
@@ -151,7 +152,7 @@ pub fn open_output(directory: &Path) -> Result<File, ScanError> {
 }
 
 
-/// The kubeconfig as the child sees the checked handle: the parent's descriptor, so a swap of the path after the check is never read.
+/// The kubeconfig as the child sees it: the parent's sealed memfd holding the checked bytes, so no rewrite of the file after the check is ever read.
 pub fn kubeconfig_argument(handle: &File) -> String {
     format!("/proc/{}/fd/{}", std::process::id(), handle.as_raw_fd())
 }
@@ -183,7 +184,10 @@ pub fn cluster_scan(
     deadline: Duration,
 ) -> Result<Findings, ScanError> {
     open_trusted_dir(workdir, rustix::process::geteuid().as_raw()).map_err(ScanError::UntrustedWorkdir)?;
-    let kubeconfig = open_kubeconfig(cluster).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let opened = open_kubeconfig(cluster).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let bytes = read_checked(&mut &opened).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    check_content(&bytes).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let kubeconfig = seal_bytes(&bytes).map_err(ScanError::Seal)?;
     let directory = tempfile::Builder::new()
         .prefix(WORKDIR_PREFIX)
         .permissions(Permissions::from_mode(WORKDIR_MODE))

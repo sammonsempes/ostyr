@@ -6,6 +6,8 @@ pub mod backend;
 pub mod bounds;
 pub mod declarations;
 pub mod error;
+#[cfg(unix)]
+pub mod kubeconfig;
 pub mod limits;
 pub mod model;
 pub mod page;
