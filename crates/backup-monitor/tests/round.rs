@@ -336,7 +336,14 @@ fn names_with_a_separator_or_dots_are_refused_by_name_before_any_spawn() -> Resu
     ["sub/password", "../outside", "..", ".", "", "password/", "/etc/passwd", "pass word", "a."]
         .iter()
         .for_each(|name| {
-            let outcome = run_raw(&setup.restic, &setup.secrets, &source(name), &Limits::default(), PATIENT);
+            let outcome = run_raw(
+                &setup.restic,
+                &setup.secrets,
+                &source(name),
+                &Limits::default(),
+                PATIENT,
+                rustix::process::geteuid().as_raw(),
+            );
             assert!(matches!(outcome, Err(ResticError::Refused)), "{name}");
         });
     assert!(!setup.dir.path().join("restic").join("args").exists());

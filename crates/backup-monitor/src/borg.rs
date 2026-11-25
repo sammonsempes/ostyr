@@ -366,8 +366,8 @@ pub fn environment(base: &str) -> Vec<(String, String)> {
 
 
 /// Reads the passphrase file and returns the pipe that carries it; the handle and the bytes are dropped on return, before any spawn.
-fn passphrase_input(secrets: &SecretsDir, name: &str) -> Result<PipeReader, BorgError> {
-    let mut handle = open_secret_in(secrets, name, rustix::process::geteuid().as_raw()).map_err(passphrase_refusal)?;
+fn passphrase_input(secrets: &SecretsDir, name: &str, euid: u32) -> Result<PipeReader, BorgError> {
+    let mut handle = open_secret_in(secrets, name, euid).map_err(passphrase_refusal)?;
     let passphrase = read_capped(&mut handle)?;
     passphrase_pipe(&passphrase)
 }
@@ -381,6 +381,7 @@ pub fn run_raw(
     target: &BorgTarget<'_>,
     limits: &Limits,
     deadline: Duration,
+    euid: u32,
 ) -> Result<Vec<u8>, BorgError> {
     let (tenant, repository, state) = (target.tenant, target.repository, target.state);
     if local_location(&source.location) {
@@ -388,8 +389,8 @@ pub fn run_raw(
     } else if !valid_source(source) {
         Err(BorgError::Refused)
     } else {
-        let input = passphrase_input(secrets, &source.passphrase_file)?;
-        let base = base_directory(state, tenant, repository, rustix::process::geteuid().as_raw())?;
+        let input = passphrase_input(secrets, &source.passphrase_file, euid)?;
+        let base = base_directory(state, tenant, repository, euid)?;
         let base_text = base.to_str().ok_or(BorgError::BaseDir)?;
         let variables = environment(base_text);
         let pairs: Vec<(&str, &str)> = variables.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
@@ -412,6 +413,7 @@ pub fn snapshot_listing(
     target: &BorgTarget<'_>,
     limits: &Limits,
     deadline: Duration,
+    euid: u32,
 ) -> Result<Listing, BorgError> {
-    parse_run(&run_raw(program, secrets, source, target, limits, deadline)?, source, limits)
+    parse_run(&run_raw(program, secrets, source, target, limits, deadline, euid)?, source, limits)
 }

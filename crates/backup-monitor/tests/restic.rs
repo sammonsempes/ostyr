@@ -192,7 +192,14 @@ fn a_refused_entry_refuses_only_its_repository() -> Result<(), Box<dyn Error>> {
 #[test]
 fn the_argument_vector_is_fixed_and_the_listing_is_keyed_on_the_config_id() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let listing = snapshot_listing(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)?;
+    let listing = snapshot_listing(
+        &setup.program,
+        &setup.secrets,
+        &setup.source,
+        &Limits::default(),
+        PATIENT,
+        rustix::process::geteuid().as_raw(),
+    )?;
     assert_eq!(listing.repository, CONFIG_ID);
     assert!(!listing.snapshots.is_empty());
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
@@ -208,7 +215,14 @@ fn the_argument_vector_is_fixed_and_the_listing_is_keyed_on_the_config_id() -> R
 fn an_sftp_location_names_the_ssh_program_explicitly() -> Result<(), Box<dyn Error>> {
     let mut setup = setup("ok")?;
     setup.source.location = "sftp:backup@host.example:/srv/restic".to_owned();
-    snapshot_listing(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)?;
+    snapshot_listing(
+        &setup.program,
+        &setup.secrets,
+        &setup.source,
+        &Limits::default(),
+        PATIENT,
+        rustix::process::geteuid().as_raw(),
+    )?;
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
     let first = args.lines().next().ok_or("no run")?;
     assert!(first.starts_with("-o sftp.command=/usr/bin/ssh -o BatchMode=yes backup@host.example -s sftp -r sftp:backup@host.example:/srv/restic "));
@@ -221,7 +235,14 @@ fn a_refused_declaration_spawns_nothing() -> Result<(), Box<dyn Error>> {
     let mut setup = setup("ok")?;
     setup.source.location = "-r".to_owned();
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Refused)
     ));
     assert_eq!(runs(&setup), 0);
@@ -234,7 +255,14 @@ fn a_group_readable_password_file_is_refused_before_any_spawn() -> Result<(), Bo
     let setup = setup("ok")?;
     set_permissions(setup.dir.path().join("password"), Permissions::from_mode(GROUP_READABLE_MODE))?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::PasswordFile)
     ));
     assert_eq!(runs(&setup), 0);
@@ -263,7 +291,14 @@ fn a_missing_or_linked_password_file_is_refused_before_any_spawn() -> Result<(),
     };
     [linked, missing, not_regular].iter().for_each(|source| {
         assert!(matches!(
-            run_raw(&setup.program, &setup.secrets, source, &Limits::default(), PATIENT),
+            run_raw(
+                &setup.program,
+                &setup.secrets,
+                source,
+                &Limits::default(),
+                PATIENT,
+                rustix::process::geteuid().as_raw()
+            ),
             Err(ResticError::PasswordFile)
         ))
     });
@@ -276,7 +311,14 @@ fn a_missing_or_linked_password_file_is_refused_before_any_spawn() -> Result<(),
 fn a_password_file_swapped_for_a_symlink_during_the_run_fails_the_run() -> Result<(), Box<dyn Error>> {
     let setup = setup("swap")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::PasswordFileChanged)
     ));
     Ok(())
@@ -287,7 +329,14 @@ fn a_password_file_swapped_for_a_symlink_during_the_run_fails_the_run() -> Resul
 fn a_password_file_removed_during_the_run_fails_the_run() -> Result<(), Box<dyn Error>> {
     let setup = setup("remove")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Io)
     ));
     Ok(())
@@ -308,7 +357,14 @@ fn unchanged_accepts_the_same_file() -> Result<(), Box<dyn Error>> {
 fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
     let setup = setup("sleep")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), IMPATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            IMPATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Timeout)
     ));
     Ok(())
@@ -319,7 +375,14 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
     assert!(matches!(
-        run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), IMPATIENT),
+        run_raw(
+            &setup.program,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            IMPATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Timeout)
     ));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
@@ -342,6 +405,7 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         &config_over.source,
         &Limits::default(),
         PATIENT,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(first, Err(ResticError::Oversized)), "{first:?}");
     let snapshots_over = setup("ok")?;
@@ -350,7 +414,14 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         ..Limits::default()
     };
     assert!(matches!(
-        run_raw(&snapshots_over.program, &snapshots_over.secrets, &snapshots_over.source, &limits, PATIENT),
+        run_raw(
+            &snapshots_over.program,
+            &snapshots_over.secrets,
+            &snapshots_over.source,
+            &limits,
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Oversized)
     ));
     Ok(())
@@ -360,9 +431,16 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_failing_restic_keeps_no_stderr_text() -> Result<(), Box<dyn Error>> {
     let setup = setup("fail")?;
-    let error = run_raw(&setup.program, &setup.secrets, &setup.source, &Limits::default(), PATIENT)
-        .err()
-        .ok_or("no error")?;
+    let error = run_raw(
+        &setup.program,
+        &setup.secrets,
+        &setup.source,
+        &Limits::default(),
+        PATIENT,
+        rustix::process::geteuid().as_raw(),
+    )
+    .err()
+    .ok_or("no error")?;
     assert!(matches!(error, ResticError::Failed { code: Some(1) }));
     let text = text_chain(&error);
     assert!(!text.contains("hunter2") && !text.contains("stderr") && !text.contains("/srv/repo"));
@@ -375,7 +453,14 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     let missing = Path::new("/nonexistent/restic");
     assert!(matches!(
-        run_raw(missing, &setup.secrets, &setup.source, &Limits::default(), PATIENT),
+        run_raw(
+            missing,
+            &setup.secrets,
+            &setup.source,
+            &Limits::default(),
+            PATIENT,
+            rustix::process::geteuid().as_raw()
+        ),
         Err(ResticError::Spawn)
     ));
     Ok(())

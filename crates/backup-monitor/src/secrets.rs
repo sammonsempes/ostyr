@@ -67,6 +67,9 @@ pub fn open_secret_in_with(secrets: &SecretsDir, name: &str, euid: u32, inspect:
     .map_err(|errno| open_failure(String::new(), io::Error::from(errno)))?;
     let metadata = inspect(&handle).map_err(|source| SecretFileError::Io { file: String::new(), source })?;
     judge_secret("", metadata.is_file(), metadata.mode(), metadata.uid(), euid)?;
+    if metadata.nlink() > 1 {
+        Err(SecretFileError::NotRegular { file: String::new() })?;
+    }
     Ok(handle)
 }
 

@@ -11,6 +11,8 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
+use std::time::Duration;
 use tempfile::TempDir;
 
 
@@ -24,6 +26,9 @@ const GROUP_READABLE_MODE: u32 = 0o640;
 
 
 const OPEN_MODE: u32 = 0o755;
+
+
+const HANG_GUARD: Duration = Duration::from_secs(20);
 
 
 struct Setup {
@@ -213,5 +218,47 @@ fn a_refusal_has_a_fixed_category_without_the_file_name() -> Result<(), Box<dyn 
         assert_eq!(category, *expected);
         assert!(!category.contains("NAMEMARKER"));
     });
+    Ok(())
+}
+
+
+#[test]
+fn a_secret_with_another_hard_link_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup()?;
+    open_secret_in(&setup.secrets, "password", euid())?;
+    std::fs::hard_link(setup.directory.join("password"), setup.dir.path().join("elsewhere"))?;
+    assert!(matches!(
+        open_secret_in(&setup.secrets, "password", euid()),
+        Err(SecretFileError::NotRegular { .. })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_fifo_secret_is_refused_at_once_and_never_blocks_the_open() -> Result<(), Box<dyn Error>> {
+    let setup = setup()?;
+    let pipe = setup.directory.join("pipe");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &pipe,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )?;
+    let (sender, receiver) = channel();
+    let outcome = std::thread::scope(|scope| {
+        scope.spawn(|| sender.send(open_secret_in(&setup.secrets, "pipe", euid()).map(|_file| ())));
+        let answer = receiver.recv_timeout(HANG_GUARD);
+        if answer.is_err() {
+            let released = std::fs::OpenOptions::new().write(true).open(&pipe);
+            assert!(released.is_ok(), "the guard could not release the blocked open");
+        }
+        answer
+    });
+    assert!(
+        matches!(outcome, Ok(Err(SecretFileError::NotRegular { .. }))),
+        "the open of a FIFO must return a refusal at once, got {outcome:?}"
+    );
     Ok(())
 }
