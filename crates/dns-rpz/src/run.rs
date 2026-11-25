@@ -5,7 +5,7 @@ use crate::model::{Entry, RunSummary, SkipReason};
 use crate::policy::Policy;
 use crate::select::{compile_allow, decide, reason_key, Allow};
 use crate::serial::advance;
-use crate::types::Counts;
+use crate::types::{Counts, Opened};
 use crate::zone::{apply_cap, render_zone};
 use core_config::error::ConfigError;
 use core_config::parse::open_regular;
@@ -33,14 +33,21 @@ pub fn source_refusal(error: ConfigError) -> io::Error {
 }
 
 
-/// Opens a regular file only (a FIFO or device is refused without blocking) of at most `MAX_IOC_SOURCE_BYTES`; read one byte past it to see growth.
-pub fn open_file(path: &Path) -> io::Result<Box<dyn BufRead>> {
+/// Opens a regular file only (a FIFO or device is refused without blocking) of at most `MAX_IOC_SOURCE_BYTES`, with the length `fstat` gave.
+pub fn open_file_sized(path: &Path) -> io::Result<Opened> {
     let handle = open_regular(path, &path.display().to_string()).map_err(source_refusal)?;
-    if handle.metadata()?.len() > MAX_IOC_SOURCE_BYTES {
+    let length = handle.metadata()?.len();
+    if length > MAX_IOC_SOURCE_BYTES {
         Err(io::Error::other(format!("IOC source larger than {MAX_IOC_SOURCE_BYTES} bytes")))
     } else {
-        Ok(Box::new(BufReader::new(handle.take(MAX_IOC_SOURCE_BYTES + 1))))
+        Ok((Box::new(BufReader::new(handle.take(MAX_IOC_SOURCE_BYTES + 1))), Some(length)))
     }
+}
+
+
+/// The reader of `open_file_sized` alone.
+pub fn open_file(path: &Path) -> io::Result<Box<dyn BufRead>> {
+    open_file_sized(path).map(|(reader, _length)| reader)
 }
 
 
@@ -79,6 +86,7 @@ pub fn insert_entry(entries: &mut BTreeMap<String, Entry>, entry: Entry, skipped
 /// Reads the JSON lines, decides each IOC, counts every skip; a read failure ends the run before anything is written.
 pub fn collect_entries(
     input: &mut dyn BufRead,
+    expected: Option<u64>,
     policy: &Policy,
     allow: &Allow,
     now: OffsetDateTime,
@@ -100,7 +108,10 @@ pub fn collect_entries(
             Ok::<(), io::Error>(())
         }
     })?;
-    if capped.into_inner().fill_buf()?.is_empty() {
+    let consumed = MAX_IOC_SOURCE_BYTES - capped.limit();
+    if expected.is_some_and(|length| consumed < length) {
+        Err(io::Error::other("IOC source shrank while it was read"))
+    } else if capped.into_inner().fill_buf()?.is_empty() {
         Ok(entries)
     } else {
         Err(io::Error::other(format!(
@@ -112,9 +123,22 @@ pub fn collect_entries(
 
 /// Generates the zone: the serial is persisted first, then the zone replaces the previous file atomically.
 pub fn generate(policy: &Policy, input: &mut dyn BufRead, now: OffsetDateTime, counter: &Path, output: &Path) -> Result<RunSummary, RpzError> {
+    generate_sized(policy, input, None, now, counter, output)
+}
+
+
+/// `generate` for a source whose opened length is known: a read shorter than it is a failed round.
+pub fn generate_sized(
+    policy: &Policy,
+    input: &mut dyn BufRead,
+    expected: Option<u64>,
+    now: OffsetDateTime,
+    counter: &Path,
+    output: &Path,
+) -> Result<RunSummary, RpzError> {
     let allow = compile_allow(&policy.allowlist)?;
     let mut summary = RunSummary::default();
-    let entries = collect_entries(input, policy, &allow, now, &mut summary.skipped)?;
+    let entries = collect_entries(input, expected, policy, &allow, now, &mut summary.skipped)?;
     let (kept, dropped) = apply_cap(entries.into_values().collect(), policy.max_records);
     if dropped > 0 {
         warn!(dropped, "zone size cap reached, lowest confidence entries dropped");

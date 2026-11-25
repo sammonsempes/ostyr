@@ -23,7 +23,7 @@ use dns_rpz::limits::MAX_IOC_LINES;
 use dns_rpz::limits::MAX_IOC_SOURCE_BYTES;
 use dns_rpz::model::RunSummary;
 use dns_rpz::policy::{validate_policy, Policy};
-use dns_rpz::run::{count, generate, open_file};
+use dns_rpz::run::{count, generate, generate_sized, open_file, open_file_sized};
 use fixtures::fixture;
 use intel_feeds::limits::MAX_LINE_BYTES;
 use intel_feeds::model::{Ioc, IocType, Tlp};
@@ -325,5 +325,68 @@ fn a_source_at_the_byte_cap_reads_and_one_that_grows_past_it_is_a_named_failed_r
         "{result:?}"
     );
     assert!(!output.exists() && !counter.exists());
+    Ok(())
+}
+
+
+const SHRINK_FROM: usize = 1000;
+
+
+const SHRINK_TO: usize = 10;
+
+
+const SHRINK_GROWN: usize = 2000;
+
+
+#[test]
+fn a_source_that_shrinks_during_the_read_is_a_named_failed_round_and_writes_nothing() -> TestResult {
+    init_logging();
+    let dir = tempdir()?;
+    let policy = sample_policy();
+    let source = dir.path().join("iocs");
+    fs::write(&source, vec![b'\n'; SHRINK_FROM])?;
+    let counter = dir.path().join("counter");
+    let output = dir.path().join("zone.db");
+    let (mut reader, length) = open_file_sized(&source)?;
+    assert_eq!(length, Some(SHRINK_FROM as u64));
+    fs::File::options().write(true).open(&source)?.set_len(SHRINK_TO as u64)?;
+    let result = generate_sized(&policy, &mut reader, length, now(), &counter, &output);
+    assert!(
+        matches!(&result, Err(RpzError::Io(error)) if error.to_string() == "IOC source shrank while it was read"),
+        "{result:?}"
+    );
+    assert!(!output.exists() && !counter.exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_source_that_keeps_or_gains_its_length_is_read_whole() -> TestResult {
+    init_logging();
+    let dir = tempdir()?;
+    let policy = sample_policy();
+    let source = dir.path().join("iocs");
+    fs::write(&source, vec![b'\n'; SHRINK_FROM])?;
+    let (mut same, length) = open_file_sized(&source)?;
+    assert!(generate_sized(
+        &policy,
+        &mut same,
+        length,
+        now(),
+        &dir.path().join("counter"),
+        &dir.path().join("zone.db")
+    )
+    .is_ok());
+    let (mut grown, length_before) = open_file_sized(&source)?;
+    fs::write(&source, vec![b'\n'; SHRINK_GROWN])?;
+    assert!(generate_sized(
+        &policy,
+        &mut grown,
+        length_before,
+        now(),
+        &dir.path().join("counter2"),
+        &dir.path().join("zone2.db")
+    )
+    .is_ok());
     Ok(())
 }

@@ -16,13 +16,14 @@ use dns_rpz::limits::SOURCE_FAILED;
 use dns_rpz::model::{CommandStatus, Reloader};
 use dns_rpz::run::generate;
 use dns_rpz::source::{clickhouse_open, open_source};
+use dns_rpz::types::Opened;
 use engine::{audit, context, engine_for, policy_text, replace_file};
 use intel_feeds::limits::MAX_READ_BYTES;
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use logging::init_logging;
 use sample::sample_policy;
 use std::fs::{self, File};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,8 +214,8 @@ fn sample_ioc(value: &str, tlp: Tlp) -> Ioc {
 }
 
 
-fn run_from(open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>, dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut input = open(now())?;
+fn run_from(open: &dyn Fn(OffsetDateTime) -> io::Result<Opened>, dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let (mut input, _length) = open(now())?;
     generate(&sample_policy(), &mut input, now(), &dir.join("counter"), &dir.join("zone.db"))?;
     Ok(fs::read_to_string(dir.join("zone.db"))?)
 }
@@ -237,7 +238,7 @@ fn state(dir: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
 
 fn refused<Body>(
     rig: &Rig,
-    open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>,
+    open: &dyn Fn(OffsetDateTime) -> io::Result<Opened>,
     before: &(String, String),
     status: &'static str,
     body: Body,

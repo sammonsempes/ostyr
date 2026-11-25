@@ -18,11 +18,11 @@ use dns_rpz::limits::{MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK};
 use dns_rpz::model::{Capture, CommandStatus, ReloadVerdict, Reloader};
 use dns_rpz::policy::{validate_policy, Action, Policy};
 use dns_rpz::types::{ReadbackFn, RunnerFn};
-#[cfg(unix)]
-use dns_rpz::unbound::group_kill_result;
 use dns_rpz::unbound::{
     captured_text, reaped, reload_zone, render_unbound_config, run_capture, run_readback, run_reload, run_with_deadline, served_serial,
 };
+#[cfg(unix)]
+use dns_rpz::unbound::{group_kill_result, run_capture_with};
 use fixtures::fixture;
 use logging::init_logging;
 use runner::{failing_runner, succeeding_runner};
@@ -41,6 +41,10 @@ const SHORT_DEADLINE: Duration = Duration::from_millis(50);
 
 
 const LONG_DEADLINE: Duration = Duration::from_secs(60);
+
+
+#[cfg(unix)]
+const PID_DEADLINE: Duration = Duration::from_secs(5);
 
 
 const OVER_TIMEOUT: u64 = 301;
@@ -455,5 +459,30 @@ fn unacceptable_unbound_settings_are_refused() -> TestResult {
     let mut accepted = with_override(Some(Action::Nodata));
     accepted.unbound.log_name = Some("ostyr".to_owned());
     validate_policy(&accepted)?;
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn failing_group_kill(_child: &mut std::process::Child) -> io::Result<()> {
+    Err(io::Error::other("group kill refused"))
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_failed_group_kill_still_kills_and_reaps_the_leader_then_reports_its_error() -> TestResult {
+    let dir = tempdir()?;
+    let script = dir.path().join("leader.sh");
+    let pid_file = dir.path().join("leader.pid");
+    fs::write(&script, "echo $$ > \"$1\"\nexec sleep 600\n")?;
+    let arguments = [script.display().to_string(), pid_file.display().to_string()];
+    let result = run_capture_with("bash", &arguments, PID_DEADLINE, failing_group_kill);
+    assert!(result.is_err_and(|error| error.to_string() == "group kill refused"));
+    let leader_pid = fs::read_to_string(&pid_file)?.trim().to_owned();
+    assert!(
+        !std::path::Path::new(&format!("/proc/{leader_pid}")).exists(),
+        "the leader {leader_pid} was left running"
+    );
     Ok(())
 }

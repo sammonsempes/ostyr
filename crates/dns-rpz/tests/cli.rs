@@ -15,12 +15,13 @@ mod types;
 use clock::now;
 use dns_rpz::cli::{run_command, run_session, Session};
 use dns_rpz::model::Reloader;
+use dns_rpz::types::Opened;
 use engine::{audit, context, engine_for, policy_text, replace_file};
 use memory::LimitedWriter;
 use readback::{stale_readback, zone_listing};
 use runner::{failing_runner, succeeding_runner};
 use std::fs;
-use std::io::{self, BufRead, Cursor};
+use std::io::{self, Cursor};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -36,12 +37,12 @@ const IOC: &str = "{\"ioc_type\":\"domain\",\"value\":\"evil.example.com\",\"sou
 \"last_seen\":\"2026-11-03T00:00:00Z\",\"confidence\":90,\"tlp\":\"amber\",\"expires_at\":null,\"tags\":{\"malware\":[],\"actor\":[],\"campaign\":[]}}\n";
 
 
-fn open_iocs(_now: OffsetDateTime) -> io::Result<Box<dyn BufRead>> {
-    Ok(Box::new(Cursor::new(IOC.as_bytes().to_vec())))
+fn open_iocs(_now: OffsetDateTime) -> io::Result<Opened> {
+    Ok((Box::new(Cursor::new(IOC.as_bytes().to_vec())), None))
 }
 
 
-fn open_missing(_now: OffsetDateTime) -> io::Result<Box<dyn BufRead>> {
+fn open_missing(_now: OffsetDateTime) -> io::Result<Opened> {
     Err(io::Error::from(io::ErrorKind::NotFound))
 }
 
@@ -143,7 +144,7 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
         context: &zone_context,
     };
     let rejected = AtomicU64::new(0);
-    let attempt = |command: &str, room: usize, open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>| {
+    let attempt = |command: &str, room: usize, open: &dyn Fn(OffsetDateTime) -> io::Result<Opened>| {
         let mut report = LimitedWriter { remaining: room };
         let mut session = Session {
             engine: &policy,
