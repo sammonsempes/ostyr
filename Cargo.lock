@@ -2083,6 +2083,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "siem-ingest",
+ "signal-hook",
  "stream-correlation",
  "tempfile",
  "thiserror 2.0.21",

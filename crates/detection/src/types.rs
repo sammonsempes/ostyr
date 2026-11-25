@@ -3,6 +3,7 @@ use crate::model::{AlertRecord, AlertStore};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use stream_correlation::engine::Engine;
@@ -49,3 +50,7 @@ pub type SyncDirFn = fn(&Path) -> io::Result<()>;
 
 /// Records refused as permanent errors, per kind of refusal.
 pub type KindCounts = BTreeMap<String, u64>;
+
+
+/// Raised by SIGINT and SIGTERM, read by the loop between two cycles.
+pub type StopFlag = Arc<AtomicBool>;
