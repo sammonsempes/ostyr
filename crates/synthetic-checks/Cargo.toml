@@ -11,6 +11,7 @@ core-pg = { version = "0.0.0", path = "../core-pg" }
 metric-alerts = { version = "0.0.0", path = "../metric-alerts" }
 serde_json = "1"
 sha2 = "0.10"
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 getrandom = "0.4.3"
 hickory-resolver = "0.26"
@@ -22,15 +23,20 @@ serde = { version = "1", features = ["derive"] }
 socket2 = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "time", "net"] }
+tokio-postgres = "0.7"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 url = "2"
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+
 [dev-dependencies]
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
 serde-saphyr = "2"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
-tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "sync"] }
 
 [lints]
 workspace = true
