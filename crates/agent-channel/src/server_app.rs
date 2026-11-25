@@ -123,8 +123,8 @@ pub fn file_events(file: &ServerFile) -> Result<EventSink, AppError> {
 }
 
 
-/// Tells the waiting caller, if any, that the server is about to accept; a caller that stopped waiting is logged.
-pub fn announce_ready(ready: Option<ReadySender>) {
+/// Tells the waiting caller, if any, that the server is about to accept; it takes the two signal guards, so it cannot run before them.
+pub fn announce_ready<Settings, Revocations>(ready: Option<ReadySender>, _settings_signals: &Settings, _revocation_signals: &Revocations) {
     if ready.map(|sender| sender.send(())).is_some_and(|sent| sent.is_err()) {
         tracing::warn!("nobody waits for the ready signal");
     }
@@ -183,7 +183,7 @@ pub async fn run_server_with_clock(
     };
     let stop = shutdown.shared();
     let silence = tokio::spawn(watch_silence(Arc::clone(&state), stop.clone()));
-    announce_ready(ready);
+    announce_ready(ready, &_settings_signals, &_revocation_signals);
     serve_with_relay(
         Box::pin(TcpListenerStream::new(listener)),
         relay_listener,
