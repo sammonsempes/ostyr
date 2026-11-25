@@ -55,6 +55,12 @@ const TWO_RECORDS: usize = 2;
 const FEED_TABLE: &str = "FROM playbook_outbox";
 
 
+const ACK_MARKER: &str = "WITH cand AS MATERIALIZED";
+
+
+const RUNS_COUNT: &str = "count(*)::text FROM playbook_runs";
+
+
 const MAX_STATEMENTS: usize = 1_000;
 
 
@@ -306,10 +312,10 @@ fn feed_row() -> Vec<String> {
 
 fn serving_a_feed_row() -> Handler {
     Arc::new(|sql| {
-        if sql.contains(FEED_TABLE) {
-            Reply::Rows(vec![feed_row()])
-        } else if sql.contains("DELETE FROM playbook_outbox") {
+        if sql.contains(ACK_MARKER) || sql.contains("INSERT INTO playbook_runs") || sql.contains(RUNS_COUNT) {
             Reply::Rows(vec![vec!["1".to_owned()]])
+        } else if sql.contains(FEED_TABLE) {
+            Reply::Rows(vec![feed_row()])
         } else {
             Reply::Done
         }
@@ -320,12 +326,20 @@ fn serving_a_feed_row() -> Handler {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_round_with_a_stored_alert_appends_one_record_and_deletes_the_row() -> TestResult {
     let dir = tempdir()?;
-    let (fake, ca_pem) = fake_with(serving_a_feed_row()).await?;
+    let (mut fake, ca_pem) = fake_with(serving_a_feed_row()).await?;
     let settings_file = write_site(dir.path(), fake.port, &ca_pem)?;
     start(&settings_file, ONE_ROUND, never()).await?;
     let audit = fs::read_to_string(dir.path().join("audit.log"))?;
     assert!(audit.contains("playbooks.dry_run"), "{audit}");
     assert_eq!(audit.lines().count(), ONE_ROUND);
+    let statements: Vec<String> = std::iter::from_fn(|| fake.statements.try_recv().ok()).take(MAX_STATEMENTS).collect();
+    let position = |needle: &str| statements.iter().position(|sql| sql.contains(needle));
+    let begin = position("BEGIN").ok_or("no BEGIN")?;
+    let insert = position("INSERT INTO playbook_runs").ok_or("no insert")?;
+    let ack = position(ACK_MARKER).ok_or("no delete")?;
+    let commit = position("COMMIT").ok_or("no COMMIT")?;
+    assert!(begin < insert && insert < ack && ack < commit, "{statements:?}");
+    assert!(statements.iter().any(|sql| sql.contains("CREATE TABLE playbook_runs")), "{statements:?}");
     Ok(())
 }
 

@@ -3,8 +3,9 @@
 
 use crate::bundle::{open_playbooks, PlaybookSettings};
 use crate::error::RoundError;
-use crate::service::{load_settings, open_service_settings_from, run_round, serve, Live, Outcome, Replays, ROUND_KEYS};
-use crate::types::{InterruptWait, MigrateFn, MigrationRun, WaitFn};
+use crate::runs::{MIGRATIONS as RUNS_MIGRATIONS, MIGRATION_NAMESPACE as RUNS_NAMESPACE};
+use crate::service::{load_settings, open_service_settings_from, run_round, serve, Db, Live, Outcome, Replays, ROUND_KEYS};
+use crate::types::{ControlFuture, InterruptWait, MigrateFn, MigrationRun, WaitFn};
 use alerts::backend::LOG_IGNORED_CRATE;
 use alerts::error::StoreError;
 use alerts::pg::pg_executor;
@@ -18,6 +19,7 @@ use core_pg::error::PgError;
 use core_pg::migrate::migrate;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
+use core_pg::transaction::cross;
 use std::error::Error;
 use std::fs::File;
 use std::future::Future;
@@ -115,6 +117,7 @@ pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait
     let _settings_signals = keep_signals(&settings_engine)?;
     let pg_settings = Arc::new(load_pg_settings(&start.pg_settings)?);
     migrate_retrying(alerts_migration, &pg_settings, pause).await?;
+    migrate_retrying(runs_migration, &pg_settings, pause).await?;
     let tenant = Arc::new(tenant_scope(&start.tenant)?);
     let live = || Live {
         bundle: current_config(&bundle_engine),
@@ -147,6 +150,14 @@ pub fn alerts_migration(settings: Arc<PgSettings>) -> MigrationRun {
 }
 
 
+pub fn runs_migration(settings: Arc<PgSettings>) -> MigrationRun {
+    Box::pin(async move {
+        let client = connect(&settings).await?;
+        migrate(&client, RUNS_NAMESPACE, &RUNS_MIGRATIONS, statement_deadline(&settings)).await
+    })
+}
+
+
 /// Only the function search path check is retried: the platform may be between two of its migrations; any other error ends the start.
 pub async fn migrate_retrying(attempt_migration: MigrateFn, settings: &Arc<PgSettings>, wait: WaitFn) -> Result<Vec<String>, PgError> {
     let mut retries = 0;
@@ -175,8 +186,14 @@ async fn one_round(
     snapshot: Live,
 ) -> Result<Outcome, RoundError> {
     let client = connect(&pg).await.map_err(StoreError::Pg)?;
-    let exec = pg_executor(&client, statement_deadline(&pg));
+    let deadline = statement_deadline(&pg);
+    let exec = pg_executor(&client, deadline);
+    let control = |boundary| -> ControlFuture<'_> { Box::pin(cross(&client, boundary, deadline)) };
+    let db = Db {
+        exec: &exec,
+        control: &control,
+    };
     let audit = |entry| append_declared(&log, entry, &ROUND_KEYS).map(|_record| ());
     let mut state = replays.lock().await;
-    run_round(&exec, &scope, &snapshot, &audit, OffsetDateTime::now_utc, &mut stdout(), &mut state).await
+    run_round(&db, &scope, &snapshot, &audit, OffsetDateTime::now_utc, &mut stdout(), &mut state).await
 }
