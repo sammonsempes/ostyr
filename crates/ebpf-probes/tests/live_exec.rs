@@ -3,9 +3,11 @@
 use aya::programs::loaded_programs;
 use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
 use ebpf_probes::error::LoadError;
-use ebpf_probes::loader::{drain_exec, drain_probes, load_exec_probe, load_exec_probe_from_bytes, prepare_probes_from_bytes, run_exec_probe, Probe};
+use ebpf_probes::loader::{
+    drain_exec, drain_probes, load_exec_probe, load_exec_probe_from_bytes, prepare_probes_from_bytes, run_exec_probe, Probe, ProbeDrained,
+};
 use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
-use ebpf_probes::shape::{ProbeSpec, ShapeError, EXEC_PROBE, PROGRAM_NAME};
+use ebpf_probes::shape::{ProbeSpec, ShapeError, EXEC_PROBE, FILE_PROBE, PROGRAM_NAME};
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
@@ -166,7 +168,7 @@ fn a_table_naming_a_missing_section_fails_whole_and_named_and_loads_nothing() ->
         program: GHOST_PROGRAM,
         ..EXEC_PROBE
     };
-    let refused = prepare_probes_from_bytes(&bytes, &[EXEC_PROBE, ghost])
+    let refused = prepare_probes_from_bytes(&bytes, &[EXEC_PROBE, FILE_PROBE, ghost])
         .err()
         .ok_or("a missing section loaded")?;
     assert_eq!(refused, LoadError::Shape(ShapeError::MissingProgram(GHOST_PROGRAM)));
@@ -183,8 +185,10 @@ fn the_shared_drain_reports_each_probe_by_name() -> Result<(), Box<dyn Error>> {
     let child = run_true_as_nobody()?;
     let drains = drain_probes(&mut probe, MAX_DRAIN_PER_POLL);
     let names: Vec<&str> = drains.iter().map(|entry| entry.name).collect();
-    assert_eq!(names, [EXEC_PROBE.name]);
-    let found = drains.iter().any(|entry| entry.drained.records.iter().any(|record| record.pid == child));
+    assert_eq!(names, [EXEC_PROBE.name, FILE_PROBE.name]);
+    let found = drains
+        .iter()
+        .any(|entry| matches!(&entry.drained, ProbeDrained::Exec(drained) if drained.records.iter().any(|record| record.pid == child)));
     assert!(found, "no record for pid {child}");
     Ok(())
 }
