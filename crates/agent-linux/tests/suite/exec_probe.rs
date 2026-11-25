@@ -6,8 +6,9 @@ use agent_linux::error::SourceError;
 use agent_linux::exec_events::ExecSink;
 use agent_linux::exec_probe::{
     end_on_spool_error, finish, join_ended, not_built, observe, probe_entry, record, run_exec_controller, settle_ended, spawn_thread, start,
-    start_if_due, tick, Controller, ProbeEnv, ProbeRun, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_JOIN_POLL_MILLIS, EXEC_PROBE_LOAD_DEADLINE_SECONDS,
-    EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED, RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED, RESULT_UNLOAD_UNKNOWN,
+    start_if_due, stop_exec_controller, tick, Controller, ProbeEnv, ProbeRun, ACTION_LOAD, ACTION_UNLOAD, EXEC_PROBE_JOIN_POLL_MILLIS,
+    EXEC_PROBE_LOAD_DEADLINE_SECONDS, EXEC_PROBE_RETRY_SECONDS, PRODUCTION_PROBE, RESULT_ABANDONED, RESULT_FAILED, RESULT_LOADED, RESULT_UNLOADED,
+    RESULT_UNLOAD_UNKNOWN,
 };
 use agent_linux::model::{ExecProbeSettings, SourceSettings};
 use agent_linux::settings::{open_settings_engine, settings_state};
@@ -414,7 +415,8 @@ async fn the_controller_applies_the_setting_one_snapshot_per_tick() -> TestResul
         Box::pin(async {})
     };
     let clock = || 0;
-    let controller = run_exec_controller(&shared, &env, sink.audit.as_ref(), TICKS, &pause, &clock).await?;
+    let mut controller = Controller::default();
+    run_exec_controller(&mut controller, &shared, &env, sink.audit.as_ref(), TICKS, &pause, &clock).await?;
     assert_eq!(calls.load(Ordering::SeqCst), TICKS);
     let run = controller.run.as_ref().ok_or("the probe should still be winding down")?;
     assert!(run.guard.stop.load(Ordering::Relaxed));
@@ -558,7 +560,8 @@ async fn a_failing_spool_write_of_the_probe_ends_the_controller_with_the_error()
         Box::pin(async {})
     };
     let clock = || 0;
-    let ended = run_exec_controller(&shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
+    let mut controller = Controller::default();
+    let ended = run_exec_controller(&mut controller, &shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
     assert!(ended.is_err());
     Ok(())
 }
@@ -566,7 +569,7 @@ async fn a_failing_spool_write_of_the_probe_ends_the_controller_with_the_error()
 
 #[test]
 fn a_spool_error_of_the_controller_ends_the_agent_and_a_normal_end_does_not() -> TestResult {
-    assert!(end_on_spool_error(Ok(Controller::default())).is_ok());
+    assert!(end_on_spool_error(Ok(())).is_ok());
     let ended = end_on_spool_error(Err(io::Error::other("spool gone")));
     assert!(matches!(ended, Err(SourceError::Io(_))));
     Ok(())
@@ -690,6 +693,15 @@ fn a_thread_with_nothing_pending_writes_no_final_status() -> TestResult {
 }
 
 
+fn sleeping_pause(_: Duration) -> PauseFuture {
+    std::thread::sleep(Duration::from_millis(SLEEPING_PAUSE_MILLIS));
+    Box::pin(async {})
+}
+
+
+const SLEEPING_PAUSE_MILLIS: u64 = 10;
+
+
 fn immediate_pause(_: Duration) -> PauseFuture {
     Box::pin(async {})
 }
@@ -735,8 +747,10 @@ async fn a_spool_failure_joins_the_probe_and_audits_its_unload_before_the_agent_
         Box::pin(async {})
     };
     let clock = || 0;
-    let ended = run_exec_controller(&shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
+    let mut controller = Controller::default();
+    let ended = run_exec_controller(&mut controller, &shared, &env, sink.audit.as_ref(), u64::from(SPIN_CAP), &pause, &clock).await;
     assert!(ended.is_err());
+    stop_exec_controller(controller, &env, sink.audit.as_ref(), &pause).await?;
     let text = audited(&sink)?;
     assert_eq!(text.matches(ACTION_LOAD).count(), 1, "{text}");
     assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
@@ -745,10 +759,47 @@ async fn a_spool_failure_joins_the_probe_and_audits_its_unload_before_the_agent_
 }
 
 
+fn hold_file(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("exec-probe-hold-{name}-{}", std::process::id()))
+}
+
+
+fn hold_until_released(name: &str) {
+    (0..SPIN_CAP)
+        .take_while(|_| !hold_file(name).exists())
+        .for_each(|_| std::thread::sleep(Duration::from_millis(1)));
+}
+
+
+fn release_hold(name: &str) -> io::Result<()> {
+    fs::write(hold_file(name), "")
+}
+
+
+fn probe_deaf_unreported(_stop: &AtomicBool, _max_polls: u32, attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    attached();
+    hold_until_released("unreported");
+    Ok(0)
+}
+
+
+fn probe_deaf_reported(_stop: &AtomicBool, _max_polls: u32, attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    attached();
+    hold_until_released("reported");
+    Ok(0)
+}
+
+
+fn probe_deaf_unattached(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
+    hold_until_released("unattached");
+    Ok(0)
+}
+
+
 #[tokio::test]
 async fn a_probe_that_outlives_the_join_deadline_is_audited_as_unload_unknown() -> TestResult {
     let sink = audit()?;
-    let env = environment(probe_attached_only);
+    let env = environment(probe_deaf_unreported);
     let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
     wait_until(|| loaded(&started))?;
     let joined = join_ended(started, &env, sink.audit.as_ref(), &immediate_pause).await;
@@ -757,6 +808,7 @@ async fn a_probe_that_outlives_the_join_deadline_is_audited_as_unload_unknown() 
     assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
     assert!(text.contains(RESULT_UNLOAD_UNKNOWN) && text.contains(RESULT_LOADED), "{text}");
     assert!(!text.contains(RESULT_UNLOADED), "{text}");
+    release_hold("unreported")?;
     Ok(())
 }
 
@@ -764,7 +816,7 @@ async fn a_probe_that_outlives_the_join_deadline_is_audited_as_unload_unknown() 
 #[tokio::test]
 async fn a_load_already_audited_is_not_audited_again_when_the_unload_is_unknown() -> TestResult {
     let sink = audit()?;
-    let env = environment(probe_attached_only);
+    let env = environment(probe_deaf_reported);
     let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
     wait_until(|| loaded(&started))?;
     let reported = tick(started, true, 1, &env, sink.audit.as_ref());
@@ -773,6 +825,7 @@ async fn a_load_already_audited_is_not_audited_again_when_the_unload_is_unknown(
     let text = audited(&sink)?;
     assert_eq!(text.matches(ACTION_LOAD).count(), 1, "{text}");
     assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
+    release_hold("reported")?;
     Ok(())
 }
 
@@ -799,12 +852,13 @@ fn a_final_status_the_spool_refuses_is_logged_and_the_thread_still_ends() -> Tes
 #[tokio::test]
 async fn a_probe_that_never_attached_and_outlives_the_deadline_is_abandoned_and_no_run_is_a_no_op() -> TestResult {
     let sink = audit()?;
-    let env = environment(probe_slow);
+    let env = environment(probe_deaf_unattached);
     let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
     let joined = join_ended(started, &env, sink.audit.as_ref(), &immediate_pause).await;
     assert!(joined.run.is_none());
     let text = audited(&sink)?;
     assert!(text.contains(RESULT_ABANDONED) && !text.contains(ACTION_UNLOAD), "{text}");
+    release_hold("unattached")?;
     let idle = join_ended(Controller::default(), &env, sink.audit.as_ref(), &immediate_pause).await;
     assert!(idle.run.is_none());
     Ok(())
@@ -832,5 +886,32 @@ fn an_error_sent_just_before_the_thread_ends_is_never_lost_by_the_join() -> Test
     wait_until(|| held.handle.is_finished())?;
     let settled = finish(Controller::default(), held, &env, sink.audit.as_ref());
     assert!(settled.spool_error.is_some());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_stop_path_stops_a_running_probe_and_audits_its_unload() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_attached_only);
+    let started = tick(Controller::default(), true, 0, &env, sink.audit.as_ref());
+    wait_until(|| loaded(&started))?;
+    stop_exec_controller(started, &env, sink.audit.as_ref(), &sleeping_pause).await?;
+    let text = audited(&sink)?;
+    assert_eq!(text.matches(ACTION_UNLOAD).count(), 1, "{text}");
+    assert!(text.contains(RESULT_UNLOADED) && !text.contains(RESULT_UNLOAD_UNKNOWN), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_stop_path_returns_a_spool_error_it_holds() -> TestResult {
+    let sink = audit()?;
+    let env = environment(probe_slow);
+    let held = Controller {
+        spool_error: Some(io::Error::other("spool gone")),
+        ..Controller::default()
+    };
+    assert!(stop_exec_controller(held, &env, sink.audit.as_ref(), &immediate_pause).await.is_err());
     Ok(())
 }

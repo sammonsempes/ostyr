@@ -363,37 +363,39 @@ pub fn tick(controller: Controller, enabled: bool, now: u64, env: &ProbeEnv, aud
 }
 
 
-/// Runs `max_ticks` ticks one `EXEC_PROBE_TICK_SECONDS` apart, reading the setting snapshot once per tick; the reload only stores the setting, this loop applies it. A failing spool write of the probe thread ends the loop with that error. Dropping the returned controller stops the probe.
+/// Runs `max_ticks` ticks one `EXEC_PROBE_TICK_SECONDS` apart on the caller's controller, reading the setting snapshot once per tick; the reload only stores the setting, this loop applies it. A failing spool write of the probe thread ends the loop with that error. The controller stays with the caller, so a dropped loop leaves it for `stop_exec_controller`.
 pub async fn run_exec_controller(
+    controller: &mut Controller,
     shared: &SharedExecProbe,
     env: &ProbeEnv,
     audit: &SharedAuditFn,
     max_ticks: u64,
     pause: &PauseFn,
     monotonic: &(dyn Fn() -> u64 + Sync),
-) -> io::Result<Controller> {
-    let mut controller = Controller::default();
+) -> io::Result<()> {
     let mut ticks = 0;
     while controller.spool_error.is_none() && ticks < max_ticks.min(EXEC_PROBE_MAX_TICKS) {
         let enabled = shared.load().enabled;
-        controller = tick(controller, enabled, monotonic(), env, audit);
+        *controller = tick(std::mem::take(controller), enabled, monotonic(), env, audit);
         pause(Duration::from_secs(EXEC_PROBE_TICK_SECONDS)).await;
         ticks += 1;
     }
-    let mut ended = if controller.spool_error.is_some() {
-        join_ended(controller, env, audit, pause).await
-    } else {
-        controller
-    };
-    match ended.spool_error.take() {
-        Some(error) => Err(error),
-        None => Ok(ended),
-    }
+    controller.spool_error.take().map_or(Ok(()), Err)
 }
 
 
-/// The probe thread of an ended controller, joined under a deadline of `EXEC_PROBE_JOIN_POLLS` pauses so its unload is audited: `finish` when it ended, else `settle_unjoined`.
+/// The one stop path of every agent end (a normal end, a producer's error, SIGTERM): sets the probe's stop flag, joins it under the `EXEC_PROBE_JOIN_POLLS` deadline so its unload is audited, and returns a spool error the join found.
+pub async fn stop_exec_controller(controller: Controller, env: &ProbeEnv, audit: &SharedAuditFn, pause: &PauseFn) -> io::Result<()> {
+    let mut ended = join_ended(controller, env, audit, pause).await;
+    ended.spool_error.take().map_or(Ok(()), Err)
+}
+
+
+/// The probe thread of an ended controller, stopped and joined under a deadline of `EXEC_PROBE_JOIN_POLLS` pauses so its unload is audited: `finish` when it ended, else `settle_unjoined`.
 pub async fn join_ended(controller: Controller, env: &ProbeEnv, audit: &SharedAuditFn, pause: &PauseFn) -> Controller {
+    if let Some(run) = controller.run.as_ref() {
+        run.guard.stop.store(true, Ordering::Relaxed);
+    }
     let mut polls = 0;
     while controller.run.as_ref().is_some_and(|run| !run.handle.is_finished()) && polls < EXEC_PROBE_JOIN_POLLS {
         pause(Duration::from_millis(EXEC_PROBE_JOIN_POLL_MILLIS)).await;
@@ -417,9 +419,8 @@ pub async fn join_ended(controller: Controller, env: &ProbeEnv, audit: &SharedAu
 
 
 /// The agent's view of the controller's end: a failing spool write of the probe thread is logged and ends the agent, a normal end is fine.
-pub fn end_on_spool_error(ended: io::Result<Controller>) -> Result<(), SourceError> {
+pub fn end_on_spool_error(ended: io::Result<()>) -> Result<(), SourceError> {
     ended
-        .map(|_| ())
         .inspect_err(|error| tracing::error!(%error, "exec probe spool failed, the agent stops"))
         .map_err(SourceError::from)
 }
