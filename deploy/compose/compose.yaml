@@ -94,6 +94,55 @@ services:
     volumes:
       - ./config:/etc/ostyr:ro
       - playbooksstate:/var/lib/ostyr-playbooks
+  nats:
+    image: nats:2.15.2-scratch@sha256:965fc69c168a39f2bfd63a68361288beb0cc64ca60c8c308bf6c0eb74f463b1d
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["--config", "/run/secrets/nats_conf"]
+    secrets: [nats_conf, nats_server_key, nats_server_cert]
+    volumes:
+      - natsdata:/data
+  gateway:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65534:65534
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      RUST_LOG: info
+    command: ["/usr/local/bin/ostyr-event-gateway", "/etc/ostyr/gateway-server.yaml", "/etc/ostyr/gateway.yaml"]
+    depends_on:
+      - nats
+    secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - gatewaystate:/var/lib/ostyr-gateway
+    networks:
+      default:
+        ipv4_address: 172.29.63.11
+  relay:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    user: 65531:65531
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"]
+    depends_on:
+      - gateway
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - relaystate:/var/lib/ostyr-relay
+    networks:
+      default:
+        ipv4_address: 172.29.63.12
+    ports:
+      - "0.0.0.0:7443:7443"
 networks:
   default:
     ipam:
@@ -105,6 +154,9 @@ volumes:
   state: {}
   webstate: {}
   playbooksstate: {}
+  natsdata: {}
+  gatewaystate: {}
+  relaystate: {}
 secrets:
   pg_password:
     file: ./secrets/pg_password
@@ -124,3 +176,17 @@ secrets:
     file: ./secrets/api_tls.crt
   store_key:
     file: ./secrets/store.key
+  gateway_tls_key:
+    file: ./secrets/gateway_tls.key
+  gateway_tls_cert:
+    file: ./secrets/gateway_tls.crt
+  nats_server_key:
+    file: ./secrets/nats_server.key
+  nats_server_cert:
+    file: ./secrets/nats_server.crt
+  nats_conf:
+    file: ./secrets/nats.conf
+  agent_ca:
+    file: ./secrets/agent_ca.crt
+  nats_gateway_password:
+    file: ./secrets/nats_gateway_password

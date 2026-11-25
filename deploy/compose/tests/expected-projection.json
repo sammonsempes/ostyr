@@ -14,6 +14,10 @@
     }
   },
   "secrets": {
+    "agent_ca": {
+      "file": "secrets/agent_ca.crt",
+      "name": "ostyr_agent_ca"
+    },
     "api_tls_cert": {
       "file": "secrets/api_tls.crt",
       "name": "ostyr_api_tls_cert"
@@ -21,6 +25,30 @@
     "api_tls_key": {
       "file": "secrets/api_tls.key",
       "name": "ostyr_api_tls_key"
+    },
+    "gateway_tls_cert": {
+      "file": "secrets/gateway_tls.crt",
+      "name": "ostyr_gateway_tls_cert"
+    },
+    "gateway_tls_key": {
+      "file": "secrets/gateway_tls.key",
+      "name": "ostyr_gateway_tls_key"
+    },
+    "nats_conf": {
+      "file": "secrets/nats.conf",
+      "name": "ostyr_nats_conf"
+    },
+    "nats_gateway_password": {
+      "file": "secrets/nats_gateway_password",
+      "name": "ostyr_nats_gateway_password"
+    },
+    "nats_server_cert": {
+      "file": "secrets/nats_server.crt",
+      "name": "ostyr_nats_server_cert"
+    },
+    "nats_server_key": {
+      "file": "secrets/nats_server.key",
+      "name": "ostyr_nats_server_key"
     },
     "pg_ca": {
       "file": "secrets/ca.crt",
@@ -52,6 +80,119 @@
     }
   },
   "services": {
+    "gateway": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-event-gateway",
+        "/etc/ostyr/gateway-server.yaml",
+        "/etc/ostyr/gateway.yaml"
+      ],
+      "depends_on": {
+        "nats": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "RUST_LOG": "info"
+      },
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": {
+          "ipv4_address": "172.29.63.11"
+        }
+      },
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "gateway_tls_key",
+          "target": "/run/secrets/gateway_tls_key"
+        },
+        {
+          "source": "gateway_tls_cert",
+          "target": "/run/secrets/gateway_tls_cert"
+        },
+        {
+          "source": "agent_ca",
+          "target": "/run/secrets/agent_ca"
+        },
+        {
+          "source": "nats_gateway_password",
+          "target": "/run/secrets/nats_gateway_password"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65534:65534",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "gatewaystate",
+          "target": "/var/lib/ostyr-gateway",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "nats": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "--config",
+        "/run/secrets/nats_conf"
+      ],
+      "entrypoint": null,
+      "image": "nats:2.15.2-scratch@sha256:965fc69c168a39f2bfd63a68361288beb0cc64ca60c8c308bf6c0eb74f463b1d",
+      "networks": {
+        "default": null
+      },
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "nats_conf",
+          "target": "/run/secrets/nats_conf"
+        },
+        {
+          "source": "nats_server_key",
+          "target": "/run/secrets/nats_server_key"
+        },
+        {
+          "source": "nats_server_cert",
+          "target": "/run/secrets/nats_server_cert"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "source": "natsdata",
+          "target": "/data",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
     "platform": {
       "cap_drop": [
         "ALL"
@@ -283,6 +424,62 @@
         }
       ]
     },
+    "relay": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/ostyr-relay",
+        "/etc/ostyr/relay.yaml",
+        "/var/lib/ostyr-relay/relay-audit.log"
+      ],
+      "depends_on": {
+        "gateway": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": {
+          "ipv4_address": "172.29.63.12"
+        }
+      },
+      "ports": [
+        {
+          "host_ip": "0.0.0.0",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "7443",
+          "target": 7443
+        }
+      ],
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "user": "65531:65531",
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "relaystate",
+          "target": "/var/lib/ostyr-relay",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
     "web": {
       "cap_drop": [
         "ALL"
@@ -353,11 +550,20 @@
     }
   },
   "volumes": {
+    "gatewaystate": {
+      "name": "ostyr_gatewaystate"
+    },
+    "natsdata": {
+      "name": "ostyr_natsdata"
+    },
     "pgdata": {
       "name": "ostyr_pgdata"
     },
     "playbooksstate": {
       "name": "ostyr_playbooksstate"
+    },
+    "relaystate": {
+      "name": "ostyr_relaystate"
     },
     "state": {
       "name": "ostyr_state"
