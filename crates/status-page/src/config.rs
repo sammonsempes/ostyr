@@ -1,5 +1,6 @@
 use crate::error::StatusPageError;
 use crate::model::{ComponentConfig, ComponentState, Limits, PageConfig, RuleConfig};
+use crate::store::{check_marks, check_readable, is_refused};
 use core_config::load::load_file;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -8,6 +9,16 @@ use std::path::Path;
 pub fn check_text(field: &'static str, text: &str, limit: usize) -> Result<(), StatusPageError> {
     if text.len() > limit {
         Err(StatusPageError::TextTooLong { field, limit })
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_display_text(field: &'static str, text: &str, limit: usize) -> Result<(), StatusPageError> {
+    check_text(field, text, limit)?;
+    if text.chars().any(|character| is_refused(character, false)) || check_readable(field, text).is_err() || check_marks(field, text).is_err() {
+        Err(StatusPageError::TextInvalid { field })
     } else {
         Ok(())
     }
@@ -59,9 +70,9 @@ pub fn validate_config(config: &PageConfig, limits: &Limits) -> Result<(), Statu
     check_count("components", config.components.len(), limits.max_components)?;
     check_text("id", &config.id, limit)?;
     check_text("tenant", &config.tenant, limit)?;
-    check_text("title", &config.title, limit)?;
+    check_display_text("title", &config.title, limit)?;
     config.components.iter().try_for_each(|component| {
-        check_text("component name", &component.name, limit).and_then(|()| check_text("service", &component.service, limit))
+        check_display_text("component name", &component.name, limit).and_then(|()| check_text("service", &component.service, limit))
     })?;
     config.components.iter().try_for_each(|component| {
         component

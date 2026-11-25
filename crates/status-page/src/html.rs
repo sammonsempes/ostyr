@@ -47,7 +47,7 @@ pub fn incident_item(incident: &PublicIncident) -> String {
         .map(|update| format!("<li>{}: {}</li>", update.at, encode_text(&update.message)))
         .collect();
     let cut = if incident.omitted_updates > 0 {
-        format!("<p>{} older updates not shown.</p>", incident.omitted_updates)
+        format!("<p>{} updates not shown.</p>", incident.omitted_updates)
     } else {
         String::new()
     };

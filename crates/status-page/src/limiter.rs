@@ -56,6 +56,7 @@ pub fn new_state(tenant: String, settings: SharedSettings, now: Box<NowFn>) -> P
         omitted_seen: AtomicUsize::new(0),
         omitted_ongoing_seen: AtomicUsize::new(0),
         omitted_size_seen: AtomicBool::new(false),
+        refused_seen: (AtomicUsize::new(0), AtomicUsize::new(0)),
     }
 }
 
