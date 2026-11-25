@@ -1,0 +1,458 @@
+{
+ "anssi-linux": {
+  "sysctl-ip-forward": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-rp-filter": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-accept-redirects": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-send-redirects": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-source-route": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-syncookies": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-aslr": {
+   "pass": [
+    {
+     "current_value": "2"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-dmesg-restrict": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-kptr-restrict": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "0"
+    }
+   ]
+  },
+  "sysctl-ptrace-scope": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "0"
+    }
+   ]
+  },
+  "sysctl-protected-symlinks": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-protected-hardlinks": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "sysctl-suid-dumpable": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "accounts-single-uid0": {
+   "pass": [],
+   "fail": [
+    {
+     "username": "toor"
+    }
+   ]
+  },
+  "accounts-no-empty-password": {
+   "pass": [],
+   "fail": [
+    {
+     "username": "guest"
+    }
+   ]
+  },
+  "file-passwd-mode": {
+   "pass": [
+    {
+     "mode": "0644"
+    }
+   ],
+   "fail": [
+    {
+     "mode": "0666"
+    }
+   ]
+  },
+  "file-shadow-mode": {
+   "pass": [
+    {
+     "mode": "0640"
+    }
+   ],
+   "fail": [
+    {
+     "mode": "0644"
+    }
+   ]
+  },
+  "mount-tmp-nosuid": {
+   "pass": [
+    {
+     "flags": "rw,nosuid,nodev"
+    }
+   ],
+   "fail": [
+    {
+     "flags": "rw,relatime"
+    }
+   ]
+  },
+  "network-no-legacy-listeners": {
+   "pass": [],
+   "fail": [
+    {
+     "port": "23"
+    }
+   ]
+  }
+ },
+ "disa-stig-rhel9": {
+  "rhel-09-aslr": {
+   "pass": [
+    {
+     "current_value": "2"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-dmesg-restrict": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-kptr-restrict": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "0"
+    }
+   ]
+  },
+  "rhel-09-ptrace-scope": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "0"
+    }
+   ]
+  },
+  "rhel-09-ip-forward": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-accept-redirects": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-send-redirects": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-source-route": {
+   "pass": [
+    {
+     "current_value": "0"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-rp-filter": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-syncookies": {
+   "pass": [
+    {
+     "current_value": "1"
+    }
+   ],
+   "fail": [
+    {
+     "current_value": "7"
+    }
+   ]
+  },
+  "rhel-09-uid0-only-root": {
+   "pass": [],
+   "fail": [
+    {
+     "username": "toor"
+    }
+   ]
+  },
+  "rhel-09-no-empty-password": {
+   "pass": [],
+   "fail": [
+    {
+     "username": "guest"
+    }
+   ]
+  },
+  "rhel-09-passwd-mode": {
+   "pass": [
+    {
+     "mode": "0644"
+    }
+   ],
+   "fail": [
+    {
+     "mode": "0666"
+    }
+   ]
+  },
+  "rhel-09-passwd-owner": {
+   "pass": [
+    {
+     "uid": "0"
+    }
+   ],
+   "fail": [
+    {
+     "uid": "1000"
+    }
+   ]
+  },
+  "rhel-09-shadow-mode": {
+   "pass": [
+    {
+     "mode": "0000"
+    }
+   ],
+   "fail": [
+    {
+     "mode": "0640"
+    }
+   ]
+  },
+  "rhel-09-gshadow-mode": {
+   "pass": [
+    {
+     "mode": "0000"
+    }
+   ],
+   "fail": [
+    {
+     "mode": "0640"
+    }
+   ]
+  },
+  "rhel-09-tmp-nodev": {
+   "pass": [
+    {
+     "flags": "rw,nosuid,nodev"
+    }
+   ],
+   "fail": [
+    {
+     "flags": "rw,relatime"
+    }
+   ]
+  },
+  "rhel-09-tmp-noexec": {
+   "pass": [
+    {
+     "flags": "rw,noexec"
+    }
+   ],
+   "fail": [
+    {
+     "flags": "rw,relatime"
+    }
+   ]
+  },
+  "rhel-09-tmp-nosuid": {
+   "pass": [
+    {
+     "flags": "rw,nosuid"
+    }
+   ],
+   "fail": [
+    {
+     "flags": "rw,relatime"
+    }
+   ]
+  },
+  "rhel-09-no-telnet-server": {
+   "pass": [],
+   "fail": [
+    {
+     "name": "telnet-server"
+    }
+   ]
+  },
+  "rhel-09-no-ypserv": {
+   "pass": [],
+   "fail": [
+    {
+     "name": "ypserv"
+    }
+   ]
+  }
+ }
+}

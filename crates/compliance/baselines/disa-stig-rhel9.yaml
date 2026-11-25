@@ -1,0 +1,206 @@
+version: 1
+tenant: template
+name: disa-stig-rhel9
+controls:
+  - id: rhel-09-aslr
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.randomize_va_space'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '2'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257809'
+  - id: rhel-09-dmesg-restrict
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.dmesg_restrict'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257797'
+  - id: rhel-09-kptr-restrict
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.kptr_restrict'''
+    expect:
+      column_matches:
+        column: current_value
+        pattern: '^[12]$'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257800'
+  - id: rhel-09-ptrace-scope
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.yama.ptrace_scope'''
+    expect:
+      column_matches:
+        column: current_value
+        pattern: '^[123]$'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257811'
+  - id: rhel-09-ip-forward
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.ip_forward'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257970'
+  - id: rhel-09-accept-redirects
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.accept_redirects'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257963'
+  - id: rhel-09-send-redirects
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.send_redirects'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257968'
+  - id: rhel-09-source-route
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.accept_source_route'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257959'
+  - id: rhel-09-rp-filter
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.rp_filter'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257962'
+  - id: rhel-09-syncookies
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.tcp_syncookies'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257957'
+  - id: rhel-09-uid0-only-root
+    query: 'SELECT username FROM users WHERE uid = 0 AND username != ''root'''
+    expect:
+      row_count: 0
+    severity: high
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-258059'
+  - id: rhel-09-no-empty-password
+    query: 'SELECT username FROM shadow WHERE password_status = ''empty'''
+    expect:
+      row_count: 0
+    severity: high
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-258094'
+  - id: rhel-09-passwd-mode
+    query: 'SELECT mode FROM file WHERE path = ''/etc/passwd'''
+    expect:
+      column_matches:
+        column: mode
+        pattern: '^0[0-7][0-4][0-4]$'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257895'
+  - id: rhel-09-passwd-owner
+    query: 'SELECT uid FROM file WHERE path = ''/etc/passwd'''
+    expect:
+      column_equals:
+        column: uid
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257906'
+  - id: rhel-09-shadow-mode
+    query: 'SELECT mode FROM file WHERE path = ''/etc/shadow'''
+    expect:
+      column_equals:
+        column: mode
+        value: '0000'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257934'
+  - id: rhel-09-gshadow-mode
+    query: 'SELECT mode FROM file WHERE path = ''/etc/gshadow'''
+    expect:
+      column_equals:
+        column: mode
+        value: '0000'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257893'
+  - id: rhel-09-tmp-nodev
+    query: 'SELECT flags FROM mounts WHERE path = ''/tmp'''
+    expect:
+      column_matches:
+        column: flags
+        pattern: '(^|,)nodev(,|$)'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257866'
+  - id: rhel-09-tmp-noexec
+    query: 'SELECT flags FROM mounts WHERE path = ''/tmp'''
+    expect:
+      column_matches:
+        column: flags
+        pattern: '(^|,)noexec(,|$)'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257867'
+  - id: rhel-09-tmp-nosuid
+    query: 'SELECT flags FROM mounts WHERE path = ''/tmp'''
+    expect:
+      column_matches:
+        column: flags
+        pattern: '(^|,)nosuid(,|$)'
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257868'
+  - id: rhel-09-no-telnet-server
+    query: 'SELECT name FROM rpm_packages WHERE name = ''telnet-server'''
+    expect:
+      row_count: 0
+    severity: high
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257831'
+  - id: rhel-09-no-ypserv
+    query: 'SELECT name FROM rpm_packages WHERE name = ''ypserv'''
+    expect:
+      row_count: 0
+    severity: medium
+    frameworks:
+      - framework: disa_stig
+        reference: 'V-257829'
