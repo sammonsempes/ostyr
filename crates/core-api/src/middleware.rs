@@ -1,11 +1,12 @@
 use crate::failure::{auth_failure, error_response};
 use crate::model::{
-    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Rule, Window,
+    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, DetachedPool, Exchange, ForwardedBy, Limits, RequestId, Requirement,
+    Rule, Window,
 };
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
 use crate::server::admit_connection;
-use crate::state::{lock_auth, refresh_accounts, session_revoked, MAX_DETACHED_PER_SOURCE};
-use crate::types::{DetachedPermit, SharedState};
+use crate::state::{lock_auth, refresh_accounts, session_revoked, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_READS_PER_SOURCE};
+use crate::types::{ConnectionTable, DetachedPermit, SharedState};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
@@ -30,10 +31,11 @@ use http_body_util::LengthLimitError;
 use secrecy::SecretString;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 use time::{Duration, OffsetDateTime};
+use tracing::instrument::WithSubscriber;
 
 
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -466,33 +468,49 @@ pub fn audit_response(app: &ApiState, template: Exchange, response: Response) ->
 }
 
 
-/// A state-changing request under a session or a permission runs detached (T769); public routes (login, OIDC) never do.
-pub fn detaches(rule: Option<&Rule>, state_changing: bool) -> bool {
-    state_changing
-        && matches!(
-            rule.map(|found| &found.requirement),
-            Some(Requirement::Session | Requirement::Permission(_))
-        )
+/// A request under a session or a permission runs detached, whatever its method (T769, T883); public routes (login, OIDC) never do.
+pub fn detaches(rule: Option<&Rule>) -> bool {
+    matches!(
+        rule.map(|found| &found.requirement),
+        Some(Requirement::Session | Requirement::Permission(_))
+    )
 }
 
 
-/// Takes the per-source slot then a global slot of the detached writes, never queueing; `None` when either is full.
-pub fn admit_detached(app: &ApiState, source: IpAddr) -> Option<DetachedPermit> {
-    admit_connection(&app.detached_sources, source, MAX_DETACHED_PER_SOURCE).and_then(|slot| {
-        app.detached
-            .permits
+/// Takes the per-source slot then a global permit of `pool`, never queueing; `None` when either is full.
+pub fn admit_in(pool: &DetachedPool, sources: &ConnectionTable, per_source: usize, source: IpAddr) -> Option<DetachedPermit> {
+    admit_connection(sources, source, per_source).and_then(|slot| {
+        pool.permits
             .clone()
             .try_acquire_owned()
-            .inspect_err(|error| tracing::debug!(%error, "detached write pool full"))
+            .inspect_err(|error| tracing::debug!(%error, "detached pool full"))
             .ok()
             .map(|permit| (permit, slot))
     })
 }
 
 
+/// Takes a slot of the detached writes.
+pub fn admit_detached(app: &ApiState, source: IpAddr) -> Option<DetachedPermit> {
+    admit_in(&app.detached, &app.detached_sources, MAX_DETACHED_PER_SOURCE, source)
+}
+
+
+/// Takes a slot of the detached reads, a pool and a per-source table apart from the writes.
+pub fn admit_detached_read(app: &ApiState, source: IpAddr) -> Option<DetachedPermit> {
+    admit_in(&app.detached_reads, &app.detached_read_sources, MAX_DETACHED_READS_PER_SOURCE, source)
+}
+
+
+/// Counts a refusal and returns the count.
+pub fn count_refusal(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+}
+
+
 /// Counts a refused detached write and warns when the count is a power of two, so the log stays bounded.
 pub fn note_detached_refused(app: &ApiState) -> u64 {
-    let count = app.detached_refused.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    let count = count_refusal(&app.detached_refused);
     if count.is_power_of_two() {
         tracing::dispatcher::with_default(&app.dispatch, || {
             tracing::warn!(count, "detached write pool full, request refused");
@@ -502,9 +520,21 @@ pub fn note_detached_refused(app: &ApiState) -> u64 {
 }
 
 
+/// Counts a refused detached read and warns when the count is a power of two.
+pub fn note_detached_read_refused(app: &ApiState) -> u64 {
+    let count = count_refusal(&app.detached_reads_refused);
+    if count.is_power_of_two() {
+        tracing::dispatcher::with_default(&app.dispatch, || {
+            tracing::warn!(count, "detached read pool full, request refused");
+        });
+    }
+    count
+}
+
+
 /// Runs the handler in its own task and audits the result there, so a client that leaves never cancels the work between its commit and its record.
 pub async fn complete_write(app: SharedState, request: Request, next: Next, template: Exchange, _permit: DetachedPermit) -> Response {
-    let response = tokio::spawn(next.run(request)).await.unwrap_or_else(|_| {
+    let response = tokio::spawn(next.run(request).with_current_subscriber()).await.unwrap_or_else(|_| {
         tracing::error!("write handler task failed");
         error_response(&ApiError::Internal)
     });
@@ -512,14 +542,23 @@ pub async fn complete_write(app: SharedState, request: Request, next: Next, temp
 }
 
 
-/// Admits the write to the detached pool, or answers 503 `busy` with one audited record.
+/// Admits the request to its detached pool (writes or reads), or answers 503 `busy` with one audited record.
 pub async fn run_detached(app: SharedState, request: Request, next: Next, template: Exchange, source: IpAddr) -> Response {
-    match admit_detached(&app, source) {
+    let admitted = if template.state_changing {
+        admit_detached(&app, source)
+    } else {
+        admit_detached_read(&app, source)
+    };
+    match admitted {
         None => {
-            note_detached_refused(&app);
+            if template.state_changing {
+                note_detached_refused(&app);
+            } else {
+                note_detached_read_refused(&app);
+            }
             audit_response(&app, template, error_response(&ApiError::Busy))
         }
-        Some(permit) => tokio::spawn(complete_write(app, request, next, template, permit))
+        Some(permit) => tokio::spawn(complete_write(app, request, next, template, permit).with_current_subscriber())
             .await
             .unwrap_or_else(|_| {
                 tracing::error!("detached write task failed");
@@ -552,7 +591,7 @@ pub async fn guard(
     let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
     let identity = decision.identity.clone().unwrap_or_else(|| app.identity.load_full());
     let state_changing = !request.method().is_safe();
-    let detach = detaches(rule, state_changing);
+    let detach = detaches(rule);
     let forwarded_by = request.extensions().get::<ForwardedBy>().map(|found| found.0);
     let template = Exchange {
         request_id: id.0,
