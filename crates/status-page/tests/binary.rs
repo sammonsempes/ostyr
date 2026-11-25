@@ -196,6 +196,16 @@ fn listening_address(reader: &mut BufReader<ChildStderr>) -> Result<String, Box<
 }
 
 
+fn logged_line(reader: &mut BufReader<ChildStderr>, marker: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let found = reader
+        .by_ref()
+        .lines()
+        .find_map(|line| line.map(|text| text.contains(marker).then_some(text)).transpose())
+        .ok_or("the child ended before it logged the line")??;
+    Ok(found)
+}
+
+
 fn signal(child: &Child, name: &str) -> TestResult {
     let status = Command::new("kill").arg(format!("-{name}")).arg(child.id().to_string()).status()?;
     assert!(status.success());
@@ -271,7 +281,7 @@ fn a_server_file_without_a_listen_address_is_refused() -> TestResult {
     let server_file = write_server_file(dir.path(), None, "")?;
     let text = fs::read_to_string(&server_file)?.replace("listen_address: 127.0.0.1:0\n", "");
     fs::write(&server_file, text)?;
-    refused_with(&run_to_end(&[&server_file])?, "listen_address is required")
+    refused_with(&run_to_end(&[&server_file])?, "server file: listen_address is required")
 }
 
 
@@ -291,7 +301,7 @@ fn a_relative_audit_file_is_refused() -> TestResult {
     let server_file = write_server_file(dir.path(), None, "")?;
     let text = fs::read_to_string(&server_file)?.replace(&format!("{}", dir.path().join("audit.log").display()), "audit.log");
     fs::write(&server_file, text)?;
-    refused_with(&run_to_end(&[&server_file])?, "audit_file must be an absolute path")
+    refused_with(&run_to_end(&[&server_file])?, "server file: audit_file must be an absolute path")
 }
 
 
@@ -300,12 +310,10 @@ fn an_address_already_in_use_fails_the_start() -> TestResult {
     let dir = tempdir()?;
     let holder = StdListener::bind("127.0.0.1:0")?;
     let server_file = write_server_file(dir.path(), None, "")?;
-    let text = fs::read_to_string(&server_file)?.replace("127.0.0.1:0", &holder.local_addr()?.to_string());
+    let held = holder.local_addr()?.to_string();
+    let text = fs::read_to_string(&server_file)?.replace("127.0.0.1:0", &held);
     fs::write(&server_file, text)?;
-    let output = run_to_end(&[&server_file])?;
-    assert!(!output.status.success());
-    assert!(!output.stderr.is_empty());
-    Ok(())
+    refused_with(&run_to_end(&[&server_file])?, &format!("cannot listen on {held}"))
 }
 
 
@@ -324,20 +332,61 @@ async fn the_binary_serves_the_sample_page_and_exits_zero_on_sigint() -> TestRes
 
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_binary_serves_a_stored_incident_survives_sighup_and_exits_zero_on_sigterm() -> TestResult {
+async fn the_binary_serves_a_stored_incident_and_exits_zero_on_sigterm() -> TestResult {
     let dir = tempdir()?;
     let (fake, ca_pem) = fake_with(serving_one_incident()).await?;
     write_pg(dir.path(), fake.port, &ca_pem)?;
     let server_file = write_server_file(dir.path(), Some(fake.port), "")?;
     let (child, mut reader) = spawn_service(&server_file)?;
     let address = tokio::task::block_in_place(|| listening_address(&mut reader))?;
-    let answer = get(&address, "/status.json").await?;
+    let answer = page_with_incident(&address).await?;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    signal(&child, "TERM")?;
+    tokio::task::block_in_place(|| finish(child, reader))?;
+    Ok(())
+}
+
+
+async fn page_with_incident(address: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut answer = get(address, "/status.json").await?;
+    let mut polls = 0;
+    while !answer.contains(INCIDENT_TITLE) && polls < EXIT_POLLS {
+        tokio::time::sleep(EXIT_POLL_PAUSE).await;
+        answer = get(address, "/status.json").await?;
+        polls += 1;
+    }
     assert!(answer.contains(INCIDENT_TITLE), "{answer}");
-    fs::write(dir.path().join("settings.yaml"), "burst: 31\n")?;
+    Ok(answer)
+}
+
+
+fn reload_lines(dir: &Path) -> usize {
+    fs::read_to_string(dir.join("audit.log")).map_or(0, |text| text.lines().filter(|line| line.contains("config.reload")).count())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sighup_alone_reloads_the_settings_the_file_watch_cannot_see() -> TestResult {
+    let dir = tempdir()?;
+    let server_file = write_server_file(dir.path(), None, "")?;
+    let real = dir.path().join("real");
+    fs::create_dir(&real)?;
+    fs::write(real.join("settings.yaml"), "burst: 30\n")?;
+    fs::remove_file(dir.path().join("settings.yaml"))?;
+    std::os::unix::fs::symlink(real.join("settings.yaml"), dir.path().join("settings.yaml"))?;
+    let (child, mut reader) = spawn_service(&server_file)?;
+    let address = tokio::task::block_in_place(|| listening_address(&mut reader))?;
+    assert!(get(&address, "/status.json").await?.starts_with("HTTP/1.1 200"));
+    assert_eq!(reload_lines(dir.path()), 0);
+    fs::write(real.join("settings.yaml"), "burst: 31\n")?;
     signal(&child, "HUP")?;
-    let after = get(&address, "/status.json").await?;
-    assert!(after.starts_with("HTTP/1.1 200"), "{after}");
+    let mut polls = 0;
+    while reload_lines(dir.path()) == 0 && polls < EXIT_POLLS {
+        tokio::time::sleep(EXIT_POLL_PAUSE).await;
+        polls += 1;
+    }
+    assert_eq!(reload_lines(dir.path()), 1);
+    assert!(get(&address, "/status.json").await?.starts_with("HTTP/1.1 200"));
     signal(&child, "TERM")?;
     tokio::task::block_in_place(|| finish(child, reader))?;
     Ok(())
@@ -356,9 +405,10 @@ async fn a_failing_store_still_serves_the_fixed_page_without_the_error_text() ->
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     assert!(!answer.contains(SECRET_ERROR_CODE), "{answer}");
     assert!(!answer.contains(INCIDENT_TITLE), "{answer}");
+    let failure = tokio::task::block_in_place(|| logged_line(&mut reader, "class="))?;
+    assert!(!failure.contains(SECRET_ERROR_CODE), "{failure}");
     signal(&child, "TERM")?;
-    let logs = tokio::task::block_in_place(|| finish(child, reader))?;
-    assert!(logs.contains("class="), "{logs}");
+    tokio::task::block_in_place(|| finish(child, reader))?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ use crate::error::{StatusPageError, StoreError};
 use crate::model::{IncidentInput, Omitted, PageConfig, PageState, RenderedPage, DEFAULT_LIMITS};
 use crate::render::render_omitting;
 use crate::snapshot::{publish, snapshot_of};
+use crate::store::is_refused;
 use crate::store_model::PublishedRead;
 use crate::types::IncidentReadFn;
 use core_pg::query::{CLIENT_DEADLINE_MARGIN, QUERY_WINDOWS};
@@ -127,9 +128,42 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPa
 }
 
 
+pub fn is_clean(text: &str, multiline: bool) -> bool {
+    !text.chars().any(|character| is_refused(character, multiline))
+}
+
+
+/// Leaves out what a direct database writer stored with a control, bidi or blank character; returns the read, the incidents and the updates left out.
+pub fn refuse_unsafe_text(read: &PublishedRead) -> (PublishedRead, usize, usize) {
+    let (clean, refused): (Vec<IncidentInput>, Vec<IncidentInput>) = read
+        .incidents
+        .iter()
+        .cloned()
+        .partition(|incident| is_clean(&incident.public_title, false));
+    let refused_ongoing = refused.iter().filter(|incident| incident.resolved_at.is_none()).count();
+    let (incidents, updates_refused) = clean.into_iter().fold((Vec::new(), 0), |(mut kept, count), mut incident| {
+        let before = incident.updates.len();
+        incident.updates.retain(|update| is_clean(&update.message, true));
+        let removed = before - incident.updates.len();
+        kept.push(incident);
+        (kept, count + removed)
+    });
+    let safe = PublishedRead {
+        incidents,
+        total: read.total.saturating_sub(refused.len()),
+        ongoing: read.ongoing.saturating_sub(refused_ongoing),
+    };
+    (safe, refused.len(), updates_refused)
+}
+
+
 /// Every component is `unknown` (no state is passed) until the checks feed is wired; returns what the page left out.
 pub fn publish_page(config: &PageConfig, state: &PageState, read: &PublishedRead) -> Result<Omitted, StatusPageError> {
-    let (rendered, omitted) = fit_page(config, read)?;
+    let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(read);
+    if incidents_refused + updates_refused > 0 {
+        tracing::warn!(incidents_refused, updates_refused, "unsafe stored text left out");
+    }
+    let (rendered, omitted) = fit_page(config, &safe)?;
     publish(state, snapshot_of(&config.tenant, &rendered)).map(|()| omitted)
 }
 
@@ -150,6 +184,16 @@ pub async fn first_publish(config: &PageConfig, state: &PageState, read: &Incide
     })?;
     log_omitted(state, omitted);
     Ok(())
+}
+
+
+/// The first publish, then the rounds; a failing first publish is logged by class and the rounds still run.
+pub async fn run_rounds(config: &PageConfig, state: &PageState, read: &IncidentReadFn, scope: &TenantScope, ticks: u64) {
+    if let Err(error) = first_publish(config, state, read, scope).await {
+        let class = render_class(&error);
+        tracing::warn!(class, "first publish failed");
+    }
+    publisher(config, state, read, scope, ticks).await;
 }
 
 
