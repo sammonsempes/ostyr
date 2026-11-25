@@ -1,0 +1,29 @@
+[Unit]
+Description=RustDesk hbbs (rendezvous, headless, relay only, key required)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=rustdesk
+Group=rustdesk
+Environment=ALWAYS_USE_RELAY=Y
+StateDirectory=rustdesk
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/rustdesk
+UMask=0077
+ExecStart=/usr/local/sbin/ostyr-rustdesk-start hbbs
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

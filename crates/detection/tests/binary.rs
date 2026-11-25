@@ -13,11 +13,13 @@ use serde_json::Value;
 use std::env::VarError;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 
@@ -28,6 +30,12 @@ const USAGE: &str = "usage: ostyr-detect <detection.yaml>";
 
 
 const RELOAD_MARKER: &str = "configuration reloaded";
+
+
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
+
+const RELOAD_ENGINES: usize = 2;
 
 
 const EXIT_CYCLE_CAP: u8 = 75;
@@ -65,6 +73,7 @@ const EVENT: &str = r#"{"@timestamp":"2026-11-10T10:00:00Z","ecs":{"version":"8.
 
 pub struct Running {
     pub child: Child,
+    pub lines: Receiver<String>,
 }
 
 
@@ -112,29 +121,36 @@ fn refused_with(output: &Output, marker: &str) -> TestResult {
 }
 
 
-fn spawn_child(settings: &Path) -> Result<(Running, BufReader<ChildStderr>), TestError> {
+fn spawn_child(settings: &Path) -> Result<Running, TestError> {
     let mut child = Command::new(PROGRAM)
         .arg(settings)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
-    let reader = BufReader::new(child.stderr.take().ok_or("no stderr")?);
-    Ok((Running { child }, reader))
+    let stderr = child.stderr.take().ok_or("no stderr")?;
+    let (sender, lines) = channel();
+    std::thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .try_for_each(|line| sender.send(line))
+    });
+    Ok(Running { child, lines })
 }
 
 
-fn wait_for_line(reader: &mut BufReader<ChildStderr>, marker: &str) -> Result<String, TestError> {
-    reader
-        .by_ref()
-        .lines()
-        .find_map(|line| match line {
-            Ok(text) if text.contains(marker) => Some(Ok(text)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .ok_or_else(|| format!("the child ended before logging {marker}"))?
-        .map_err(TestError::from)
+fn wait_for_lines(running: &Running, marker: &str, count: usize) -> TestResult {
+    let found = std::iter::repeat_with(|| running.lines.recv_timeout(HANG_GUARD))
+        .map_while(Result::ok)
+        .filter(|line| line.contains(marker))
+        .take(count)
+        .count();
+    if found == count {
+        Ok(())
+    } else {
+        Err(format!("hang guard: {found} of {count} lines containing {marker:?} within {HANG_GUARD:?} each").into())
+    }
 }
 
 
@@ -145,12 +161,22 @@ fn signal(running: &Running, name: &str) -> TestResult {
 }
 
 
-fn finish(mut running: Running, mut reader: BufReader<ChildStderr>) -> TestResult {
-    let mut rest = String::new();
-    reader.read_to_string(&mut rest)?;
-    let exit = running.child.wait()?;
-    assert!(exit.success(), "{exit:?} {rest}");
-    Ok(())
+fn finish(mut running: Running) -> TestResult {
+    let mut rest: Vec<String> = Vec::new();
+    let ended = std::iter::repeat_with(|| running.lines.recv_timeout(HANG_GUARD)).find_map(|received| match received {
+        Ok(line) => {
+            rest.push(line);
+            None
+        }
+        Err(error) => Some(error),
+    });
+    if ended == Some(RecvTimeoutError::Disconnected) {
+        let exit = running.child.wait()?;
+        assert!(exit.success(), "{exit:?} {rest:?}");
+        Ok(())
+    } else {
+        Err(format!("hang guard: the child still runs after {HANG_GUARD:?}: {rest:?}").into())
+    }
 }
 
 
@@ -227,7 +253,7 @@ fn the_binary_stores_one_alert_under_the_subject_tenant_reloads_on_sighup_and_ex
     let dir = tempdir()?;
     let stub = start_stub(None, |state| state.queue.push_back(queued_event()))?;
     let path = write_files(dir.path(), stub.port, true)?;
-    let (running, mut reader) = spawn_child(&path)?;
+    let running = spawn_child(&path)?;
     wait_until(&stub, |state| !state.acks.is_empty())?;
     let alerts = json_lines(&dir.path().join("alerts.jsonl"))?;
     assert_eq!(alerts.len(), 1, "{alerts:?}");
@@ -239,30 +265,38 @@ fn the_binary_stores_one_alert_under_the_subject_tenant_reloads_on_sighup_and_ex
         .collect();
     assert!(letters.is_empty(), "{letters:?}");
     fs::write(dir.path().join("rules.yaml"), RULES.replace("Whoami seen", "Whoami seen again"))?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replace("nats_fetch_deadline_ms: 100", "nats_fetch_deadline_ms: 150"),
+    )?;
     signal(&running, "-HUP")?;
-    wait_for_line(&mut reader, RELOAD_MARKER)?;
+    wait_for_lines(&running, RELOAD_MARKER, RELOAD_ENGINES)?;
     signal(&running, "-INT")?;
-    finish(running, reader)?;
+    finish(running)?;
     kill_connections(&stub);
     let audit = json_lines(&dir.path().join("audit.log"))?;
     let reloads: Vec<&Value> = audit.iter().filter(|record| field(record, "action") == "config.reload").collect();
-    assert!(!reloads.is_empty(), "{audit:?}");
+    let mut reloaded: Vec<&str> = reloads.iter().map(|record| field(record, "request_id")).collect();
+    reloaded.sort_unstable();
+    assert_eq!(reloaded, ["detection-ingest-reload", "detection-rules-reload"], "{audit:?}");
     assert!(audit.iter().all(|record| field(record, "tenant") == "all"), "{audit:?}");
     Ok(())
 }
 
 
 #[test]
-fn sigterm_ends_the_loop_with_exit_zero() -> TestResult {
+fn sigterm_ends_the_loop_with_exit_zero_and_nothing_half_stored() -> TestResult {
     let dir = tempdir()?;
-    let stub = start_stub(None, |_| ())?;
+    let stub = start_stub(None, |state| state.queue.push_back(queued_event()))?;
     let path = write_files(dir.path(), stub.port, true)?;
-    let (running, reader) = spawn_child(&path)?;
+    let running = spawn_child(&path)?;
     wait_until(&stub, |state| !state.pulls.is_empty())?;
     signal(&running, "-TERM")?;
-    finish(running, reader)?;
+    finish(running)?;
     kill_connections(&stub);
-    assert!(lock(&stub.hub).acks.is_empty());
+    let stored = json_lines(&dir.path().join("alerts.jsonl"))?.len();
+    let acknowledged = lock(&stub.hub).acks.len();
+    assert!(acknowledged <= stored, "{acknowledged} acked, {stored} stored");
     Ok(())
 }
 

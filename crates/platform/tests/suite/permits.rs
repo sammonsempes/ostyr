@@ -240,3 +240,14 @@ async fn the_layer_counts_only_the_module_refusal_status() -> TestResult {
     assert_eq!(warnings_for(Module::Risk, "/429").await?, 0);
     Ok(())
 }
+
+
+#[test]
+fn the_detached_read_pool_is_not_smaller_than_the_pg_demand() -> TestResult {
+    assert!(usize::from(core_api::state::MAX_DETACHED_READS) >= connection_demand());
+    assert_eq!(
+        core_api::state::MAX_DETACHED_READS_PER_SOURCE.cmp(&core_api::config::MAX_CONNECTIONS_PER_SOURCE),
+        std::cmp::Ordering::Less
+    );
+    Ok(())
+}

@@ -37,3 +37,10 @@ pub type MigrationRun = Pin<Box<dyn Future<Output = Result<Vec<String>, core_pg:
 
 
 pub type MigrateFn = fn(std::sync::Arc<core_pg::settings::PgSettings>) -> MigrationRun;
+
+
+pub type ControlFuture<'a> = Pin<Box<dyn Future<Output = Result<(), core_pg::error::PgError>> + Send + 'a>>;
+
+
+/// Crosses one transaction boundary on the round's connection.
+pub type ControlFn<'a> = &'a (dyn Fn(core_pg::transaction::Boundary) -> ControlFuture<'a> + Sync);

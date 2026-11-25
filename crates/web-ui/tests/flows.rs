@@ -1,5 +1,7 @@
 #[path = "support/dhcp_flows.rs"]
 mod dhcp_flows;
+#[path = "support/group_flows.rs"]
+mod group_flows;
 #[path = "support/harness.rs"]
 mod harness;
 #[path = "support/link_flows.rs"]

@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 419;
+pub const TEXT_COUNT: usize = 433;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -220,6 +220,19 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("cert_sightings_truncated", "Sightings cut at 500."),
     ("cert_yes", "yes"),
     ("cert_no", "no"),
+    ("nav_groups", "Groups"),
+    ("title_groups", "Alert groups"),
+    ("groups_empty", "No group."),
+    ("groups_incomplete", "Older alerts were not read; counts may be understated."),
+    ("groups_read", "{count} alerts read, oldest read: {oldest}"),
+    ("col_count", "Count"),
+    ("col_duplicates", "Duplicates"),
+    ("col_first", "First"),
+    ("col_last", "Last"),
+    ("col_representative", "Representative alert"),
+    ("col_notes", "Notes"),
+    ("group_omitted", "ids omitted"),
+    ("group_cut", "may be understated"),
     ("nav_hunts", "Hunts"),
     ("title_hunts", "Hunt findings"),
     ("hunts_empty", "No finding."),
@@ -369,6 +382,7 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("posture_sev_fatal", "Fatal"),
     ("posture_sev_other", "Other"),
     ("error_run_changed", "The stored run changed: restart from the first page."),
+    ("groups_too_large", "The alert groups are too large to show."),
     (
         "posture_too_large",
         "This page of findings is too large to show. Go back to the first page.",
@@ -655,6 +669,22 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("cert_sightings_truncated", "Observations coupées à 500."),
     ("cert_yes", "oui"),
     ("cert_no", "non"),
+    ("nav_groups", "Groupes"),
+    ("title_groups", "Groupes d'alertes"),
+    ("groups_empty", "Aucun groupe."),
+    (
+        "groups_incomplete",
+        "Les alertes plus anciennes n'ont pas été lues ; les comptes peuvent être sous-estimés.",
+    ),
+    ("groups_read", "{count} alertes lues, la plus ancienne : {oldest}"),
+    ("col_count", "Nombre"),
+    ("col_duplicates", "Doublons"),
+    ("col_first", "Première"),
+    ("col_last", "Dernière"),
+    ("col_representative", "Alerte représentative"),
+    ("col_notes", "Remarques"),
+    ("group_omitted", "identifiants omis"),
+    ("group_cut", "peut être sous-estimé"),
     ("nav_hunts", "Chasses"),
     ("title_hunts", "Résultats de chasse"),
     ("hunts_empty", "Aucun résultat."),
@@ -810,6 +840,7 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("posture_sev_fatal", "Fatale"),
     ("posture_sev_other", "Autre"),
     ("error_run_changed", "L'exécution stockée a changé : repartez de la première page."),
+    ("groups_too_large", "Les groupes d'alertes sont trop volumineux pour être affichés."),
     (
         "posture_too_large",
         "Cette page de constats est trop volumineuse pour être affichée. Revenez à la première page.",

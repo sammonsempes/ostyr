@@ -1,0 +1,5 @@
+vms:
+  - name: relay
+    base_image: rustdesk-relay.qcow2
+    vcpu: 2
+    ssh_user: ubuntu

@@ -2137,6 +2137,46 @@ fn the_service_runs_with_the_postgres_sink() -> TestResult {
 }
 
 
+const SWAP_POLL_CAP: usize = 600;
+
+
+const ENGINE_REQUEST_IDS: [&str; 3] = ["detection-ingest-reload", "detection-postgres-reload", "detection-rules-reload"];
+
+
+#[test]
+fn a_start_only_swap_is_denied_and_audited_under_all_by_each_of_the_three_engines() -> TestResult {
+    let database = database()?;
+    let (dir, stub, path) = service_files(&format!("sink: postgres\n{}", database.section))?;
+    let audit_path = dir.path().join("audit.log");
+    let swapped = fs::read_to_string(&path)?.replace("audit.log", "swapped.log");
+    let edited = AtomicBool::new(false);
+    let polls = AtomicUsize::new(0);
+    let hub = Arc::clone(&stub.hub);
+    let (watched_path, watched_audit) = (path.clone(), audit_path.clone());
+    let stop = Box::new(move || {
+        let running = !lock(&hub).pulls.is_empty();
+        if running && !edited.swap(true, Ordering::SeqCst) {
+            fs::write(&watched_path, &swapped).is_err()
+        } else {
+            let denied = fs::read_to_string(&watched_audit).map_or(0, |text| text.lines().count());
+            denied >= THREE || polls.fetch_add(1, Ordering::SeqCst) > SWAP_POLL_CAP
+        }
+    });
+    run_service(&path, stop, commit_alerts)?;
+    let records: Vec<Value> = fs::read_to_string(&audit_path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let text_of = |record: &Value, name: &str| record.get(name).and_then(Value::as_str).unwrap_or("").to_owned();
+    let mut found: Vec<String> = records.iter().map(|record| text_of(record, "request_id")).collect();
+    found.sort();
+    assert_eq!(found, ENGINE_REQUEST_IDS.to_vec(), "{records:?}");
+    assert!(records.iter().all(|record| text_of(record, "tenant") == "all"), "{records:?}");
+    assert!(records.iter().all(|record| text_of(record, "outcome") == "denied"), "{records:?}");
+    Ok(())
+}
+
+
 const OVER_INSERT: usize = 501;
 
 

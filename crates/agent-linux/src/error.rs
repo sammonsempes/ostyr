@@ -157,3 +157,12 @@ pub enum FimError {
     #[error("planted.tsv entry {entry} repeats the path of an earlier entry")]
     Duplicate { entry: usize },
 }
+
+
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("usage: ostyr-agent-linux <config.yaml>")]
+    Usage,
+    #[error(transparent)]
+    Run(#[from] SourceError),
+}

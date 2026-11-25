@@ -92,6 +92,7 @@ pub struct AlertRun {
     pub request_id: String,
     pub skipped: Option<SkipReason>,
     pub traces: Vec<Trace>,
+    pub files: Vec<String>,
     pub matches_over_bound: usize,
     pub matches_over_budget: usize,
     pub events_omitted: usize,
@@ -116,6 +117,7 @@ pub struct Frontier<'a> {
 
 struct Progress {
     traces: Vec<Trace>,
+    files: Vec<String>,
     used: usize,
     omitted: usize,
     over_budget: usize,
@@ -259,12 +261,15 @@ fn simulate_within(batch: &Batch<'_>, loaded: &LoadedPlaybook, input: &Simulatio
     let kept = trace.events.len().min(room);
     let omitted = trace.events.len().saturating_sub(kept);
     let mut traces = progress.traces;
+    let mut files = progress.files;
+    files.push(loaded.file.clone());
     traces.push(Trace {
         events: trace.events.into_iter().take(room).collect(),
         ..trace
     });
     Progress {
         traces,
+        files,
         used: progress.used + kept,
         omitted: progress.omitted + omitted,
         over_budget: progress.over_budget,
@@ -310,6 +315,7 @@ fn run_alert(batch: &Batch<'_>, spent: Spent, position: usize, line: &Line) -> S
     };
     let start = Progress {
         traces: Vec::new(),
+        files: Vec::new(),
         used: spent.events,
         omitted: 0,
         over_budget: 0,
@@ -324,6 +330,7 @@ fn run_alert(batch: &Batch<'_>, spent: Spent, position: usize, line: &Line) -> S
         request_id: request,
         skipped,
         traces: done.traces,
+        files: done.files,
         matches_over_bound: matching.len().saturating_sub(batch.limits.max_matches_per_alert),
         matches_over_budget: done.over_budget,
         events_omitted: done.omitted,

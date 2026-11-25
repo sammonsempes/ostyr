@@ -66,6 +66,9 @@ pub struct ApiState {
     pub detached: DetachedPool,
     pub detached_sources: ConnectionTable,
     pub detached_refused: AtomicU64,
+    pub detached_reads: DetachedPool,
+    pub detached_read_sources: ConnectionTable,
+    pub detached_reads_refused: AtomicU64,
 }
 
 

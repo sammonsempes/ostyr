@@ -7,7 +7,7 @@ use aya::EbpfError;
 use ebpf_probes::btf::Unsupported;
 use ebpf_probes::error::{attach_error, ebpf_error, errno_of, load_error_name, map_error, program_load_error, LoadError};
 use ebpf_probes::object::ObjectError;
-use ebpf_probes::shape::{ShapeError, DROPS_NAME, RING_NAME};
+use ebpf_probes::shape::{ShapeError, DROPS_NAME, PROGRAM_NAME, RING_NAME};
 use std::error::Error;
 use std::io;
 
@@ -118,8 +118,8 @@ fn every_variant_has_fixed_text_and_the_inner_causes_are_kept() -> Result<(), Bo
         LoadError::MapCreate { errno: Some(1) },
         LoadError::ProgramLoad { errno: None },
         LoadError::Attach { errno: Some(NO_ACCESS) },
-        LoadError::MissingProgram,
-        LoadError::WrongProgramType,
+        LoadError::MissingProgram(PROGRAM_NAME),
+        LoadError::WrongProgramType(PROGRAM_NAME),
         LoadError::TakeMap(RING_NAME),
         LoadError::TakeMap(DROPS_NAME),
         LoadError::NotBuilt,
@@ -147,8 +147,8 @@ fn every_variant_has_one_fixed_name_without_errno_or_cause() -> Result<(), Box<d
         LoadError::MapCreate { errno: Some(1) },
         LoadError::ProgramLoad { errno: Some(NO_ACCESS) },
         LoadError::Attach { errno: None },
-        LoadError::MissingProgram,
-        LoadError::WrongProgramType,
+        LoadError::MissingProgram(PROGRAM_NAME),
+        LoadError::WrongProgramType(PROGRAM_NAME),
         LoadError::TakeMap(RING_NAME),
         LoadError::NotBuilt,
     ];

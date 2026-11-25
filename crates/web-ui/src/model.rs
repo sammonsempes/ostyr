@@ -545,6 +545,33 @@ pub struct FindingsView {
 }
 
 
+/// One group of `GET /alert-groups`; the alert id list is counted by the pre-scan and never typed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupView {
+    pub rule_id: String,
+    pub host_name: Option<String>,
+    pub user_name: Option<String>,
+    pub representative: String,
+    pub omitted: bool,
+    pub alert_count: u64,
+    pub duplicates: u64,
+    pub first_time: String,
+    pub last_time: String,
+    pub max_severity: String,
+    pub cut_at_older: bool,
+}
+
+
+/// `GET /alert-groups`: `complete` is false when older alerts of the tenant remain unread.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GroupListView {
+    pub groups: Vec<GroupView>,
+    pub complete: bool,
+    pub alerts_read: u64,
+    pub oldest_read: Option<String>,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,

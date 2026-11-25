@@ -4,6 +4,7 @@ mod fake;
 mod migrate;
 mod query;
 mod search_path;
+mod transaction;
 mod types;
 
 
