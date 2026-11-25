@@ -1,0 +1,188 @@
+version: 1
+tenant: template
+name: anssi-linux
+controls:
+  - id: sysctl-ip-forward
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.ip_forward'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-rp-filter
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.rp_filter'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-accept-redirects
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.accept_redirects'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-send-redirects
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.send_redirects'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-source-route
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.conf.all.accept_source_route'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-syncookies
+    query: 'SELECT current_value FROM system_controls WHERE name = ''net.ipv4.tcp_syncookies'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: low
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 R12'
+  - id: sysctl-aslr
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.randomize_va_space'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '2'
+    severity: high
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 kernel sysctl'
+  - id: sysctl-dmesg-restrict
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.dmesg_restrict'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: low
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 kernel sysctl'
+  - id: sysctl-kptr-restrict
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.kptr_restrict'''
+    expect:
+      column_matches:
+        column: current_value
+        pattern: '^[12]$'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 kernel sysctl'
+  - id: sysctl-ptrace-scope
+    query: 'SELECT current_value FROM system_controls WHERE name = ''kernel.yama.ptrace_scope'''
+    expect:
+      column_matches:
+        column: current_value
+        pattern: '^[123]$'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 Yama'
+  - id: sysctl-protected-symlinks
+    query: 'SELECT current_value FROM system_controls WHERE name = ''fs.protected_symlinks'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 filesystem sysctl'
+  - id: sysctl-protected-hardlinks
+    query: 'SELECT current_value FROM system_controls WHERE name = ''fs.protected_hardlinks'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '1'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 filesystem sysctl'
+  - id: sysctl-suid-dumpable
+    query: 'SELECT current_value FROM system_controls WHERE name = ''fs.suid_dumpable'''
+    expect:
+      column_equals:
+        column: current_value
+        value: '0'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 kernel sysctl'
+  - id: accounts-single-uid0
+    query: 'SELECT username FROM users WHERE uid = 0 AND username != ''root'''
+    expect:
+      row_count: 0
+    severity: critical
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 accounts'
+  - id: accounts-no-empty-password
+    query: 'SELECT username FROM shadow WHERE password_status = ''empty'''
+    expect:
+      row_count: 0
+    severity: critical
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 accounts'
+  - id: file-passwd-mode
+    query: 'SELECT mode FROM file WHERE path = ''/etc/passwd'''
+    expect:
+      column_matches:
+        column: mode
+        pattern: '^0[0-7][0-4][0-4]$'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 files'
+  - id: file-shadow-mode
+    query: 'SELECT mode FROM file WHERE path = ''/etc/shadow'''
+    expect:
+      column_matches:
+        column: mode
+        pattern: '^0[0-7][0-4]0$'
+    severity: high
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 files'
+  - id: mount-tmp-nosuid
+    query: 'SELECT flags FROM mounts WHERE path = ''/tmp'''
+    expect:
+      column_matches:
+        column: flags
+        pattern: '(^|,)nosuid(,|$)'
+    severity: medium
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 partitioning'
+  - id: network-no-legacy-listeners
+    query: 'SELECT port FROM listening_ports WHERE port IN (23, 69, 513, 514)'
+    expect:
+      row_count: 0
+    severity: high
+    frameworks:
+      - framework: anssi
+        reference: 'BP-028 services'
