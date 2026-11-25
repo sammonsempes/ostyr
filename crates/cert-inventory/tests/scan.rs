@@ -390,3 +390,25 @@ fn invalid_settings_scan_nothing_and_report_one_error() -> TestResult {
     assert_eq!(outcome.errors.len(), 1);
     Ok(())
 }
+
+
+#[test]
+fn a_root_opened_after_the_budget_is_spent_is_counted_unreached() -> TestResult {
+    let flood = TempDir::new()?;
+    let real = TempDir::new()?;
+    (0..LIMITED_FILES + 1).try_for_each(|index| write(flood.path().join(format!("{index}.pem")), b""))?;
+    write(real.path().join("real.pem"), make_certificate()?.pem)?;
+    let mut settings = settings_for(flood.path());
+    settings.roots.push(real.path().to_path_buf());
+    settings.max_files = LIMITED_FILES;
+    let outcome = scan(&settings);
+    assert_eq!(outcome.roots_unreached, 1);
+    assert_eq!(outcome.skipped.over_count, PAIR);
+    assert!(outcome.records.is_empty());
+    let roomy = ScanSettings {
+        max_files: CANDIDATES,
+        ..settings
+    };
+    assert_eq!(scan(&roomy).roots_unreached, 0);
+    Ok(())
+}

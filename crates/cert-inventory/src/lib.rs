@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod model;
 pub mod parse;
 pub mod scan;
+pub mod serve;
 pub mod store;
 pub mod types;
 #[cfg(unix)]
