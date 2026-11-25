@@ -1,0 +1,14 @@
+flush ruleset
+
+table inet ostyr_rustdesk {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        ip protocol icmp accept
+        udp sport 67 udp dport 68 accept
+        tcp dport 22 accept
+        tcp dport { 21115, 21116, 21117 } accept
+        udp dport 21116 accept
+    }
+}

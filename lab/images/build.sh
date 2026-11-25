@@ -50,6 +50,9 @@ inputs_fingerprint() {
         if [[ "$image" == "datastore" ]]; then
             grep -P '^garage(-image)?\t' "$LAB_DIR/images/pins.tsv"
         fi
+        if [[ "$image" == "rustdesk-relay" ]]; then
+            grep -P '^rustdesk-' "$LAB_DIR/images/pins.tsv"
+        fi
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -121,7 +124,7 @@ prepare_linux() {
     }
 
     case "$image" in
-        ubuntu-*|zitadel|k3s-node|backup-server|attacker|datastore)
+        ubuntu-*|zitadel|k3s-node|backup-server|attacker|datastore|rustdesk-relay)
             fetch "$base_url/SHA256SUMS" "$work_dir/SHA256SUMS"
             fetch "$base_url/SHA256SUMS.gpg" "$work_dir/SHA256SUMS.gpg"
             gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
@@ -160,8 +163,68 @@ prepare_garage() {
     extra_vars=(-var "garage_binary=$work_dir/garage-binary")
 }
 
+LAB_RUSTDESK_CACHE="${LAB_RUSTDESK_CACHE:-$HOME/.cache/ostyr-lab/rustdesk}"
+RUSTDESK_REGISTRY="https://registry-1.docker.io/v2/rustdesk/rustdesk-server"
+RUSTDESK_TOKEN_URL="https://auth.docker.io/token?service=registry.docker.io&scope=repository:rustdesk/rustdesk-server:pull"
+RUSTDESK_INDEX_TYPE="application/vnd.oci.image.index.v1+json"
+RUSTDESK_MANIFEST_TYPE="application/vnd.oci.image.manifest.v1+json"
+
+registry_fetch() {
+    local token="$1" accept="$2" url="$3" output="$4" expected="$5" actual
+    curl --fail --silent --show-error --location --header "Authorization: Bearer $token" --header "Accept: $accept" --output "$output" "$url" ||
+        die "rustdesk: download from $url failed"
+    actual="$(sha256_of "$output")"
+    [[ "$actual" == "$expected" ]] || die "rustdesk: $url has sha256 $actual, expected $expected"
+}
+
+prepare_rustdesk() {
+    local index_digest token manifest_digest layer_digests layer_digest binary expected cached
+    index_digest="$(pin_field rustdesk-image 2)"
+    [[ "$index_digest" =~ ^[0-9a-f]{64}$ ]] || die "no valid rustdesk-image pin in $PINS_FILE"
+    mkdir -p "$LAB_RUSTDESK_CACHE" "$work_dir/rustdesk"
+    for binary in hbbs hbbr; do
+        expected="$(pin_field "rustdesk-$binary" 2)"
+        [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "no valid rustdesk-$binary pin in $PINS_FILE"
+        cached="$LAB_RUSTDESK_CACHE/$(pin_field "rustdesk-$binary" 3)"
+        if [[ -f "$cached" && "$(sha256_of "$cached")" != "$expected" ]]; then
+            log "rustdesk: cached $cached does not match its pin, removed"
+            rm -f "$cached"
+        fi
+    done
+    if [[ ! -f "$LAB_RUSTDESK_CACHE/$(pin_field rustdesk-hbbs 3)" || ! -f "$LAB_RUSTDESK_CACHE/$(pin_field rustdesk-hbbr 3)" ]]; then
+        token="$(curl --fail --silent --show-error "$RUSTDESK_TOKEN_URL" | jq -r .token)"
+        [[ -n "$token" && "$token" != null ]] || die "rustdesk: no registry token"
+        registry_fetch "$token" "$RUSTDESK_INDEX_TYPE" "$RUSTDESK_REGISTRY/manifests/sha256:$index_digest" "$work_dir/rustdesk/index.json" "$index_digest"
+        manifest_digest="$(jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | if length == 1 then .[0].digest else empty end' \
+            "$work_dir/rustdesk/index.json")"
+        [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "rustdesk: the pinned index has no single linux/amd64 manifest"
+        registry_fetch "$token" "$RUSTDESK_MANIFEST_TYPE" "$RUSTDESK_REGISTRY/manifests/$manifest_digest" "$work_dir/rustdesk/manifest.json" "${manifest_digest#sha256:}"
+        layer_digests="$(jq -r '.layers[].digest' "$work_dir/rustdesk/manifest.json")"
+        while IFS= read -r layer_digest; do
+            [[ "$layer_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "rustdesk: bad layer digest '$layer_digest'"
+            registry_fetch "$token" "*/*" "$RUSTDESK_REGISTRY/blobs/$layer_digest" "$work_dir/rustdesk/layer.tgz" "${layer_digest#sha256:}"
+            tar -xzf "$work_dir/rustdesk/layer.tgz" -C "$work_dir/rustdesk" --no-same-owner --no-same-permissions
+        done <<<"$layer_digests"
+        for binary in hbbs hbbr; do
+            expected="$(pin_field "rustdesk-$binary" 2)"
+            [[ -f "$work_dir/rustdesk/usr/bin/$binary" ]] || die "rustdesk: the pinned image has no $binary"
+            [[ "$(sha256_of "$work_dir/rustdesk/usr/bin/$binary")" == "$expected" ]] ||
+                die "rustdesk: $binary sha256 does not match the pin $expected; review the pin before changing it"
+            cp "$work_dir/rustdesk/usr/bin/$binary" "$LAB_RUSTDESK_CACHE/$(pin_field "rustdesk-$binary" 3)"
+        done
+    fi
+    for binary in hbbs hbbr; do
+        cp "$LAB_RUSTDESK_CACHE/$(pin_field "rustdesk-$binary" 3)" "$work_dir/$binary-binary"
+    done
+    extra_vars=(-var "hbbs_binary=$work_dir/hbbs-binary" -var "hbbr_binary=$work_dir/hbbr-binary")
+}
+
 extra_vars=()
 case "$image" in
+    rustdesk-relay)
+        prepare_linux
+        prepare_rustdesk
+        ;;
     win11) prepare_windows win11 ;;
     ws2022-dc) prepare_windows ws2022 ;;
     datastore)

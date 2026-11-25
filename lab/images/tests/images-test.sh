@@ -40,6 +40,10 @@ for template in "$IMAGES_DIR"/*.pkr.hcl; do
         touch "$work_dir/garage-binary"
         extra_vars=(-var "garage_binary=$work_dir/garage-binary")
     fi
+    if [[ "$(basename "$template")" == rustdesk-relay.pkr.hcl ]]; then
+        touch "$work_dir/hbbs-binary" "$work_dir/hbbr-binary"
+        extra_vars=(-var "hbbs_binary=$work_dir/hbbs-binary" -var "hbbr_binary=$work_dir/hbbr-binary")
+    fi
     check "packer validate $(basename "$template")" packer validate \
         -var "ssh_private_key_file=$work_dir/key" -var "ssh_public_key=$(cat "$work_dir/key.pub")" "${extra_vars[@]}" "$template"
 done
