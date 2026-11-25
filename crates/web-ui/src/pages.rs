@@ -9,9 +9,10 @@ use crate::api::{
 use crate::model::{
     Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, AttackListView, AttackReportItem, AttackReportView,
     CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, GrcListView,
-    GrcReportItem, GrcReportView, Language, LeaseView, LinksPanel, LookupView, ObservableView, ObservablesPanel, OncallAlertView, OncallListView,
-    PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts,
-    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView, VulnView,
+    GrcReportItem, GrcReportView, GroupListView, GroupView, Language, LeaseView, LinksPanel, LookupView, ObservableView, ObservablesPanel,
+    OncallAlertView, OncallListView, PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView,
+    RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView,
+    VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
@@ -194,6 +195,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/assets", text(language, "nav_assets")))
                         (go("/risk", text(language, "nav_risk")))
                         (go("/certificates", text(language, "nav_certs")))
+                        (go("/alert-groups", text(language, "nav_groups")))
                         (go("/hunts", text(language, "nav_hunts")))
                         (go("/compliance", text(language, "nav_compliance")))
                         (go("/vulnerabilities", text(language, "nav_vulns")))
@@ -1363,6 +1365,88 @@ pub fn hunts_notices(language: Language, list: &FindingsView) -> Markup {
 pub fn counted_notice(language: Language, one_key: &str, many_key: &str, count: u64) -> String {
     let key = if count == 1 { one_key } else { many_key };
     text(language, key).replace("{count}", &count.to_string())
+}
+
+
+/// The representative alert is a link only when its id passes `valid_id`, else clipped text.
+pub fn group_representative(representative: &str, language: Language) -> Markup {
+    if valid_id(representative) {
+        go(&format!("/alerts/{representative}"), representative)
+    } else {
+        html! { (clip_identity(language, representative, MAX_FIELD_CHARS)) }
+    }
+}
+
+
+pub fn group_notes(language: Language, group: &GroupView) -> Markup {
+    html! {
+        @if group.omitted { (text(language, "group_omitted")) " " }
+        @if group.cut_at_older { (text(language, "group_cut")) }
+    }
+}
+
+
+pub fn group_row(language: Language, group: &GroupView) -> Markup {
+    html! {
+        tr {
+            td { (clip_identity(language, &group.rule_id, MAX_FIELD_CHARS)) }
+            td { (optional_identity(language, group.host_name.as_ref())) }
+            td { (optional_identity(language, group.user_name.as_ref())) }
+            td { (group.alert_count) }
+            td { (group.duplicates) }
+            td { (clip_identity(language, &group.max_severity, MAX_FIELD_CHARS)) }
+            td { (clip_identity(language, &group.first_time, MAX_FIELD_CHARS)) }
+            td { (clip_identity(language, &group.last_time, MAX_FIELD_CHARS)) }
+            td { (group_representative(&group.representative, language)) }
+            td { (group_notes(language, group)) }
+        }
+    }
+}
+
+
+pub fn groups_page(language: Language, csrf: &str, list: &GroupListView) -> Markup {
+    let oldest = list.oldest_read.as_deref().map_or_else(
+        || text(language, "none_marker").to_owned(),
+        |time| clip_identity(language, time, MAX_FIELD_CHARS),
+    );
+    let read = text(language, "groups_read")
+        .replace("{count}", &list.alerts_read.to_string())
+        .replace("{oldest}", &oldest);
+    layout(
+        language,
+        "title_groups",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_groups")) }
+            @if !list.complete {
+                div class="notice" { (text(language, "groups_incomplete")) }
+            }
+            div { (read) }
+            @if list.groups.is_empty() {
+                div { (text(language, "groups_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_rule")) }
+                            th { (text(language, "col_host")) }
+                            th { (text(language, "col_user")) }
+                            th { (text(language, "col_count")) }
+                            th { (text(language, "col_duplicates")) }
+                            th { (text(language, "col_severity")) }
+                            th { (text(language, "col_first")) }
+                            th { (text(language, "col_last")) }
+                            th { (text(language, "col_representative")) }
+                            th { (text(language, "col_notes")) }
+                        }
+                    }
+                    tbody {
+                        @for group in &list.groups { (group_row(language, group)) }
+                    }
+                }
+            }
+        },
+    )
 }
 
 

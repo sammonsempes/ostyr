@@ -2,8 +2,8 @@ use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, AttackBodyScan, AttackListView,
     AttackReportView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery, FindingsView, GrcBodyScan, GrcListView,
-    GrcReportView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView,
-    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    GrcReportView, GroupListView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView, RiskDetailView,
+    RiskListView, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -1086,6 +1086,56 @@ pub async fn list_findings(client: &ApiClient, source: IpAddr, token: &SecretStr
     scan_hunt_list(&bytes)?;
     let list: FindingsView = serde_json::from_slice(&bytes)?;
     check_hunt_list(&list).map(|()| list)
+}
+
+
+/// The grouping route's `MAX_GROUPS`.
+pub const MAX_GROUPS: usize = 1_000;
+
+
+/// The grouping route's `MAX_ALERTS_PER_GROUP`.
+pub const MAX_GROUP_IDS: usize = 50;
+
+
+pub const GROUPS_PATH: &str = "alert-groups";
+
+
+#[derive(Deserialize)]
+pub struct GroupsScan<'a> {
+    #[serde(borrow)]
+    pub groups: Vec<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct GroupIdsScan<'a> {
+    #[serde(borrow)]
+    pub alert_ids: Vec<&'a RawValue>,
+}
+
+
+/// Counts the groups, then the ids of each, on raw slices before any typed value is built.
+pub fn scan_groups(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: GroupsScan = serde_json::from_slice(bytes)?;
+    if scan.groups.len() > MAX_GROUPS {
+        Err(ApiFailure::Malformed("too many groups"))
+    } else {
+        scan.groups.iter().try_for_each(|group| {
+            let ids: GroupIdsScan = serde_json::from_str(group.get())?;
+            if ids.alert_ids.len() > MAX_GROUP_IDS {
+                Err(ApiFailure::Malformed("too many alert ids"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+
+pub async fn list_groups(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<GroupListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, GROUPS_PATH, Some(token), None).await?;
+    scan_groups(&bytes)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 
