@@ -345,7 +345,8 @@ pub async fn serve(service: &Service, rounds: usize, interrupt: &mut InterruptWa
     let mut cursor = Cursor::default();
     let mut stopped = false;
     let mut done = 0;
-    while !stopped && done < rounds.min(MAX_PASSES) {
+    let passes = rounds.min(MAX_PASSES);
+    while !stopped && done < MAX_PASSES.min(passes) {
         let live = current_config(&service.settings);
         if elapsed_seconds(started) >= cursor.check_due {
             stopped = check_turn(service, &mut cursor, &live, started, interrupt).await?;
@@ -354,7 +355,7 @@ pub async fn serve(service: &Service, rounds: usize, interrupt: &mut InterruptWa
             stopped = restore_turn(service, &mut cursor, &live, started, interrupt).await?;
         }
         done += 1;
-        if !stopped && done < rounds {
+        if !stopped && done < passes {
             stopped = wait_for_due(&cursor, started, interrupt).await?;
         }
     }
