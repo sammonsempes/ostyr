@@ -42,3 +42,19 @@ pub type Store<'a> = dyn Fn(&[Alert]) -> Result<usize, StoreError> + 'a;
 
 
 pub type Stopped<'a> = dyn Fn() -> bool + 'a;
+
+
+/// Sleeps for one slice of the pause between rounds.
+pub type Sleep<'a> = dyn Fn(Duration) + 'a;
+
+
+/// The real `Fetch` with the CA roots of the loaded checks file as its last argument.
+pub type RootedFetch<'a> = dyn Fn(&HttpRequest, Duration, FetchCaps, &[Vec<u8>]) -> io::Result<HttpResponse> + 'a;
+
+
+/// The one read of the service file at start.
+pub type StartRead = fn(&std::path::Path) -> Result<crate::serve::ServiceSettings, core_config::error::ConfigError>;
+
+
+/// Where the stop flag comes from: the signals in production.
+pub type StopSource = fn() -> io::Result<std::sync::Arc<std::sync::atomic::AtomicBool>>;

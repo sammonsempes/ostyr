@@ -3,8 +3,8 @@
 use crate::alerting::{alert_of, outage_alerts, Outage};
 use crate::decision::should_alert;
 use crate::error::CheckError;
-use crate::load::runner_location_ok;
-use crate::model::{failure_run_len, Check, LocationHistory, MAX_LOCATION_LEN};
+use crate::load::{count_within, runner_location_ok};
+use crate::model::{failure_run_len, Check, LocationHistory, MAX_CHECKS, MAX_LOCATION_LEN};
 use crate::types::{Clock, Probe, Stopped, Store, WallClock};
 use core_pg::scope::{tenant_of, TenantScope};
 use std::collections::BTreeSet;
@@ -81,6 +81,7 @@ pub struct RoundReport {
     pub stored: usize,
     pub store_failed: bool,
     pub pending: usize,
+    pub pending_dropped: usize,
 }
 
 
@@ -160,6 +161,7 @@ pub fn next_state(old: Option<&CheckState>, check: &Check, location: &str) -> Ch
 
 /// Swaps in the new checks by name (a duplicate name is refused and nothing changes): a kept check keeps its state when only its timing changed, any other change resets it; pending outages stay.
 pub fn reload_checks(runner: &mut Runner, checks: &[Check]) -> Result<ReloadReport, CheckError> {
+    count_within("checks", checks.len(), 0, MAX_CHECKS)?;
     let mut names = BTreeSet::new();
     checks.iter().try_for_each(|check| {
         names
@@ -266,8 +268,8 @@ pub fn reserved_flags(states: &[CheckState], pending: &[Outage]) -> Vec<bool> {
 }
 
 
-/// Drops the oldest unreserved pending outages beyond `MAX_PENDING_OUTAGES`, counted; the newest outage of each current check is never dropped.
-pub fn trim_pending(runner: &mut Runner) {
+/// Drops the oldest unreserved pending outages beyond `MAX_PENDING_OUTAGES`, counted and warned; answers the number dropped. The newest outage of each current check is never dropped.
+pub fn trim_pending(runner: &mut Runner) -> usize {
     let reserved = reserved_flags(&runner.states, &runner.pending);
     let shared = reserved.iter().filter(|is_reserved| !**is_reserved).count();
     let excess = shared.saturating_sub(MAX_PENDING_OUTAGES);
@@ -283,6 +285,10 @@ pub fn trim_pending(runner: &mut Runner) {
         .map(|(outage, _is_reserved)| outage)
         .collect();
     runner.counters.pending_dropped += excess as u64;
+    if excess > 0 {
+        tracing::warn!(excess, "pending outages dropped: the shared pending cap was reached");
+    }
+    excess
 }
 
 
@@ -367,7 +373,7 @@ pub fn run_round(runner: &mut Runner, ctx: &RoundContext) -> RoundReport {
         },
     );
     outages.into_iter().for_each(|outage| add_pending(runner, outage));
-    trim_pending(runner);
+    let pending_dropped = trim_pending(runner);
     let (stored, store_failed) = flush_pending(runner, ctx);
     runner.counters.probes += probed as u64;
     let deferred = due.len().saturating_sub(probed);
@@ -383,5 +389,6 @@ pub fn run_round(runner: &mut Runner, ctx: &RoundContext) -> RoundReport {
         stored,
         store_failed,
         pending: runner.pending.len(),
+        pending_dropped,
     }
 }
