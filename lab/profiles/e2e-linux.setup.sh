@@ -12,6 +12,9 @@ readonly DATASTORE_DOMAIN="datastore.lab.test"
 readonly TENANT="lab"
 readonly AGENT_ID="agent1"
 readonly GATEWAY_PORT=7443
+readonly GATEWAY_DIRECT_PORT=7444
+readonly RELAY_PORT=7442
+readonly RELAY_NOFILE=4096
 readonly ALERTS_PORT=7444
 readonly WEB_PORT=7445
 readonly ANALYST_USER="analyst"
@@ -23,7 +26,7 @@ readonly MUSL_TARGET="x86_64-unknown-linux-musl"
 readonly STORE_KEY_BYTES=32
 readonly STREAM_DUPLICATE_WINDOW_NS=600000000000
 readonly CONSUMER_ACK_WAIT="30s"
-readonly SERVICES=(event-gateway siem-ingest detection alerts-api web-ui)
+readonly SERVICES=(event-gateway relay siem-ingest detection alerts-api web-ui)
 
 lab_state="${1:?usage: e2e-linux.setup.sh <lab-state-dir> <lab-prefix>}"
 profiles_dir="$(dirname "${BASH_SOURCE[0]}")"
@@ -45,7 +48,7 @@ build_dir="$repo_dir/target/$MUSL_TARGET/release/examples"
 log "building the release examples for $MUSL_TARGET"
 (cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --examples \
     -p siem-ingest -p detection -p alerts -p agent-linux) >&2
-(cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --bin ostyr-web-ui --bin ostyr-auth --bin ostyr-event-gateway --bin ostyr-siem-ingest -p web-ui -p core-auth -p event-gateway -p siem-ingest) >&2
+(cd "$repo_dir" && cargo build --release --target "$MUSL_TARGET" --bin ostyr-web-ui --bin ostyr-auth --bin ostyr-event-gateway --bin ostyr-siem-ingest --bin ostyr-relay -p web-ui -p core-auth -p event-gateway -p siem-ingest -p relay) >&2
 bin_dir="$repo_dir/target/$MUSL_TARGET/release"
 
 stage="$lab_state/e2e-stage"
@@ -103,10 +106,12 @@ done
 install -m 755 "$bin_dir/ostyr-web-ui" "$stage/datastore/usr/local/bin/ostyr-web-ui"
 install -m 755 "$bin_dir/ostyr-siem-ingest" "$stage/datastore/usr/local/bin/ostyr-siem-ingest"
 install -m 755 "$bin_dir/ostyr-event-gateway" "$stage/datastore/usr/local/bin/ostyr-event-gateway"
+install -m 755 "$bin_dir/ostyr-relay" "$stage/datastore/usr/local/bin/ostyr-relay"
 install -m 755 "$build_dir/linux_agent" "$stage/client/usr/local/bin/linux_agent"
 
 cat >"$datastore_etc/gateway-server.yaml" <<YAML
-listen: "$datastore_address:$GATEWAY_PORT"
+listen: "127.0.0.1:$GATEWAY_DIRECT_PORT"
+relay_listen: "$datastore_address:$GATEWAY_PORT"
 certificate: /etc/ostyr/tls.crt
 key: /etc/ostyr/tls-gateway.key
 agent_ca: /etc/ostyr/agent-ca.pem
@@ -117,7 +122,11 @@ events_file: /var/lib/ostyr/gateway/unused-events.log
 commands_dir: /var/lib/ostyr/gateway/commands
 YAML
 printf 'revoked_serials: []\n' >"$datastore_etc/revoked.yaml"
-printf '{}\n' >"$datastore_etc/channel-settings.yaml"
+printf 'relay_sources: [%s]\n' "${E2E_RELAY_SOURCE:-$datastore_address}" >"$datastore_etc/channel-settings.yaml"
+cat >"$datastore_etc/relay.yaml" <<YAML
+listen: "$datastore_address:$RELAY_PORT"
+upstream: "$datastore_address:$GATEWAY_PORT"
+YAML
 cat >"$datastore_etc/gateway.yaml" <<YAML
 settings_file: /etc/ostyr/gateway-settings.yaml
 audit_file: /var/lib/ostyr/gateway/gateway-audit.log
@@ -267,13 +276,20 @@ UNIT
 }
 datastore_units="$stage/datastore/etc/systemd/system"
 unit event-gateway "/usr/local/bin/ostyr-event-gateway /etc/ostyr/gateway-server.yaml /etc/ostyr/gateway.yaml" "User=ostyr-gateway" >"$datastore_units/ostyr-event-gateway.service"
+unit relay "/usr/local/bin/ostyr-relay /etc/ostyr/relay.yaml /var/lib/ostyr/relay/relay-audit.log" "User=ostyr-relay
+LimitNOFILE=$RELAY_NOFILE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ostyr/relay" >"$datastore_units/ostyr-relay.service"
 unit siem-ingest "/usr/local/bin/ostyr-siem-ingest /etc/ostyr/ingest.yaml" "User=ostyr-siem" >"$datastore_units/ostyr-siem-ingest.service"
 unit detection "/usr/local/bin/detect /etc/ostyr/detection.yaml /run/ostyr-stop-detection" "User=ostyr-detection" >"$datastore_units/ostyr-detection.service"
 unit alerts-api "/usr/local/bin/alerts_api /etc/ostyr/alerts.yaml" "User=ostyr-alerts" >"$datastore_units/ostyr-alerts-api.service"
 unit web-ui "/usr/local/bin/ostyr-web-ui /etc/ostyr/web-ui.yaml" "User=ostyr-web" >"$datastore_units/ostyr-web-ui.service"
 
 cat >"$client_etc/agent.yaml" <<YAML
-server: "$datastore_address:$GATEWAY_PORT"
+server: "$datastore_address:$GATEWAY_DIRECT_PORT"
+relays:
+  - "$datastore_address:$RELAY_PORT"
 server_name: $DATASTORE_DOMAIN
 certificate: /etc/ostyr/agent.crt
 key: /etc/ostyr/agent.key
@@ -313,11 +329,12 @@ set -euo pipefail
 duplicate_window_ns="$1"
 ACK_WAIT="$2"
 source /etc/ostyr-lab/datastore.env
-for service_user in ostyr-gateway ostyr-siem ostyr-detection ostyr-alerts ostyr-web; do
+for service_user in ostyr-gateway ostyr-relay ostyr-siem ostyr-detection ostyr-alerts ostyr-web; do
     id "$service_user" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$service_user"
 done
 install -d -m 755 /var/lib/ostyr
 install -d -m 700 -o ostyr-gateway /var/lib/ostyr/gateway /var/lib/ostyr/gateway/commands
+install -d -m 700 -o ostyr-relay /var/lib/ostyr/relay
 install -d -m 700 -o ostyr-siem /var/lib/ostyr/siem-ingest
 install -d -m 700 -o ostyr-detection /var/lib/ostyr/detection /var/lib/ostyr/detection/checkpoints
 install -d -m 700 -o ostyr-alerts /var/lib/ostyr/alerts
