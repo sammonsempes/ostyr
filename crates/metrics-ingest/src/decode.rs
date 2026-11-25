@@ -12,6 +12,9 @@ use std::mem::size_of;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
+pub const RESERVED_PREFIX: &str = "ostyr.";
+
+
 pub const MIN_ALLOCATION_BYTES: usize = 32;
 
 
@@ -131,9 +134,18 @@ pub fn text_problem(text: &str, max_bytes: usize) -> Option<DropReason> {
 }
 
 
+pub fn is_reserved_name(name: &str) -> bool {
+    name.as_bytes()
+        .get(..RESERVED_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(RESERVED_PREFIX.as_bytes()))
+}
+
+
 pub fn header_problem(metric: &Metric, limits: &Limits) -> Option<DropReason> {
     if metric.name.is_empty() {
         Some(DropReason::EmptyName)
+    } else if is_reserved_name(&metric.name) {
+        Some(DropReason::ReservedName)
     } else {
         text_problem(&metric.name, limits.max_name_bytes).or_else(|| text_problem(&metric.unit, limits.max_name_bytes))
     }

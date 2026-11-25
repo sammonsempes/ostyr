@@ -149,6 +149,7 @@ pub struct SampleRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DropReason {
     EmptyName,
+    ReservedName,
     TextTooLong,
     ControlCharacter,
     TooManyLabels,
@@ -251,6 +252,7 @@ impl Display for DropReason {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         let name = match self {
             Self::EmptyName => "empty_name",
+            Self::ReservedName => "reserved_name",
             Self::TextTooLong => "text_too_long",
             Self::ControlCharacter => "control_character",
             Self::TooManyLabels => "too_many_labels",
