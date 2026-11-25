@@ -59,6 +59,8 @@ pub enum FindingsError {
     BadPageSize,
     #[error("every connection is in use")]
     Busy,
+    #[error("the read task failed")]
+    Join,
     #[error("the store failed")]
     Store(#[from] StateError),
 }
