@@ -5,7 +5,7 @@ use crate::previous::{read_previous_key, record_previous, remove_stale_previous,
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
 use crate::server::read_public;
-use crate::types::{AccessTable, ConnectionTable};
+use crate::types::{AccessTable, ConnectionTable, SenderSlots, SenderTable};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::{open_file_log, AuditLog};
 use core_audit::model::Outcome;
@@ -51,6 +51,14 @@ pub const MAX_DETACHED_WRITES: u16 = 64;
 
 /// Detached writes one folded source may hold at once.
 pub const MAX_DETACHED_PER_SOURCE: usize = 8;
+
+
+/// Concurrent OTLP decodes one sender may hold (T889A); the slot is held until the blocking task ends.
+pub const MAX_TRACE_DECODES_PER_SENDER: usize = 4;
+
+
+/// Concurrent OTLP decodes of the whole process.
+pub const MAX_TRACE_DECODES: u16 = 16;
 
 
 /// Authenticated reads that may run past their client at once (the global pool of the detached reads, T883): at least `connection_demand()` of the platform.
@@ -152,6 +160,10 @@ pub fn build_state(
         detached_reads: detached_pool(MAX_DETACHED_READS),
         detached_read_sources: ConnectionTable::default(),
         detached_reads_refused: AtomicU64::new(0),
+        senders: ArcSwap::from_pointee(SenderTable::new()),
+        sender_slots: SenderSlots::default(),
+        sender_pool: detached_pool(MAX_TRACE_DECODES),
+        sender_refused: AtomicU64::new(0),
     })
 }
 
@@ -368,6 +380,12 @@ pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn
         tenant: &inputs.identity.tenant,
         request_id,
     }
+}
+
+
+/// Replaces the whole sender table: a request in flight keeps the snapshot it was admitted under.
+pub fn replace_senders(app: &ApiState, table: SenderTable) {
+    app.senders.store(Arc::new(table));
 }
 
 
