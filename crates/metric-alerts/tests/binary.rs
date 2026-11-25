@@ -7,7 +7,9 @@ mod stub;
 
 
 use common::types::TestResult;
-use metric_alerts::serve::{one_pass, pause, run, start, system_now, ServeError};
+use core_config::error::ConfigError;
+use metric_alerts::serve::{one_pass, pause, run, serving_with, start, system_now, ServeError};
+use metric_alerts::service::{load_settings, ServiceSettings};
 use metric_alerts::service::{Live, PassReport};
 use metric_alerts::types::InterruptWait;
 use pg_fake::certs::{loopback, make_pki};
@@ -381,5 +383,41 @@ async fn a_pass_that_reaches_neither_store_runs_nothing_and_counts_it() -> TestR
 async fn the_pause_waits_and_the_clock_reads() -> TestResult {
     pause(Duration::ZERO).await;
     assert!(system_now() > 0);
+    Ok(())
+}
+
+
+fn read_then_swap_the_pg_settings(file: &Path) -> Result<ServiceSettings, ConfigError> {
+    let first = load_settings(file)?;
+    let text = fs::read_to_string(file).map_err(|failure| ConfigError::WatchedFile {
+        file: file.display().to_string(),
+        reason: failure.to_string(),
+    })?;
+    fs::write(file, text.replace("pg.yaml", "other.yaml")).map_err(|failure| ConfigError::WatchedFile {
+        file: file.display().to_string(),
+        reason: failure.to_string(),
+    })?;
+    Ok(first)
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_start_reads_the_settings_once_so_a_swap_during_start_is_refused() -> TestResult {
+    let dir = tempdir()?;
+    let (_closed, port) = closed_socket()?;
+    let site = write_site(dir.path(), port, "", port, "[a]")?;
+    let error = serving_with(
+        read_then_swap_the_pg_settings,
+        &site.settings_file,
+        ONE_ROUND,
+        &system_now,
+        &at_once,
+        never(),
+    )
+    .await
+    .err()
+    .ok_or("the swap was accepted")?;
+    assert!(error.to_string().contains("start-only"), "{error}");
+    assert!(dir.path().join("audit.log").exists());
     Ok(())
 }
