@@ -1,7 +1,7 @@
 use crate::error::RpzError;
 use crate::model::{ReloadVerdict, Reloader, RoundOutcome, RunSummary};
 use crate::policy::Policy;
-use crate::run::generate;
+use crate::run::generate_sized;
 use crate::types::{ClockFn, OpenFn};
 use crate::unbound::reload_zone;
 use core_config::reload::{current_config, reload, ReloadEngine};
@@ -42,7 +42,7 @@ pub fn run_round_with(session: &mut Session, policy: &Policy) -> io::Result<Roun
     let instant = (session.clock)();
     let result: Result<_, RpzError> = (session.open)(instant)
         .map_err(RpzError::from)
-        .and_then(|mut input| generate(policy, &mut input, instant, session.counter, session.output))
+        .and_then(|(mut input, length)| generate_sized(policy, &mut input, length, instant, session.counter, session.output))
         .map(|summary| RunSummary {
             source_bad_rows: session.rejected.load(Ordering::Relaxed),
             ..summary

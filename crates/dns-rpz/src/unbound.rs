@@ -4,7 +4,7 @@ use crate::limits::{
 };
 use crate::model::{Capture, CommandStatus, ReloadVerdict, Reloader};
 use crate::policy::{Action, Policy};
-use crate::types::RunnerFn;
+use crate::types::{GroupKillFn, RunnerFn};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::reload::ReloadContext;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -92,15 +92,24 @@ pub fn reaped(status: Option<ExitStatus>) -> io::Result<()> {
 
 /// Own process group, stdout in an anonymous file; the group and the leader are killed with the command or at the deadline, output capped.
 pub fn run_capture(program: &str, arguments: &[String], deadline: Duration) -> io::Result<Capture> {
+    run_capture_with(program, arguments, deadline, end_group)
+}
+
+
+/// `run_capture` with the group kill injected: the leader is killed and reaped whatever it returns, then its error is reported.
+pub fn run_capture_with(program: &str, arguments: &[String], deadline: Duration, group_kill: GroupKillFn) -> io::Result<Capture> {
     let mut capture = tempfile::tempfile()?;
     let mut command = Command::new(program);
     let mut child = in_own_group(command.args(arguments).stdin(Stdio::null()).stderr(Stdio::null()))
         .stdout(Stdio::from(capture.try_clone()?))
         .spawn()?;
     let waited = child.wait_timeout(deadline)?;
-    end_group(&mut child)?;
-    child.kill()?;
-    reaped(child.wait_timeout(Duration::from_secs(REAP_GRACE_SECONDS))?)?;
+    let group_result = group_kill(&mut child);
+    let leader_result = child.kill();
+    let reap_result = child.wait_timeout(Duration::from_secs(REAP_GRACE_SECONDS));
+    group_result?;
+    leader_result?;
+    reaped(reap_result?)?;
     let status = match waited {
         Some(status) if status.success() => CommandStatus::Success,
         Some(status) => CommandStatus::Failed(status.code()),

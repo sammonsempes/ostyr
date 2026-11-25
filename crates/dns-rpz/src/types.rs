@@ -8,7 +8,15 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 
-pub type OpenFn<'a> = dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>> + 'a;
+/// The reader and the byte length the source had when it was opened, when that is known.
+pub type Opened = (Box<dyn BufRead>, Option<u64>);
+
+
+pub type OpenFn<'a> = dyn Fn(OffsetDateTime) -> io::Result<Opened> + 'a;
+
+
+/// Ends a command's process group; production passes `end_group`.
+pub type GroupKillFn = fn(&mut std::process::Child) -> io::Result<()>;
 
 
 pub type ClockFn<'a> = dyn Fn() -> OffsetDateTime + 'a;

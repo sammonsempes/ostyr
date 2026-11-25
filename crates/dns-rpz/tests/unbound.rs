@@ -18,11 +18,11 @@ use dns_rpz::limits::{MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK};
 use dns_rpz::model::{Capture, CommandStatus, ReloadVerdict, Reloader};
 use dns_rpz::policy::{validate_policy, Action, Policy};
 use dns_rpz::types::{ReadbackFn, RunnerFn};
-#[cfg(unix)]
-use dns_rpz::unbound::group_kill_result;
 use dns_rpz::unbound::{
     captured_text, reaped, reload_zone, render_unbound_config, run_capture, run_readback, run_reload, run_with_deadline, served_serial,
 };
+#[cfg(unix)]
+use dns_rpz::unbound::{group_kill_result, run_capture_with};
 use fixtures::fixture;
 use logging::init_logging;
 use runner::{failing_runner, succeeding_runner};
@@ -41,6 +41,14 @@ const SHORT_DEADLINE: Duration = Duration::from_millis(50);
 
 
 const LONG_DEADLINE: Duration = Duration::from_secs(60);
+
+
+#[cfg(unix)]
+const INSTANT_DEADLINE: Duration = Duration::from_millis(1);
+
+
+#[cfg(unix)]
+const LEADER_SLEEP_SECONDS: &str = "600";
 
 
 const OVER_TIMEOUT: u64 = 301;
@@ -455,5 +463,34 @@ fn unacceptable_unbound_settings_are_refused() -> TestResult {
     let mut accepted = with_override(Some(Action::Nodata));
     accepted.unbound.log_name = Some("ostyr".to_owned());
     validate_policy(&accepted)?;
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn failing_group_kill(child: &mut std::process::Child) -> io::Result<()> {
+    Err(io::Error::other(format!("group kill refused for {}", child.id())))
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_failed_group_kill_still_kills_and_reaps_the_leader_then_reports_its_error() -> TestResult {
+    let arguments = [LEADER_SLEEP_SECONDS.to_owned()];
+    let result = run_capture_with("sleep", &arguments, INSTANT_DEADLINE, failing_group_kill);
+    let message = result
+        .err()
+        .map(|error| error.to_string())
+        .ok_or("the failed group kill was not reported")?;
+    let leader_pid = message
+        .strip_prefix("group kill refused for ")
+        .ok_or("the group kill error was replaced")?
+        .parse::<i32>()?;
+    let leader = rustix::process::Pid::from_raw(leader_pid).ok_or("the leader pid is invalid")?;
+    assert_eq!(
+        rustix::process::test_kill_process(leader),
+        Err(Errno::SRCH),
+        "the leader {leader_pid} was left running or unreaped"
+    );
     Ok(())
 }

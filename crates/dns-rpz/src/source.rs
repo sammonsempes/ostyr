@@ -1,7 +1,7 @@
 use crate::error::SourceError;
 use crate::limits::{CLICKHOUSE_PREFIX, SOURCE_FAILED};
-use crate::run::open_file;
-use crate::types::OpenFn;
+use crate::run::open_file_sized;
+use crate::types::{OpenFn, Opened};
 use core_config::load::load_file;
 use intel_feeds::config::{validate_feeds, FeedsFile};
 use intel_feeds::read::{read_iocs, total_bad};
@@ -24,12 +24,12 @@ pub fn read_buffer(feeds_file: &Path, now: OffsetDateTime) -> Result<(Vec<u8>, u
 
 
 /// Any failure is an `io::Error` with fixed text, so the run ends before the counter or the zone is touched.
-pub fn clickhouse_open<'a>(feeds_file: &'a Path, rejected: &'a AtomicU64) -> impl Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>> + 'a {
+pub fn clickhouse_open<'a>(feeds_file: &'a Path, rejected: &'a AtomicU64) -> impl Fn(OffsetDateTime) -> io::Result<Opened> + 'a {
     move |now| {
         read_buffer(feeds_file, now)
             .map(|(lines, bad_rows)| {
                 rejected.store(bad_rows, Ordering::Relaxed);
-                Box::new(Cursor::new(lines)) as Box<dyn BufRead>
+                (Box::new(Cursor::new(lines)) as Box<dyn BufRead>, None)
             })
             .map_err(|error| {
                 warn!(%error, "ClickHouse IOC source failed");
@@ -43,6 +43,6 @@ pub fn clickhouse_open<'a>(feeds_file: &'a Path, rejected: &'a AtomicU64) -> imp
 pub fn open_source<'a>(spec: &'a str, rejected: &'a AtomicU64) -> Box<OpenFn<'a>> {
     match spec.strip_prefix(CLICKHOUSE_PREFIX) {
         Some(feeds_file) => Box::new(clickhouse_open(Path::new(feeds_file), rejected)),
-        None => Box::new(move |_now| open_file(Path::new(spec))),
+        None => Box::new(move |_now| open_file_sized(Path::new(spec))),
     }
 }
