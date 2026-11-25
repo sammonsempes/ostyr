@@ -11,6 +11,7 @@ pub mod model;
 pub mod params;
 pub mod render;
 pub mod run;
+pub mod runs;
 pub mod serve;
 pub mod service;
 pub mod simulate;

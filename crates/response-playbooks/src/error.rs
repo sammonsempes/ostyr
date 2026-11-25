@@ -138,6 +138,10 @@ pub enum RoundError {
     Trace(#[source] io::Error),
     #[error("cannot append the round record: {0}")]
     Audit(#[from] core_audit::error::AuditError),
+    #[error("run store: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("the run store statement `{statement}` gave no count")]
+    Answer { statement: &'static str },
     #[error("the feed answered {deleted} rows deleted for a page of {expected}")]
     AckCount { deleted: usize, expected: usize },
 }

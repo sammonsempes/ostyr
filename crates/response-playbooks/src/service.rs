@@ -3,7 +3,8 @@ use crate::bundle::{Bundle, MODULE};
 use crate::error::RoundError;
 use crate::feed::alert_json;
 use crate::render::write_dry_run;
-use crate::types::{LiveFn, NowFn, WaitFn};
+use crate::runs::{run_rows, store_runs, RunRow, BOUND_NAME, MAX_PLAYBOOK_RUNS};
+use crate::types::{ControlFn, LiveFn, NowFn, WaitFn};
 use alerts::id::is_alert_id;
 use alerts::model::{FeedItem, FeedRow};
 use alerts::store::{ack_playbook_feed, read_playbook_feed, MAX_PAGE_SIZE};
@@ -14,6 +15,7 @@ use core_config::load::load_file;
 use core_config::reload::{open_engine, ReloadContext, ReloadEngine};
 use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
+use core_pg::transaction::Boundary;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,7 +74,7 @@ pub const LOUD_AFTER_FAILURES: u32 = 2;
 pub const MAX_REPLAYED_ROUNDS: u32 = 3;
 
 
-pub const ROUND_KEYS: [&str; 13] = [
+pub const ROUND_KEYS: [&str; 16] = [
     BOUNDS_KEY,
     "acknowledged",
     "alerts",
@@ -86,6 +88,9 @@ pub const ROUND_KEYS: [&str; 13] = [
     "skipped",
     "undecodable",
     "expired_unprocessed",
+    "runs_written",
+    "runs_replayed",
+    "runs_pruned",
 ];
 
 
@@ -152,6 +157,9 @@ pub struct Outcome {
     pub expired: Vec<String>,
     pub acknowledged: Vec<String>,
     pub bounds: Vec<&'static str>,
+    pub runs_written: usize,
+    pub runs_replayed: usize,
+    pub runs_pruned: usize,
 }
 
 
@@ -346,6 +354,7 @@ pub fn outcome_of(items: &[FeedItem], sorted: &Sorted<'_>, report: Option<&DryRu
         expired: sorted.expired.clone(),
         acknowledged: items.iter().map(|item| shown_id(&item.id)).collect(),
         bounds: bounds.into_iter().filter(|(hit, _name)| *hit).map(|(_hit, name)| name).collect(),
+        ..Outcome::default()
     }
 }
 
@@ -370,6 +379,9 @@ pub fn round_entry(tenant: &str, outcome: &Outcome, now: OffsetDateTime) -> NewE
         ("undecodable", list(&outcome.undecodable)),
         ("expired_unprocessed", list(&outcome.expired)),
         ("acknowledged", list(&outcome.acknowledged)),
+        ("runs_written", outcome.runs_written.to_string()),
+        ("runs_replayed", outcome.runs_replayed.to_string()),
+        ("runs_pruned", outcome.runs_pruned.to_string()),
         (BOUNDS_KEY, json!(outcome.bounds).to_string()),
     ]
     .into_iter()
@@ -447,9 +459,116 @@ pub fn log_partial_ack(range: Option<(u64, u64)>, deleted: usize, expected: usiz
 }
 
 
-/// One round: read the oldest page of the tenant's feed, simulate, write the trace, append one record, then delete the rows.
-pub async fn run_round<Out: Write>(
+/// The database as a round sees it: the statement executor and the transaction boundaries, both on one connection.
+pub struct Db<'a, 'b> {
+    pub exec: StoreExec<'a, 'b>,
+    pub control: ControlFn<'a>,
+}
+
+
+/// What the transaction needs besides the executor: the page, the rows to store, the record data and the replay state in force.
+pub struct Atomic<'a> {
+    pub items: &'a [FeedItem],
+    pub rows: &'a [RunRow],
+    pub outcome: &'a Outcome,
+    pub replays: &'a Replays,
+}
+
+
+/// The round's result before the commit: its record data and the replay state to keep when the commit succeeds (`committed`) or fails after the record was appended (`recorded`).
+#[derive(Debug, Clone)]
+pub struct Done {
+    pub outcome: Outcome,
+    pub recorded: Replays,
+    pub committed: Replays,
+}
+
+
+pub fn log_pruned(pruned: usize) {
+    let text = format!("playbooks run store over {MAX_PLAYBOOK_RUNS} rows: {pruned} oldest runs deleted");
+    warn!("{text}");
+}
+
+
+/// The statements of one round, in order: runs (lock, insert, count, prune), delete of the page, record. The caller ends the transaction.
+pub async fn atomic_round(
     exec: StoreExec<'_, '_>,
+    scope: &TenantScope,
+    audit: AuditAppendFn<'_>,
+    now: NowFn,
+    input: &Atomic<'_>,
+) -> Result<Done, RoundError> {
+    let counts = store_runs(exec, scope, input.rows, now().unix_timestamp()).await?;
+    let deleted = ack_playbook_feed(exec, scope, input.items).await?;
+    if deleted > input.items.len() {
+        Err(RoundError::AckCount {
+            deleted,
+            expected: input.items.len(),
+        })
+    } else {
+        let pruned_bound = (counts.pruned > 0).then_some(BOUND_NAME);
+        let outcome = Outcome {
+            runs_written: counts.written,
+            runs_replayed: counts.replayed,
+            runs_pruned: counts.pruned,
+            bounds: input.outcome.bounds.iter().copied().chain(pruned_bound).collect(),
+            ..input.outcome.clone()
+        };
+        if counts.pruned > 0 {
+            log_pruned(counts.pruned);
+        }
+        let page_ids: BTreeSet<String> = input.items.iter().map(|item| item.id.clone()).collect();
+        let replay = is_replay(input.replays, &page_ids);
+        if replay {
+            log_replay(outcome.range, input.replays.records);
+        } else {
+            audit(round_entry(tenant_of(scope), &outcome, now()))?;
+        }
+        if deleted < input.items.len() {
+            log_partial_ack(outcome.range, deleted, input.items.len());
+        }
+        let recorded = if replay {
+            input.replays.clone()
+        } else {
+            next_replays(input.replays, &page_ids)
+        };
+        let committed = if deleted == input.items.len() {
+            Replays::default()
+        } else {
+            recorded.clone()
+        };
+        Ok(Done {
+            outcome,
+            recorded,
+            committed,
+        })
+    }
+}
+
+
+/// Ends the transaction: a finished round is committed, a failed one rolled back with its error kept; a failed rollback is logged.
+pub async fn finish_round(control: ControlFn<'_>, result: Result<Done, RoundError>, replays: &mut Replays) -> Result<Outcome, RoundError> {
+    match result {
+        Ok(done) => {
+            let ended = control(Boundary::Commit).await;
+            *replays = if ended.is_ok() { done.committed } else { done.recorded };
+            ended?;
+            Ok(done.outcome)
+        }
+        Err(failed) => {
+            if let Err(refused) = control(Boundary::Rollback).await {
+                let text = format!("playbooks round rollback failed: {refused}");
+                warn!("{text}");
+            }
+            Err(failed)
+        }
+    }
+}
+
+
+/// One round: read the oldest page of the tenant's feed, simulate, write the trace, then in one transaction store the runs, delete the rows and append one record.
+pub async fn run_round<Out: Write>(
+    db: &Db<'_, '_>,
     scope: &TenantScope,
     live: &Live,
     audit: AuditAppendFn<'_>,
@@ -457,7 +576,7 @@ pub async fn run_round<Out: Write>(
     trace_out: &mut Out,
     replays: &mut Replays,
 ) -> Result<Outcome, RoundError> {
-    let items = read_playbook_feed(exec, scope, live.settings.page_size).await?;
+    let items = read_playbook_feed(db.exec, scope, live.settings.page_size).await?;
     if items.is_empty() {
         Ok(Outcome::default())
     } else {
@@ -472,27 +591,16 @@ pub async fn run_round<Out: Write>(
             write_dry_run(trace_out, found).map_err(RoundError::Trace)?;
         }
         let outcome = outcome_of(&items, &sorted, report.as_ref(), live.settings.page_size);
-        let page_ids: BTreeSet<String> = items.iter().map(|item| item.id.clone()).collect();
-        if is_replay(replays, &page_ids) {
-            log_replay(outcome.range, replays.records);
-        } else {
-            audit(round_entry(tenant_of(scope), &outcome, now()))?;
-            *replays = next_replays(replays, &page_ids);
-        }
-        let deleted = ack_playbook_feed(exec, scope, &items).await?;
-        if deleted > items.len() {
-            Err(RoundError::AckCount {
-                deleted,
-                expected: items.len(),
-            })
-        } else {
-            if deleted < items.len() {
-                log_partial_ack(outcome.range, deleted, items.len());
-            } else {
-                *replays = Replays::default();
-            }
-            Ok(outcome)
-        }
+        let rows = run_rows(tenant_of(scope), &sorted.runnable, report.as_ref(), &live.bundle.catalogue);
+        (db.control)(Boundary::Begin).await?;
+        let input = Atomic {
+            items: &items,
+            rows: &rows,
+            outcome: &outcome,
+            replays,
+        };
+        let result = atomic_round(db.exec, scope, audit, now, &input).await;
+        finish_round(db.control, result, replays).await
     }
 }
 

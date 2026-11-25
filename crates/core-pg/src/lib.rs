@@ -8,4 +8,5 @@ pub mod query;
 pub mod scope;
 pub mod settings;
 pub mod tls;
+pub mod transaction;
 pub mod types;
