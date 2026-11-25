@@ -393,7 +393,7 @@ fn read_then_swap_the_pg_settings(file: &Path) -> Result<ServiceSettings, Config
         file: file.display().to_string(),
         reason: failure.to_string(),
     })?;
-    fs::write(file, text.replace("pg.yaml", "other.yaml")).map_err(|failure| ConfigError::WatchedFile {
+    fs::write(file, text.replace("pg.yaml", "other.yaml").replace("audit.log", "second-audit.log")).map_err(|failure| ConfigError::WatchedFile {
         file: file.display().to_string(),
         reason: failure.to_string(),
     })?;
@@ -419,5 +419,6 @@ async fn the_start_reads_the_settings_once_so_a_swap_during_start_is_refused() -
     .ok_or("the swap was accepted")?;
     assert!(error.to_string().contains("start-only"), "{error}");
     assert!(dir.path().join("audit.log").exists());
+    assert!(!dir.path().join("second-audit.log").exists());
     Ok(())
 }

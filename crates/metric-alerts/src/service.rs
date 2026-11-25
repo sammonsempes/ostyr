@@ -10,6 +10,7 @@ use crate::rules::load_rules;
 use crate::types::{FetchFn, FetchResult, LiveFn, NowFn, PassFn, TenantStates, Timestamp, WaitFn};
 use alerts::error::StoreError;
 use alerts::types::Executor;
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{open_engine, ReloadContext, ReloadEngine};
@@ -39,9 +40,6 @@ pub const MAX_ROUNDS: u64 = 10_000_000;
 
 
 pub const MODULE: &str = "metric-alerts";
-
-
-pub const AUDIT_TENANT: &str = "all";
 
 
 pub const SETTINGS_REQUEST: &str = "settings";

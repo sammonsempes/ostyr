@@ -3,7 +3,7 @@ use crate::error::{ReloadError, ServiceError};
 use crate::limits::{
     AUDIT_DECLARED_KEYS, CLICKHOUSE_PREFIX, DEFAULT_UNBOUND_COMMAND, MAX_INTERVAL_SECONDS, MAX_SERVICE_SETTINGS_BYTES, MIN_INTERVAL_SECONDS,
     ROUND_CAP_EXIT_CODE, ROUND_FAILED_AUDIT_ACTION, SERVICE_ACTOR, SERVICE_ALLOWED_PUNCTUATION, SERVICE_FILE_CLASS, SERVICE_MODULE, SERVICE_SECTION,
-    SERVICE_TENANT, SERVICE_UNBOUND_COMMAND, STAGE_GENERATION, STAGE_ZONE_FILE,
+    SERVICE_UNBOUND_COMMAND, STAGE_GENERATION, STAGE_ZONE_FILE,
 };
 use crate::model::{CommandStatus, LoopEnd, RoundLoop, RoundOutcome, ServiceSettings};
 use crate::policy::Policy;
@@ -12,6 +12,7 @@ use crate::unbound::{run_readback, run_with_deadline};
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome, Record};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_bytes_capped};
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -257,7 +258,7 @@ pub fn serve_rounds(session: &mut Session, round_loop: &RoundLoop, wait: &WaitFn
 pub fn service_context(target: &str, request_id: &str) -> ReloadContext {
     ReloadContext {
         actor_id: SERVICE_ACTOR.to_owned(),
-        tenant: SERVICE_TENANT.to_owned(),
+        tenant: PLATFORM_TENANT.to_owned(),
         module: SERVICE_MODULE.to_owned(),
         target: target.to_owned(),
         request_id: request_id.to_owned(),

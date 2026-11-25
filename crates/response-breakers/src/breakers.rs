@@ -2,6 +2,7 @@ use crate::config::{breaker_loader, config_state, BreakerConfig};
 use crate::error::BreakerError;
 use crate::store::{open_store, Store};
 use crate::types::{ClockFn, SyncFn};
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::reload::{open_engine, ReloadContext, ReloadEngine};
 use core_config::types::SharedAuditFn;
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ pub struct BreakerSettings {
 pub fn open_breakers(settings: BreakerSettings) -> Result<Breakers, BreakerError> {
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant: "all".to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: settings.config_path.display().to_string(),
         request_id: RELOAD_REQUEST_ID.to_owned(),

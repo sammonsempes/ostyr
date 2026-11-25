@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alert-grouping = { version = "0.0.0", path = "../alert-grouping" }
 alerts = { version = "0.0.0", path = "../alerts" }
 attack-paths = { version = "0.0.0", path = "../attack-paths" }
 axum = "0.8"

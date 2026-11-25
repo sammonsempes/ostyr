@@ -1,7 +1,8 @@
-use crate::model::{DECLARED_KEYS, MODULE, TENANT};
+use crate::model::{DECLARED_KEYS, MODULE};
 use core_audit::error::AuditError;
 use core_audit::log::{append_declared, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome, Record};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::reload::ReloadContext;
 use core_config::types::SharedAuditFn;
 use std::fs::File;
@@ -23,7 +24,7 @@ pub fn lifecycle_entry(target: &Path, action: &str, parameters: &[(&str, String)
             kind: ActorKind::System,
             id: MODULE.to_owned(),
         },
-        tenant: TENANT.to_owned(),
+        tenant: PLATFORM_TENANT.to_owned(),
         module: MODULE.to_owned(),
         action: action.to_owned(),
         target: target.display().to_string(),
@@ -49,7 +50,7 @@ pub fn shared_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
 pub fn reload_context(target: &Path) -> ReloadContext {
     ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant: TENANT.to_owned(),
+        tenant: PLATFORM_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: target.display().to_string(),
         request_id: "settings-reload".to_owned(),

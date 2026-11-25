@@ -13,6 +13,7 @@ use crate::sink::{file_sink, open_event_store};
 use crate::tls::server_config;
 use crate::types::{EventSink, IncomingConnections, NowFn, ReadySender, ShutdownSignal};
 use core_audit::log::open_file_log;
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
 use futures_util::FutureExt;
@@ -26,9 +27,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 
 pub const SERVER_MODULE: &str = "channel_server";
-
-
-pub const SERVER_TENANT: &str = "platform";
 
 
 /// The server example configuration; the revocation file must be replaced atomically (write then rename), an in-place edit can be read half written.
@@ -147,13 +145,13 @@ pub async fn run_server_with_clock(
     let (opened_settings, settings) = open_settings_engine(
         file.settings_file.clone(),
         shared_log_audit(&log),
-        reload_context(&file.settings_file, SERVER_MODULE, SERVER_TENANT, "settings-reload"),
+        reload_context(&file.settings_file, SERVER_MODULE, PLATFORM_TENANT, "settings-reload"),
         listeners.1.is_some(),
     )?;
     let (opened_revocations, revocations) = open_revocation_engine(
         file.revocation_file.clone(),
         alerting_audit(shared_log_audit(&log)),
-        reload_context(&file.revocation_file, SERVER_MODULE, SERVER_TENANT, "revocation-reload"),
+        reload_context(&file.revocation_file, SERVER_MODULE, PLATFORM_TENANT, "revocation-reload"),
     )?;
     let settings_engine = Arc::new(opened_settings);
     let revocation_engine = Arc::new(opened_revocations);

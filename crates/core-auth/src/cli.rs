@@ -18,6 +18,7 @@ use crate::webauthn::{
 };
 use core_audit::log::open_file_log;
 use core_audit::model::Outcome;
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::secret_file::open_secret;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
@@ -39,7 +40,7 @@ pub const KEY_READ_LIMIT: u64 = 33;
 pub const KEY_READ_LIMIT_BYTES: usize = 33;
 
 
-pub const CLI_TENANT: &str = "default";
+pub const CLI_TENANT: &str = PLATFORM_TENANT;
 
 
 pub const CLI_REQUEST_ID: &str = "cli";

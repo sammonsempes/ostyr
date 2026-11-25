@@ -1,3 +1,4 @@
+use core_audit::tenant::{MAX_TENANT_BYTES, RESERVED_TENANTS};
 use std::io;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
@@ -75,7 +76,11 @@ pub enum ListenError {
     BadAddress(#[source] std::net::AddrParseError),
     #[error("cannot bind the listening socket")]
     Bind(#[source] io::Error),
-    #[error("the tenant must hold between 1 and 128 bytes")]
+    #[error(
+        "the tenant is not a valid customer tenant name: 1 to {} ASCII letters, digits, `_ . -`, starting with a letter or digit; {} are reserved",
+        MAX_TENANT_BYTES,
+        RESERVED_TENANTS.join(" and ")
+    )]
     BadTenant,
     #[error("the forward batch must hold between 1 and 1000 records")]
     BadForwardBatch,

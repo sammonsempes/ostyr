@@ -278,7 +278,7 @@ fn audit_fn(audit: &Shared) -> Box<core_config::types::SharedAuditFn> {
 fn context(path: &Path) -> ReloadContext {
     ReloadContext {
         actor_id: "test".to_owned(),
-        tenant: "all".to_owned(),
+        tenant: core_audit::tenant::AUDIT_TENANT.to_owned(),
         module: "detection".to_owned(),
         target: path.display().to_string(),
         request_id: "test-reload".to_owned(),

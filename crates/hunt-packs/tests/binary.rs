@@ -12,7 +12,7 @@ use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::load::load_file as load_settings_file;
 use hunt_packs::model::HuntPack;
 use hunt_packs::packs::load_file;
-use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, start_from, AUDIT_TENANT};
+use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, start_from};
 use hunt_packs::settings::HuntSettings;
 use hunt_packs::store::GET_SQL;
 use hunt_packs::types::InterruptWait;
@@ -451,7 +451,7 @@ fn reload_entry() -> NewEntry {
             kind: ActorKind::System,
             id: "ostyr-hunt".to_owned(),
         },
-        tenant: "system".to_owned(),
+        tenant: core_audit::tenant::AUDIT_TENANT.to_owned(),
         module: "hunt-packs".to_owned(),
         action: "config.reload".to_owned(),
         target: "hunt.yaml".to_owned(),
@@ -478,8 +478,7 @@ fn the_reload_audit_appends_to_the_file_log() -> TestResult {
 #[test]
 fn the_reload_context_names_the_non_customer_tenant_and_the_file() -> TestResult {
     let context = reload_context(Path::new("/etc/hunt.yaml"));
-    assert_eq!(AUDIT_TENANT, "all");
-    assert_eq!(context.tenant, "all");
+    assert_eq!(context.tenant, core_audit::tenant::AUDIT_TENANT);
     assert_eq!(context.target, "/etc/hunt.yaml");
     assert_eq!((context.actor_id.as_str(), context.module.as_str()), ("ostyr-hunt", "hunt-packs"));
     Ok(())
