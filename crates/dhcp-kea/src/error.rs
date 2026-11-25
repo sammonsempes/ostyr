@@ -77,3 +77,16 @@ pub enum HistoryError {
     #[error("too many requests in flight")]
     Busy,
 }
+
+
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("lease file: {0}")]
+    Follow(#[from] KeaError),
+    #[error("history: {0}")]
+    History(#[from] HistoryError),
+    #[error("alerts: {0}")]
+    Alerts(#[from] alerts::error::StoreError),
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+}

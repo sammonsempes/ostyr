@@ -1,0 +1,463 @@
+//! The `ostyr-dhcp` service: follows Kea's lease file, stores the lease history and raises the unknown-device alerts of one tenant.
+
+use crate::alerting::{advance_cursor, alerted_in_batch, micros_of, store_unknown_device_alerts, unknown_device_alerts_in_order};
+use crate::cursor::{MIGRATIONS as CURSOR_MIGRATIONS, MIGRATION_NAMESPACE as CURSOR_NAMESPACE};
+use crate::error::{KeaError, RoundError};
+use crate::follow::{poll, Counts, FollowState, Limits};
+use crate::history::{store_history, HistoryCounts, HistorySettings};
+use crate::row::{normalise_mac, Converted};
+use crate::types::{InterruptWait, WaitFn};
+use alerts::pg::pg_executor;
+use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
+use core_audit::log::{append_declared, open_file_log, AuditLog};
+use core_audit::tenant::AUDIT_TENANT;
+use core_config::error::ConfigError;
+use core_config::load::load_file;
+use core_config::parse::read_bytes_capped;
+use core_config::reload::{check_watched_files, current_config, open_engine, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
+use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
+use core_config::watch::watch_files;
+use core_pg::connect::connect;
+use core_pg::migrate::migrate;
+use core_pg::scope::{tenant_scope, TenantScope};
+use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
+use serde::Deserialize;
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::fs::File;
+use std::future::Future;
+use std::io::stderr;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use time::OffsetDateTime;
+use tracing::{info, warn};
+
+
+const USAGE: &str = "usage: ostyr-dhcp <settings.yaml>";
+
+
+const MODULE: &str = "dhcp";
+
+
+const SETTINGS_REQUEST: &str = "settings";
+
+
+const KNOWN_REQUEST: &str = "known-devices";
+
+
+const DEBOUNCE: Duration = Duration::from_millis(300);
+
+
+const ROUNDS: usize = usize::MAX;
+
+
+pub const MIN_INTERVAL_SECONDS: u64 = 10;
+
+
+pub const MAX_INTERVAL_SECONDS: u64 = 3_600;
+
+
+pub const MAX_DEADLINE_SECONDS: u64 = 600;
+
+
+pub const MAX_KNOWN_BYTES: u64 = 2_097_152;
+
+
+pub const MAX_KNOWN_MACS: usize = 100_000;
+
+
+const FIRST_PRINTABLE: u8 = 0x20;
+
+
+const LAST_PRINTABLE: u8 = 0x7E;
+
+
+const LINE_FEED: u8 = b'\n';
+
+
+/// Start-only: `tenant` and every path. Live: the interval and the statement deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSettings {
+    pub tenant: String,
+    pub pg_settings: PathBuf,
+    pub lease_file: PathBuf,
+    pub known_file: PathBuf,
+    pub audit_file: PathBuf,
+    pub interval_seconds: u64,
+    pub statement_deadline_seconds: u64,
+}
+
+
+/// The MACs the CMDB knows, in the ECS form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnownDevices {
+    pub macs: BTreeSet<String>,
+}
+
+
+/// What the reader holds between two rounds: its position, its counts and the leases read but not yet stored.
+#[derive(Debug, Default)]
+pub struct Follower {
+    pub state: FollowState,
+    pub counts: Counts,
+    pub pending: Vec<Converted>,
+}
+
+
+/// What one round stored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoundReport {
+    pub leases: usize,
+    pub history: HistoryCounts,
+    pub alerts: usize,
+    pub inserted: usize,
+}
+
+
+pub fn setting_error(field: &str, reason: &str) -> ConfigError {
+    ConfigError::WatchedFile {
+        file: format!("settings.{field}"),
+        reason: reason.to_owned(),
+    }
+}
+
+
+pub fn within(field: &str, value: u64, low: u64, high: u64) -> Result<(), ConfigError> {
+    if (low..=high).contains(&value) {
+        Ok(())
+    } else {
+        Err(setting_error(field, &format!("must be between {low} and {high}")))
+    }
+}
+
+
+pub fn validate_settings(settings: &ServiceSettings) -> Result<(), ConfigError> {
+    tenant_scope(&settings.tenant).map_err(|_refused| setting_error("tenant", "is not a valid tenant name"))?;
+    within("interval_seconds", settings.interval_seconds, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)?;
+    within("statement_deadline_seconds", settings.statement_deadline_seconds, 1, MAX_DEADLINE_SECONDS)
+}
+
+
+/// Everything except the two live values must equal the start-up snapshot.
+pub fn start_only_changed(baseline: &ServiceSettings, current: &ServiceSettings) -> bool {
+    let same_live = ServiceSettings {
+        interval_seconds: baseline.interval_seconds,
+        statement_deadline_seconds: baseline.statement_deadline_seconds,
+        ..current.clone()
+    };
+    same_live != *baseline
+}
+
+
+pub fn load_settings(file: &Path) -> Result<ServiceSettings, ConfigError> {
+    let settings: ServiceSettings = load_file(file)?;
+    validate_settings(&settings)?;
+    Ok(settings)
+}
+
+
+pub fn settings_state(settings: &ServiceSettings) -> ConfigState {
+    [
+        ("tenant", settings.tenant.clone()),
+        ("pg_settings", settings.pg_settings.display().to_string()),
+        ("lease_file", settings.lease_file.display().to_string()),
+        ("known_file", settings.known_file.display().to_string()),
+        ("audit_file", settings.audit_file.display().to_string()),
+        ("interval_seconds", settings.interval_seconds.to_string()),
+        ("statement_deadline_seconds", settings.statement_deadline_seconds.to_string()),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect()
+}
+
+
+pub fn settings_loader(file: PathBuf, baseline: ServiceSettings) -> Box<LoaderFn<ServiceSettings>> {
+    Box::new(move || {
+        let current = load_settings(&file)?;
+        if start_only_changed(&baseline, &current) {
+            Err(setting_error(
+                "start-only",
+                "tenant and every path are read at start only, restart the service to change them",
+            ))
+        } else {
+            Ok(current)
+        }
+    })
+}
+
+
+fn context_for(target: &Path, request: &str) -> ReloadContext {
+    ReloadContext {
+        actor_id: MODULE.to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
+        module: MODULE.to_owned(),
+        target: target.display().to_string(),
+        request_id: request.to_owned(),
+    }
+}
+
+
+/// The baseline is the one read of the settings file the caller already made.
+pub fn open_service_settings_from(
+    file: &Path,
+    baseline: ServiceSettings,
+    audit: Box<SharedAuditFn>,
+) -> Result<ReloadEngine<ServiceSettings>, ConfigError> {
+    open_engine(
+        settings_loader(file.to_path_buf(), baseline),
+        settings_state,
+        Vec::new(),
+        audit,
+        context_for(file, SETTINGS_REQUEST),
+    )
+}
+
+
+fn known_error(file: &str, reason: &str) -> ConfigError {
+    ConfigError::WatchedFile {
+        file: file.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+
+fn printable(byte: u8) -> bool {
+    byte == LINE_FEED || (FIRST_PRINTABLE..=LAST_PRINTABLE).contains(&byte)
+}
+
+
+/// One MAC per line in any form `normalise_mac` reads, blank lines allowed; a byte outside printable ASCII and line feed refuses the file.
+pub fn parse_known(bytes: Vec<u8>, file: &str) -> Result<KnownDevices, ConfigError> {
+    if bytes.iter().copied().all(printable) {
+        let text: String = bytes.into_iter().map(char::from).collect();
+        let macs = text
+            .lines()
+            .enumerate()
+            .filter(|(_number, line)| !line.is_empty())
+            .try_fold(BTreeSet::new(), |mut found, (number, line)| {
+                let mac = normalise_mac(line).ok_or_else(|| known_error(file, &format!("line {} is not a MAC address", number + 1)))?;
+                found.insert(mac);
+                Ok::<BTreeSet<String>, ConfigError>(found)
+            })?;
+        if macs.len() > MAX_KNOWN_MACS {
+            Err(known_error(file, &format!("holds more than {MAX_KNOWN_MACS} devices")))
+        } else {
+            Ok(KnownDevices { macs })
+        }
+    } else {
+        Err(known_error(file, "only printable ASCII and line feeds are allowed"))
+    }
+}
+
+
+pub fn load_known(path: &Path) -> Result<KnownDevices, ConfigError> {
+    parse_known(read_bytes_capped(path, MAX_KNOWN_BYTES)?, &path.display().to_string())
+}
+
+
+pub fn known_state(known: &KnownDevices) -> ConfigState {
+    known.macs.iter().map(|mac| (format!("mac:{mac}"), "known".to_owned())).collect()
+}
+
+
+pub fn open_known(path: &Path, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<KnownDevices>, ConfigError> {
+    check_watched_files(&[path.display().to_string()])?;
+    let file = path.to_path_buf();
+    open_engine(
+        Box::new(move || load_known(&file)),
+        known_state,
+        Vec::new(),
+        audit,
+        context_for(path, KNOWN_REQUEST),
+    )
+}
+
+
+pub fn reload_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
+    let owned = Arc::clone(log);
+    Box::new(move |entry| append_declared(&owned, entry, &RELOAD_DECLARED_KEYS))
+}
+
+
+/// Reads the lease file once; whatever it read is kept pending even when the read then fails, because its offset has moved.
+pub fn collect(path: &Path, follower: &mut Follower, limits: &Limits) -> Result<(), RoundError> {
+    let mut out = Vec::new();
+    let polled = poll(path, &mut follower.state, limits, &mut follower.counts, &mut out);
+    follower.pending.extend(out);
+    match polled {
+        Err(KeaError::NotRegular) => {
+            follower.counts.refused += 1;
+            warn!("the lease path is not a regular file, refused");
+            Ok(())
+        }
+        other => other.map_err(RoundError::from),
+    }
+}
+
+
+/// One round: the new leases (or the ones a failed round left pending) go to the history, then the unknown MACs to the alerts. `now` is Unix seconds.
+pub async fn run_round(
+    exec: alerts::types::Executor<'_, '_>,
+    scope: &TenantScope,
+    known: &KnownDevices,
+    follower: &mut Follower,
+    (path, limits, now): (&Path, &Limits, i64),
+) -> Result<RoundReport, RoundError> {
+    if follower.pending.is_empty() {
+        collect(path, follower, limits)?;
+    }
+    if follower.pending.is_empty() {
+        Ok(RoundReport::default())
+    } else {
+        let history = store_history(exec, scope, &HistorySettings::default(), now, &follower.pending).await?;
+        let lookup = alerted_in_batch(exec, scope, &follower.pending, &known.macs).await;
+        let skipped: BTreeSet<String> = known.macs.union(&lookup.skip).cloned().collect();
+        let (alerts, _rejected) = unknown_device_alerts_in_order(scope, &follower.pending, &skipped, micros_of(now), &lookup.scan_order);
+        let inserted = store_unknown_device_alerts(exec, scope, &alerts).await?;
+        advance_cursor(exec, scope, &lookup).await;
+        let leases = follower.pending.len();
+        follower.pending.clear();
+        Ok(RoundReport {
+            leases,
+            history,
+            alerts: alerts.len(),
+            inserted,
+        })
+    }
+}
+
+
+pub fn log_round(outcome: &Result<RoundReport, RoundError>) {
+    match outcome {
+        Ok(report) => {
+            let (leases, stored, alerts, inserted) = (report.leases, report.history.inserted, report.alerts, report.inserted);
+            info!(leases, stored, alerts, inserted, "dhcp round done");
+        }
+        Err(error) => warn!(%error, "dhcp round failed, the leases are retried"),
+    }
+}
+
+
+pub fn pause(duration: Duration) -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(tokio::time::sleep(duration))
+}
+
+
+#[cfg(unix)]
+fn keep_signals<Config: Send + Sync + 'static>(engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<impl Sized> {
+    core_config::signal::reload_on_signals(Arc::clone(engine), &[signal_hook::consts::SIGHUP])
+}
+
+
+#[cfg(not(unix))]
+pub struct NoSignals;
+
+
+#[cfg(not(unix))]
+fn keep_signals<Config>(_engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<NoSignals> {
+    Ok(NoSignals)
+}
+
+
+/// Resolves on SIGINT or SIGTERM.
+#[cfg(unix)]
+pub fn termination() -> std::io::Result<InterruptWait> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(Box::pin(async move {
+        tokio::select! {
+            _first = interrupt.recv() => {}
+            _second = terminate.recv() => {}
+        }
+        Ok(())
+    }))
+}
+
+
+pub async fn run(arguments: &[String], interrupt: InterruptWait) -> Result<(), Box<dyn Error>> {
+    let settings_file = match arguments {
+        [file] => Ok(file),
+        _ => Err(USAGE),
+    }?;
+    tracing::subscriber::set_global_default(tracing_subscriber::fmt().with_writer(stderr).finish())?;
+    start(Path::new(settings_file), ROUNDS, interrupt).await
+}
+
+
+pub async fn start(settings_file: &Path, rounds: usize, interrupt: InterruptWait) -> Result<(), Box<dyn Error>> {
+    start_with(settings_file, rounds, interrupt, pause).await
+}
+
+
+async fn migrate_all(pg: &PgSettings, deadline: Duration) -> Result<(), Box<dyn Error>> {
+    let client = connect(pg).await?;
+    migrate(&client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, deadline).await?;
+    migrate(&client, CURSOR_NAMESPACE, &CURSOR_MIGRATIONS, deadline).await?;
+    Ok(())
+}
+
+
+/// `wait` is called between two rounds with the interval in force.
+pub async fn start_with(settings_file: &Path, rounds: usize, interrupt: InterruptWait, wait: WaitFn) -> Result<(), Box<dyn Error>> {
+    let baseline = load_settings(settings_file)?;
+    let log = Arc::new(open_file_log(&baseline.audit_file)?);
+    let settings_engine = Arc::new(open_service_settings_from(settings_file, baseline, reload_audit(&log))?);
+    let start = current_config(&settings_engine);
+    let known_engine = Arc::new(open_known(&start.known_file, reload_audit(&log))?);
+    let _settings_watch = watch_files(Arc::clone(&settings_engine), &[settings_file.to_path_buf()], DEBOUNCE)?;
+    let _known_watch = watch_files(Arc::clone(&known_engine), std::slice::from_ref(&start.known_file), DEBOUNCE)?;
+    let _settings_signals = keep_signals(&settings_engine)?;
+    let _known_signals = keep_signals(&known_engine)?;
+    let pg = load_pg_settings(&start.pg_settings)?;
+    migrate_all(&pg, Duration::from_secs(start.statement_deadline_seconds)).await?;
+    let scope = tenant_scope(&start.tenant)?;
+    let limits = Limits {
+        started: OffsetDateTime::now_utc().unix_timestamp(),
+        ..Limits::default()
+    };
+    info!(tenant = start.tenant, "serving");
+    tokio::select! {
+        biased;
+        waited = interrupt => Ok(waited?),
+        () = serve(rounds, (&settings_engine, &known_engine), (&pg, &scope, &limits), wait) => Ok(()),
+    }
+}
+
+
+async fn serve(
+    rounds: usize,
+    engines: (&ReloadEngine<ServiceSettings>, &ReloadEngine<KnownDevices>),
+    site: (&PgSettings, &TenantScope, &Limits),
+    wait: WaitFn,
+) {
+    let (settings_engine, known_engine) = engines;
+    let (pg, scope, limits) = site;
+    let mut follower = Follower::default();
+    for _round in 0..rounds {
+        let settings = current_config(settings_engine);
+        let known = current_config(known_engine);
+        let outcome = one_round(pg, scope, &settings, &known, &mut follower, limits).await;
+        log_round(&outcome);
+        wait(Duration::from_secs(settings.interval_seconds)).await;
+    }
+}
+
+
+async fn one_round(
+    pg: &PgSettings,
+    scope: &TenantScope,
+    settings: &ServiceSettings,
+    known: &KnownDevices,
+    follower: &mut Follower,
+    limits: &Limits,
+) -> Result<RoundReport, RoundError> {
+    let client = connect(pg).await?;
+    let exec = pg_executor(&client, Duration::from_secs(settings.statement_deadline_seconds));
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    run_round(&exec, scope, known, follower, (&settings.lease_file, limits, now)).await
+}
