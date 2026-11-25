@@ -1,5 +1,6 @@
 use crate::error::{IngestError, SettingsError};
 use crate::nats_settings::*;
+use core_audit::tenant::AUDIT_TENANT;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -7,6 +8,7 @@ use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use serde::{Deserialize, Serialize};
 use siem_schema::identifier::validate_identifier;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use ureq::http::Uri;
 
 
@@ -17,10 +19,6 @@ pub const RELOAD_REQUEST_ID: &str = "siem-ingest-reload";
 
 
 pub const SECTION: &str = "ingest";
-
-
-/// The non-customer tenant a multi-tenant service files its own audit records under.
-pub const AUDIT_TENANT: &str = "all";
 
 
 pub const MIB: usize = 1_048_576;
@@ -386,17 +384,22 @@ pub fn load_settings(path: &Path) -> Result<IngestSettings, IngestError> {
 }
 
 
-/// A later file that names another audit file is refused: the log is opened once at start.
+/// The first call returns the baseline the caller read; later calls read the file, and one that names another audit file is refused.
 pub fn settings_loader(path: PathBuf, baseline: IngestSettings) -> Box<LoaderFn<IngestSettings>> {
+    let seeded = AtomicBool::new(false);
     Box::new(move || {
-        let current: IngestSettings = load_file(&path)?;
-        if current.audit_file == baseline.audit_file {
-            Ok(current)
+        if seeded.swap(true, Ordering::SeqCst) {
+            let current: IngestSettings = load_file(&path)?;
+            if current.audit_file == baseline.audit_file {
+                Ok(current)
+            } else {
+                Err(ConfigError::WatchedFile {
+                    file: "settings.audit_file".to_owned(),
+                    reason: "the audit file is read at start only, restart the service to change it".to_owned(),
+                })
+            }
         } else {
-            Err(ConfigError::WatchedFile {
-                file: "settings.audit_file".to_owned(),
-                reason: "the audit file is read at start only, restart the service to change it".to_owned(),
-            })
+            Ok(baseline.clone())
         }
     })
 }
@@ -409,7 +412,7 @@ pub fn open_settings(path: PathBuf, audit: Box<SharedAuditFn>) -> Result<ReloadE
 }
 
 
-/// Same as `open_settings` over a baseline the caller already parsed, so one read of the file serves the audit path and the baseline.
+/// Same as `open_settings` over a baseline the caller already parsed, that value is the engine's first settings and the start-only baseline; the file is read again only by reloads.
 pub fn open_settings_from(path: PathBuf, baseline: IngestSettings, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<IngestSettings>, IngestError> {
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),

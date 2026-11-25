@@ -124,6 +124,7 @@ pub fn class_of(fault: &RoundFault) -> &'static str {
         RoundFault::Fetch(FetchError::Body(_)) => "body",
         RoundFault::Fetch(FetchError::TooLarge | FetchError::TooManyPoints) => "too_large",
         RoundFault::Fetch(FetchError::Malformed(_)) => "malformed",
+        RoundFault::Fetch(FetchError::Stopped) => "stopped",
         RoundFault::Fetch(_) => "settings",
     }
 }

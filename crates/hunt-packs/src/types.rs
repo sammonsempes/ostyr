@@ -8,6 +8,7 @@ use crate::store::FindingRow;
 use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -40,3 +41,7 @@ pub type FindingsFuture = Pin<Box<dyn Future<Output = Result<FindingsReply, Find
 
 /// Reads one page of the tenant's findings: injected, so a test serves the route from memory and the example from PostgreSQL.
 pub type FindingsFn = Arc<dyn Fn(TenantScope, FindingsQuery) -> FindingsFuture + Send + Sync>;
+
+
+/// Resolves when the process is told to stop (SIGINT and SIGTERM in production).
+pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;

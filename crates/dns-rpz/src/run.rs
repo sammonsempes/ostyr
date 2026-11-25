@@ -1,17 +1,18 @@
 use crate::atomic::write_atomic;
 use crate::error::RpzError;
+use crate::limits::{MAX_IOC_LINES, MAX_IOC_SOURCE_BYTES};
 use crate::model::{Entry, RunSummary, SkipReason};
 use crate::policy::Policy;
 use crate::select::{compile_allow, decide, reason_key, Allow};
 use crate::serial::advance;
 use crate::types::Counts;
 use crate::zone::{apply_cap, render_zone};
+use core_config::parse::open_regular;
 use intel_feeds::lines::{numbered_lines, NumberedLine};
 use intel_feeds::model::Ioc;
 use std::collections::btree_map::Entry as Slot;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use time::OffsetDateTime;
 use tracing::{debug, warn};
@@ -22,8 +23,14 @@ pub fn count(counts: &mut Counts, key: &'static str) {
 }
 
 
+/// Opens a regular file only (a FIFO or device is refused without blocking) of at most `MAX_IOC_SOURCE_BYTES`, read under the same cap.
 pub fn open_file(path: &Path) -> io::Result<Box<dyn BufRead>> {
-    Ok(Box::new(BufReader::new(File::open(path)?)))
+    let handle = open_regular(path, &path.display().to_string()).map_err(io::Error::other)?;
+    if handle.metadata()?.len() > MAX_IOC_SOURCE_BYTES {
+        Err(io::Error::other(format!("IOC source larger than {MAX_IOC_SOURCE_BYTES} bytes")))
+    } else {
+        Ok(Box::new(BufReader::new(handle.take(MAX_IOC_SOURCE_BYTES))))
+    }
 }
 
 
@@ -69,13 +76,18 @@ pub fn collect_entries(
 ) -> io::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
     numbered_lines(input).try_for_each(|line| {
-        if let Some(parsed) = parse_line(line?) {
-            match parsed.and_then(|ioc| decide(&ioc, policy, allow, now)) {
-                Ok(entry) => insert_entry(&mut entries, entry, skipped),
-                Err(reason) => count(skipped, reason_key(reason)),
+        let numbered = line?;
+        if numbered.number > MAX_IOC_LINES {
+            Err(io::Error::other(format!("IOC source has more than {MAX_IOC_LINES} lines")))
+        } else {
+            if let Some(parsed) = parse_line(numbered) {
+                match parsed.and_then(|ioc| decide(&ioc, policy, allow, now)) {
+                    Ok(entry) => insert_entry(&mut entries, entry, skipped),
+                    Err(reason) => count(skipped, reason_key(reason)),
+                }
             }
+            Ok::<(), io::Error>(())
         }
-        Ok::<(), io::Error>(())
     })?;
     Ok(entries)
 }

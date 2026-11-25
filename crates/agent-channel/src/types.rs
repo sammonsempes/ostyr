@@ -20,6 +20,10 @@ use tonic::transport::Channel;
 use tonic::Status;
 
 
+/// Fired once by the server when every start file is open and the signal handlers are registered.
+pub type ReadySender = tokio::sync::oneshot::Sender<()>;
+
+
 pub type EventWriter = Box<dyn Write + Send>;
 
 

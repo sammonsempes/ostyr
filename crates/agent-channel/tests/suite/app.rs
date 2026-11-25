@@ -393,6 +393,7 @@ async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches
             }
         }),
         file_events(&server)?,
+        None,
     ));
     let first = run_once(&agent).await?;
     assert_eq!(first.acknowledged, vec![FIRST, SECOND]);
@@ -432,6 +433,7 @@ async fn a_restarted_server_still_deduplicates() -> TestResult {
                 }
             }),
             file_events(&server)?,
+            None,
         ));
         run_once(&agent).await?;
         stop.send(()).map_err(|()| "server already stopped")?;
@@ -1101,6 +1103,7 @@ async fn a_batch_the_server_refuses_as_too_large_is_quarantined_and_delivery_goe
             }
         }),
         file_events(&server)?,
+        None,
     ));
     let big = "b".repeat(BIG_LINE);
     fs::write(&agent.spool_file, format!("small-1\n{big}\nsmall-2\n"))?;
@@ -1147,6 +1150,7 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
         }),
         file_events(&server)?,
         Box::new(move || start + Duration::from_secs(read_clock.load(Ordering::SeqCst))),
+        None,
     ));
     let config = client_config(&ClientTlsPaths {
         certificate: agent.certificate.clone(),
@@ -1208,6 +1212,7 @@ async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> Test
             }
         }),
         file_events(&server)?,
+        None,
     ));
     let spool = claim_spool(&agent)?;
     let log = Arc::new(open_file_log(&agent.audit_file)?);
@@ -1298,6 +1303,7 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
             }
         }),
         file_events(&server)?,
+        None,
     ));
     stop.send(()).map_err(|()| "server already stopped")?;
     bounded(handle).await???;
@@ -1452,5 +1458,99 @@ fn every_refusal_reports_its_own_fixed_text() -> TestResult {
     let verdict = agent_channel::client::refusal_verdict(vec![1], ExecuteRefusal::NoShellExecutor);
     assert!(!verdict.accepted);
     assert_eq!(verdict.reason, agent_channel::model::NO_SHELL_EXECUTOR_REASON);
+    Ok(())
+}
+
+
+fn stop_when(stopped: oneshot::Receiver<()>) -> agent_channel::types::ShutdownSignal {
+    Box::pin(async move {
+        if let Err(error) = stopped.await {
+            tracing::warn!(%error, "stop sender dropped");
+        }
+    })
+}
+
+
+#[tokio::test]
+async fn the_ready_signal_fires_once_the_server_is_open_and_a_dropped_receiver_is_tolerated() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = long_tempdir()?;
+    let Fixture { server, .. } = fixture(dir.path())?;
+    let listener = bind_server(&server).await?;
+    let (stop, stopped) = oneshot::channel::<()>();
+    let (ready, started) = oneshot::channel::<()>();
+    let handle = tokio::spawn(run_server(
+        server.clone(),
+        listener,
+        None,
+        stop_when(stopped),
+        file_events(&server)?,
+        Some(ready),
+    ));
+    bounded(started).await??;
+    stop.send(()).map_err(|()| "server already stopped")?;
+    bounded(handle).await???;
+    let second = bind_server(&server).await?;
+    let (stop_again, stopped_again) = oneshot::channel::<()>();
+    let (gone, nobody) = oneshot::channel::<()>();
+    drop(nobody);
+    let again = tokio::spawn(run_server(
+        server.clone(),
+        second,
+        None,
+        stop_when(stopped_again),
+        file_events(&server)?,
+        Some(gone),
+    ));
+    stop_again.send(()).map_err(|()| "server already stopped")?;
+    bounded(again).await???;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_refused_start_never_fires_the_ready_signal_and_names_the_audit_file() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = long_tempdir()?;
+    let Fixture { server, .. } = fixture(dir.path())?;
+    let audit = dir.path().join("none").join("audit.log");
+    let refused = ServerFile {
+        audit_file: audit.clone(),
+        ..server.clone()
+    };
+    let listener = bind_server(&refused).await?;
+    let (ready, started) = oneshot::channel::<()>();
+    let outcome = bounded(run_server(
+        refused.clone(),
+        listener,
+        None,
+        Box::pin(std::future::pending()),
+        file_events(&server)?,
+        Some(ready),
+    ))
+    .await?;
+    assert!(matches!(&outcome, Err(AppError::AuditFile { path, .. }) if *path == audit), "{outcome:?}");
+    assert!(outcome
+        .map_err(|error| error.to_string())
+        .err()
+        .is_some_and(|text| text.contains("audit.log")));
+    assert!(started.await.is_err());
+    let bad_revocations = ServerFile {
+        revocation_file: dir.path().join("none").join("revoked.yaml"),
+        ..server.clone()
+    };
+    let second = bind_server(&bad_revocations).await?;
+    let (ready_again, started_again) = oneshot::channel::<()>();
+    let failed = bounded(run_server(
+        bad_revocations,
+        second,
+        None,
+        Box::pin(std::future::pending()),
+        file_events(&server)?,
+        Some(ready_again),
+    ))
+    .await?;
+    assert!(failed.is_err());
+    assert!(started_again.await.is_err());
     Ok(())
 }

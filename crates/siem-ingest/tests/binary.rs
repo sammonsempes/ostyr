@@ -11,7 +11,7 @@ use nats_stub::{kill_connections, start_stub, wait_until, Queued, Stub};
 use private::write_private;
 use siem_ingest::error::ServeError;
 use siem_ingest::model::{Ended, LoopReport};
-use siem_ingest::serve::{exit_code, interrupt_flag, run, start, write_line, EXIT_CYCLE_CAP, EXIT_FAILURE};
+use siem_ingest::serve::{exit_code, interrupt_flag, run, run_from, start, write_line, EXIT_CYCLE_CAP, EXIT_FAILURE};
 use siem_ingest::settings::{load_settings, open_settings};
 use std::error::Error;
 use std::fs;
@@ -454,5 +454,59 @@ fn a_stop_that_arrives_as_the_cap_is_reached_is_a_clean_stop() -> Result<(), Box
     let ended = run(&arguments(&lab)?, &stop, CAP)?;
     assert!(matches!(ended, Ended::Stopped(summary) if summary.cycles == CAP), "{ended:?}");
     assert_eq!(exit_code(&Ok(ended)), 0);
+    Ok(())
+}
+
+
+const LONG_CAP: u64 = 1_000_000;
+
+
+const FIRST_AGE: u32 = 5;
+
+
+fn run_in_thread(
+    settings: PathBuf,
+    first: siem_ingest::settings::IngestSettings,
+) -> (Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<Result<Ended, ServeError>>) {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&flag);
+    let handle = spawn(move || run_from(&settings, first, &move || seen.load(Ordering::SeqCst), LONG_CAP));
+    (flag, handle)
+}
+
+
+#[test]
+fn the_start_uses_the_settings_it_was_given_as_the_baseline_not_a_second_read() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let lab = lab(&[])?;
+    let mut first = load_settings(&lab.settings)?;
+    first.max_batch_age_seconds = FIRST_AGE;
+    let (flag, handle) = run_in_thread(lab.settings.clone(), first);
+    wait_until(&lab.stub, |state| !state.connects.is_empty())?;
+    let disk_text = fs::read_to_string(&lab.settings)?;
+    let staging = lab.dir.path().join("ingest.staging");
+    fs::write(&staging, disk_text.replace("max_batch_messages: 1\n", "max_batch_messages: 2\n"))?;
+    fs::rename(&staging, &lab.settings)?;
+    eventually(|| fs::read_to_string(&lab.audit).is_ok_and(|text| text.contains("max_batch_age_seconds")))?;
+    flag.store(true, Ordering::SeqCst);
+    handle.join().map_err(|_| "the service thread panicked")??;
+    Ok(())
+}
+
+
+#[test]
+fn the_audit_path_comes_from_the_given_settings_not_a_second_read() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let lab = lab(&[])?;
+    let first = load_settings(&lab.settings)?;
+    let other = lab.dir.path().join("other.log");
+    let disk_text = fs::read_to_string(&lab.settings)?;
+    let moved = disk_text.replace("audit.log", "other.log");
+    fs::write(&lab.settings, &moved)?;
+    let (flag, handle) = run_in_thread(lab.settings.clone(), first);
+    wait_until(&lab.stub, |state| !state.connects.is_empty())?;
+    fs::write(&lab.settings, moved.replace("max_batch_messages: 1\n", "max_batch_messages: 2\n"))?;
+    eventually(|| fs::read_to_string(&lab.audit).is_ok_and(|text| text.contains("denied")))?;
+    flag.store(true, Ordering::SeqCst);
+    handle.join().map_err(|_| "the service thread panicked")??;
+    assert!(!other.exists());
     Ok(())
 }

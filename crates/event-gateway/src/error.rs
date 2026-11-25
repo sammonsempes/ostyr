@@ -4,6 +4,7 @@ use core_audit::error::AuditError;
 use core_config::error::{ConfigError, WatchError};
 use serde_json::error::Category;
 use siem_ingest::error::{NatsError, SettingsError};
+use std::path::PathBuf;
 use thiserror::Error;
 
 
@@ -38,6 +39,12 @@ pub enum GatewayError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Audit(#[from] AuditError),
+    #[error("audit file {}: {source}", .path.display())]
+    AuditFile {
+        path: PathBuf,
+        #[source]
+        source: AuditError,
+    },
     #[error(transparent)]
     Watch(#[from] WatchError),
     #[error("input or output failed: {0}")]

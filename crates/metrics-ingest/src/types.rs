@@ -8,6 +8,8 @@ use serde::de::IgnoredAny;
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 
@@ -63,3 +65,7 @@ pub type StoreFn = dyn Fn(&MetricsSettings, &[Batch]) -> Result<usize, InsertErr
 
 
 pub type NowFn = dyn Fn() -> u64;
+
+
+/// Raised by SIGINT and SIGTERM, read by the loop between two cycles.
+pub type StopFlag = Arc<AtomicBool>;

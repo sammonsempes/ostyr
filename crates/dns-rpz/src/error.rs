@@ -46,6 +46,10 @@ pub enum SerialError {
         #[source]
         source: ParseIntError,
     },
+    #[error("serial counter file: {0}")]
+    Open(#[source] ConfigError),
+    #[error("serial counter file `{0}` is larger than allowed")]
+    TooLarge(PathBuf),
     #[error("all 99 serials of the day are used, last was {0}")]
     Exhausted(u32),
     #[error("the clock {0} cannot be turned into a serial")]
@@ -74,6 +78,8 @@ pub enum ReloadError {
     Failed(Option<i32>),
     #[error("the Unbound control command did not finish within {0} seconds")]
     TimedOut(u64),
+    #[error("the policy names another control program than the service runs")]
+    Refused,
 }
 
 
@@ -106,4 +112,27 @@ pub enum HostError {
     NumericName,
     #[error("Host header name is not a valid domain name")]
     InvalidName(#[from] NameError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("usage: ostyr-dns-rpz <service.yaml>")]
+    Usage,
+    #[error("service file: {0}")]
+    Settings(#[from] ConfigError),
+    #[error("service file: invalid {0}")]
+    Invalid(String),
+    #[error("service file changed while the service started")]
+    Changed,
+    #[error("policy: {0}")]
+    Policy(#[from] crate::policy::OpenError),
+    #[error("audit file: {0}")]
+    Audit(#[from] core_audit::error::AuditError),
+    #[error("service file: {0} is read at start only, restart the service to change it")]
+    Pinned(&'static str),
+    #[error("watch: {0}")]
+    Watch(#[from] core_config::error::WatchError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }

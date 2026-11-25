@@ -6,5 +6,6 @@ pub mod ecs;
 pub mod error;
 pub mod log;
 pub mod model;
+pub mod tenant;
 pub mod types;
 pub mod verify;

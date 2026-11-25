@@ -70,9 +70,31 @@ async fn the_gateway_serves_and_stops_on_shutdown() -> TestResult {
     let server = server_file(dir.path())?;
     let gateway = gateway_file(dir.path(), "nats_url: \"nats://127.0.0.1:1\"\n")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    run_gateway(server, gateway, listener, None, Box::pin(async {})).await?;
+    run_gateway(server, gateway, listener, None, Box::pin(async {}), None).await?;
     assert!(dir.path().join("gateway-audit.log").exists());
     assert!(!dir.path().join("unused-events.log").exists());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_ready_signal_fires_only_for_a_start_that_opened_everything() -> TestResult {
+    let dir = tempdir()?;
+    let server = server_file(dir.path())?;
+    let gateway = gateway_file(dir.path(), "nats_url: \"nats://127.0.0.1:1\"\n")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let (ready, started) = tokio::sync::oneshot::channel::<()>();
+    run_gateway(server.clone(), gateway, listener, None, Box::pin(async {}), Some(ready)).await?;
+    assert!(started.await.is_ok());
+    let refused = GatewayFile {
+        audit_file: dir.path().join("missing").join("audit.log"),
+        ..gateway_file(dir.path(), "{}\n")?
+    };
+    let second = TcpListener::bind("127.0.0.1:0").await?;
+    let (ready_again, started_again) = tokio::sync::oneshot::channel::<()>();
+    let outcome = run_gateway(server, refused, second, None, Box::pin(async {}), Some(ready_again)).await;
+    assert!(outcome.is_err());
+    assert!(started_again.await.is_err());
     Ok(())
 }
 
@@ -83,7 +105,7 @@ async fn invalid_gateway_settings_stop_the_start() -> TestResult {
     let server = server_file(dir.path())?;
     let gateway = gateway_file(dir.path(), "max_in_flight_batches: 0\n")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {})).await;
+    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {}), None).await;
     assert!(matches!(outcome, Err(GatewayError::Settings(_))));
     Ok(())
 }
@@ -98,8 +120,8 @@ async fn an_unreadable_audit_log_stops_the_start() -> TestResult {
         ..gateway_file(dir.path(), "{}\n")?
     };
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {})).await;
-    assert!(matches!(outcome, Err(GatewayError::Audit(_))));
+    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {}), None).await;
+    assert!(matches!(&outcome, Err(GatewayError::AuditFile { path, .. }) if path.ends_with("audit.log")));
     Ok(())
 }
 
@@ -113,7 +135,7 @@ async fn a_server_that_cannot_start_is_reported() -> TestResult {
     };
     let gateway = gateway_file(dir.path(), "{}\n")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {})).await;
+    let outcome = run_gateway(server, gateway, listener, None, Box::pin(async {}), None).await;
     assert!(matches!(outcome, Err(GatewayError::App(_))));
     Ok(())
 }

@@ -14,17 +14,24 @@ use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_config::reload::ReloadContext;
 use dns_rpz::error::{PolicyError, ReloadError};
-use dns_rpz::model::{CommandStatus, Reloader};
+use dns_rpz::limits::{MAX_CAPTURE_BYTES, NEW_ZONE_ON_DISK};
+use dns_rpz::model::{CommandStatus, ReloadVerdict, Reloader};
 use dns_rpz::policy::{validate_policy, Action, Policy};
-use dns_rpz::unbound::{reload_zone, render_unbound_config, run_reload, run_with_deadline};
+use dns_rpz::types::{ReadbackFn, RunnerFn};
+#[cfg(unix)]
+use dns_rpz::unbound::group_kill_result;
+use dns_rpz::unbound::{captured_text, reload_zone, render_unbound_config, run_capture, run_readback, run_reload, run_with_deadline, served_serial};
 use fixtures::fixture;
 use logging::init_logging;
 use runner::{failing_runner, succeeding_runner};
+#[cfg(unix)]
+use rustix::io::Errno;
 use sample::sample_policy;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+use tempfile::tempdir;
 use types::TestResult;
 
 
@@ -43,7 +50,28 @@ const OVER_SETTING: usize = 5_000;
 const DEFAULT_SECONDS: u64 = 10;
 
 
-const TWICE: usize = 2;
+const POLICY_ZONE: &str = "rpz.example.org.";
+
+
+const SERIAL_SEVEN: u32 = 7;
+
+
+const SERIAL_NINE: u32 = 9;
+
+
+const INVALID_BYTE: u8 = 0xff;
+
+
+const CAPTURE_FACTOR: u64 = 2;
+
+
+const NEW_SERIAL: u32 = 2_026_110_301;
+
+
+const POLLS: usize = 200;
+
+
+const POLL_PAUSE: Duration = Duration::from_millis(25);
 
 
 const BROKEN_CASES: usize = 8;
@@ -150,29 +178,89 @@ fn the_runner_outcomes_map_to_results() -> TestResult {
 }
 
 
-#[test]
-fn a_reload_is_logged_and_audited_whatever_the_result() -> TestResult {
+fn listing_of(serial: &'static str) -> impl Fn(&str, &[String], Duration) -> io::Result<String> {
+    move |_program, _arguments, _deadline| Ok(format!("other.example.\tserial 7\n{POLICY_ZONE}\tserial {serial}\n"))
+}
+
+
+fn failing_readback(_program: &str, _arguments: &[String], _deadline: Duration) -> io::Result<String> {
+    Err(io::Error::other("no answer"))
+}
+
+
+fn reload_text(runner: &RunnerFn, readback: &ReadbackFn) -> Result<(ReloadVerdict, String), Box<dyn std::error::Error>> {
     init_logging();
-    let policy = sample_policy();
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let log = genesis_log(Shared(Arc::clone(&buffer)));
     let audit = move |entry| append(&log, entry);
     let zone_context = context();
-    let reload_with = |runner| {
-        reload_zone(
-            &policy,
-            &Reloader {
-                runner,
-                audit: &audit,
-                context: &zone_context,
-            },
-        )
-    };
-    assert!(reload_with(&succeeding_runner).is_ok());
-    assert!(reload_with(&failing_runner).is_err());
-    let text = String::from_utf8(buffer.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
-    assert_eq!(text.matches("dns-rpz.zone_reload").count(), TWICE, "{text}");
-    assert!(text.contains("reloaded") && text.contains("failed with status"), "{text}");
+    let verdict = reload_zone(
+        &sample_policy(),
+        &Reloader {
+            runner,
+            readback,
+            audit: &audit,
+            context: &zone_context,
+        },
+        NEW_SERIAL,
+    );
+    let written = buffer.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    Ok((verdict, String::from_utf8(written)?))
+}
+
+
+#[test]
+fn the_audited_outcome_is_the_one_read_back_from_unbound() -> TestResult {
+    let (verdict_first, text_first) = reload_text(&succeeding_runner, &listing_of("2026110301"))?;
+    assert_eq!(verdict_first, ReloadVerdict::Applied);
+    assert!(
+        text_first.contains("dns-rpz.zone_reload") && text_first.contains("applied: Unbound serves serial 2026110301"),
+        "{text_first}"
+    );
+    let (verdict_second, text_second) = reload_text(&timing_out_runner, &listing_of("2026110301"))?;
+    assert_eq!(
+        verdict_second,
+        ReloadVerdict::Applied,
+        "a late reload is applied, whatever the command said"
+    );
+    assert!(
+        text_second.contains("applied:") && text_second.contains("did not finish"),
+        "{text_second}"
+    );
+    let (verdict_third, text_third) = reload_text(&failing_runner, &listing_of("2026110301"))?;
+    assert_eq!(verdict_third, ReloadVerdict::Applied);
+    assert!(text_third.contains("failed with status"), "{text_third}");
+    Ok(())
+}
+
+
+#[test]
+fn an_old_or_missing_serial_is_failed_and_never_claims_the_previous_zone_serves() -> TestResult {
+    let (verdict_first, text_first) = reload_text(&succeeding_runner, &listing_of("2026110200"))?;
+    assert_eq!(verdict_first, ReloadVerdict::Failed);
+    assert!(
+        text_first.contains("failed: Unbound serves serial 2026110200, not 2026110301"),
+        "{text_first}"
+    );
+    assert!(
+        text_first.contains(NEW_ZONE_ON_DISK) && !text_first.contains("keeps serving"),
+        "{text_first}"
+    );
+    let (verdict_second, text_second) = reload_text(&timing_out_runner, &|_: &str, _: &[String], _: Duration| {
+        Ok("other.example.\tserial 7\n".to_owned())
+    })?;
+    assert_eq!(verdict_second, ReloadVerdict::Failed);
+    assert!(text_second.contains("lists no serial for the zone"), "{text_second}");
+    Ok(())
+}
+
+
+#[test]
+fn no_answer_from_unbound_is_unknown_and_audited_as_such() -> TestResult {
+    let (verdict, text) = reload_text(&succeeding_runner, &failing_readback)?;
+    assert_eq!(verdict, ReloadVerdict::Unknown);
+    assert!(text.contains("unknown: the served serial could not be read: no answer"), "{text}");
+    assert!(text.contains(NEW_ZONE_ON_DISK) && !text.contains("keeps serving"), "{text}");
     Ok(())
 }
 
@@ -184,10 +272,84 @@ fn an_audit_failure_does_not_hide_the_reload_result() -> TestResult {
     let zone_context = context();
     let reloader = Reloader {
         runner: &succeeding_runner,
+        readback: &listing_of("2026110301"),
         audit: &audit,
         context: &zone_context,
     };
-    assert!(reload_zone(&sample_policy(), &reloader).is_ok());
+    assert_eq!(reload_zone(&sample_policy(), &reloader, NEW_SERIAL), ReloadVerdict::Applied);
+    Ok(())
+}
+
+
+#[test]
+fn the_served_serial_is_read_by_zone_name_only() -> TestResult {
+    let listing = "\nother.example.\tserial 7\nRPZ.example.org.\tserial 9\tfetch\nbare.example.\nnoserial.example.\tserial\nbad.example.\tserial x\n";
+    assert_eq!(served_serial(listing, "rpz.example.org"), Some(SERIAL_NINE));
+    assert_eq!(served_serial(listing, "rpz.example.org."), Some(SERIAL_NINE));
+    assert_eq!(served_serial(listing, "other.example"), Some(SERIAL_SEVEN));
+    assert_eq!(served_serial(listing, "bare.example"), None);
+    assert_eq!(served_serial(listing, "noserial.example"), None);
+    assert_eq!(served_serial(listing, "bad.example"), None);
+    assert_eq!(served_serial(listing, "absent.example"), None);
+    assert_eq!(served_serial("", "rpz.example.org"), None);
+    Ok(())
+}
+
+
+#[test]
+fn captured_text_names_each_way_a_command_can_end() -> TestResult {
+    assert_eq!(captured_text(CommandStatus::Success, b"abc".to_vec()).ok().as_deref(), Some("abc"));
+    assert!(captured_text(CommandStatus::Success, vec![INVALID_BYTE]).is_err());
+    assert!(captured_text(CommandStatus::Failed(Some(1)), Vec::new()).is_err_and(|error| error.to_string().contains("failed with status")));
+    assert!(captured_text(CommandStatus::TimedOut, Vec::new()).is_err_and(|error| error.kind() == io::ErrorKind::TimedOut));
+    Ok(())
+}
+
+
+#[test]
+fn the_real_readback_returns_standard_output_and_names_failures() -> TestResult {
+    assert_eq!(run_readback("echo", &["hello".to_owned()], LONG_DEADLINE)?, "hello\n");
+    assert!(run_readback("false", &[], LONG_DEADLINE).is_err());
+    assert!(run_readback("sleep", &["600".to_owned()], SHORT_DEADLINE).is_err_and(|error| error.kind() == io::ErrorKind::TimedOut));
+    Ok(())
+}
+
+
+#[test]
+fn a_capture_is_cut_at_the_cap() -> TestResult {
+    let arguments = ["-c".to_owned(), (MAX_CAPTURE_BYTES * CAPTURE_FACTOR).to_string(), "/dev/zero".to_owned()];
+    let (status, output) = run_capture("head", &arguments, LONG_DEADLINE)?;
+    assert_eq!(status, CommandStatus::Success);
+    assert_eq!(output.len() as u64, MAX_CAPTURE_BYTES);
+    Ok(())
+}
+
+
+#[test]
+fn a_descendant_left_behind_by_the_command_is_killed_with_its_group() -> TestResult {
+    let dir = tempdir()?;
+    let script = dir.path().join("wrapper.sh");
+    let pid_file = dir.path().join("child.pid");
+    fs::write(&script, "sleep 600 > /dev/null 2>&1 &\necho $! > \"$1\"\n")?;
+    let arguments = [script.display().to_string(), pid_file.display().to_string()];
+    assert_eq!(run_with_deadline("bash", &arguments, LONG_DEADLINE)?, CommandStatus::Success);
+    let child_pid = fs::read_to_string(&pid_file)?.trim().to_owned();
+    let stat = format!("/proc/{child_pid}/stat");
+    let gone = (0..POLLS).any(|_| {
+        std::thread::sleep(POLL_PAUSE);
+        fs::read_to_string(&stat).map_or(true, |text| text.contains(") Z "))
+    });
+    assert!(gone, "the background child of the wrapper is still running");
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_group_that_is_already_empty_is_not_an_error_but_any_other_failure_is() -> TestResult {
+    assert!(group_kill_result(Ok(())).is_ok());
+    assert!(group_kill_result(Err(Errno::SRCH)).is_ok());
+    assert!(group_kill_result(Err(Errno::PERM)).is_err());
     Ok(())
 }
 

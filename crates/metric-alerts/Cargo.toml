@@ -21,12 +21,19 @@ thiserror = "2"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 zeroize = "1"
+core-audit = { version = "0.0.0", path = "../core-audit" }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "signal"] }
+tracing-subscriber = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
 
 [dev-dependencies]
 socket2 = "0.6"
 tempfile = "3"
-tracing-subscriber = "0.3"
-tokio = { version = "1", features = ["rt", "macros"] }
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [lints]
 workspace = true

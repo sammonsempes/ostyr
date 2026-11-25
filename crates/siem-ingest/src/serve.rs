@@ -6,7 +6,7 @@ use crate::logging::build_subscriber;
 use crate::model::Ended;
 use crate::nats::nats_wiring;
 use crate::pipeline::{new_pipeline, run_loop_capped, MAX_LOOP_CYCLES};
-use crate::settings::{load_settings, open_settings_from};
+use crate::settings::{load_settings, open_settings_from, IngestSettings};
 use crate::types::StopFn;
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_config::reload::RELOAD_DECLARED_KEYS;
@@ -89,10 +89,17 @@ pub fn run(arguments: &[String], stop: &StopFn, cap: u64) -> Result<Ended, Serve
         [file] => Ok(Path::new(file)),
         _ => Err(ServeError::Usage),
     }?;
-    let baseline = load_settings(settings_file)?;
+    let first = load_settings(settings_file)?;
+    run_from(settings_file, first, stop, cap)
+}
+
+
+/// Runs on settings the caller already read: that one value gives the audit path, the first settings and the start-only baseline.
+pub fn run_from(settings_file: &Path, baseline: IngestSettings, stop: &StopFn, cap: u64) -> Result<Ended, ServeError> {
     let audit_path = baseline.audit_file.clone().ok_or(ServeError::NoAuditFile)?;
     let audit_log = Arc::new(open_file_log(&audit_path)?);
     let engine = Arc::new(open_settings_from(settings_file.to_path_buf(), baseline, boxed_reload_audit(&audit_log))?);
+    let _settings_signals = keep_signals(&engine)?;
     let batcher = new_batcher(
         Arc::clone(&engine),
         clickhouse_sink(Arc::clone(&engine)),
@@ -101,7 +108,6 @@ pub fn run(arguments: &[String], stop: &StopFn, cap: u64) -> Result<Ended, Serve
     );
     let mut pipeline = new_pipeline(batcher, nats_wiring(Arc::clone(&engine))?);
     let _settings_watch = watch_files(Arc::clone(&engine), &[settings_file.to_path_buf()], DEBOUNCE)?;
-    let _settings_signals = keep_signals(&engine)?;
     info!("ostyr-siem-ingest serving");
     let summary = run_loop_capped(&mut pipeline, stop, cap);
     if summary.cycles >= cap && !stop() {

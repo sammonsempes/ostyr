@@ -8,6 +8,7 @@ pub mod http;
 pub mod load;
 pub mod model;
 pub mod probe;
+pub mod round;
 pub mod target;
 pub mod transport;
 pub mod types;
