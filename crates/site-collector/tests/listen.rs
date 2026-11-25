@@ -195,6 +195,13 @@ fn validation_refuses_bad_settings() -> TestResult {
             .then_some(())
             .ok_or(*name)
     })?;
+    assert_eq!(
+        ListenError::BadTenant.to_string(),
+        format!(
+            "the tenant is not a valid customer tenant name: 1 to {MAX_TENANT_BYTES} ASCII letters, digits, `_ . -`, starting with a letter or digit; \
+             {AUDIT_TENANT} and {PLATFORM_TENANT} are reserved"
+        )
+    );
     let no_rate = ListenerSettings {
         rate_per_second: 0,
         ..settings()

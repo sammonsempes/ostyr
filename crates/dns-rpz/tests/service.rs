@@ -20,6 +20,7 @@ use clock::now;
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::Outcome;
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use core_config::types::SharedAuditFn;
 use dns_rpz::cli::{run_round, run_round_with, Session};
@@ -873,5 +874,12 @@ fn a_round_takes_one_snapshot_for_the_zone_check_and_the_generation() -> TestRes
     assert!(one_round(&mut session, &round_loop, &|_interval: Duration| true, 1, &reader)?);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
     assert!(fs::read_to_string(&zone)?.contains("$ORIGIN snapshot.example.net."));
+    Ok(())
+}
+
+
+#[test]
+fn service_context_audits_under_the_platform_tenant() -> TestResult {
+    assert_eq!(service_context("zone", "round").tenant, PLATFORM_TENANT);
     Ok(())
 }

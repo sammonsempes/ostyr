@@ -3,6 +3,7 @@
 use core_audit::error::AuditError;
 use core_audit::log::{append, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_config::reload::{current_config, reload, reload_entry, ReloadContext, ReloadEngine, ReloadOutcome};
 use core_config::trusted_program::open_trusted_program;
 use data_encoding::HEXLOWER;
@@ -225,7 +226,7 @@ fn fake(_handle: &OwnedFd, path: &Path, arguments: &[String], _deadline: Duratio
 fn context() -> ReloadContext {
     ReloadContext {
         actor_id: "test".to_owned(),
-        tenant: "platform".to_owned(),
+        tenant: PLATFORM_TENANT.to_owned(),
         module: "waf".to_owned(),
         target: "routes".to_owned(),
         request_id: "r".to_owned(),

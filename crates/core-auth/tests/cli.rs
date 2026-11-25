@@ -9,12 +9,13 @@ mod types;
 #[cfg(unix)]
 #[cfg(unix)]
 use core_audit::log::{genesis_log, AuditLog};
+use core_audit::tenant::PLATFORM_TENANT;
 use core_audit::verify::verify;
 #[cfg(unix)]
 use core_auth::cli::apply_command;
 #[cfg(unix)]
 use core_auth::cli::read_key_file;
-use core_auth::cli::{parse_roles, run, totp_now};
+use core_auth::cli::{parse_roles, run, totp_now, CLI_TENANT};
 use core_auth::error::AuthError;
 #[cfg(unix)]
 use core_auth::password::verify_password;
@@ -220,6 +221,8 @@ fn full_administrator_flow() -> TestResult {
         OWNER_ONLY
     );
     assert!(verify(audit.as_bytes(), None)?.records > 0);
+    assert!(audit.contains(&format!("\"tenant\":\"{PLATFORM_TENANT}\"")));
+    assert_eq!(CLI_TENANT, PLATFORM_TENANT);
     Ok(())
 }
 
