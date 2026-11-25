@@ -3,10 +3,10 @@ use crate::support::private_tempdir;
 use crate::types::TestResult;
 use agent_shell::cgroup::{
     cgroup_cleanup, clear_session, collect_names, component_ok, count_removal, create_session, hang_up, is_cgroup2_filesystem, is_populated,
-    kill_members, kill_round, kill_session, member_groups, mkdir_refusal, open_agent_directory, open_directory_at, parse_populated,
+    kill_members, kill_round, kill_session, logged_prefix, member_groups, mkdir_refusal, open_agent_directory, open_directory_at, parse_populated,
     parse_self_cgroup, parse_tgid, production_host, read_capped, read_pids, read_tids, remove_session, session_cleanup, session_component,
-    session_left, session_names, tgid_of, wait_unpopulated, write_kill, CgroupHost, CGROUP_ROOT, MAX_COMPONENT_BYTES, MAX_PROCS_FILE_BYTES,
-    MAX_SESSION_CGROUPS,
+    session_left, session_names, tgid_of, wait_unpopulated, write_kill, CgroupHost, CGROUP_ROOT, MAX_COMPONENT_BYTES, MAX_LOGGED_CHARS,
+    MAX_PROCS_FILE_BYTES, MAX_SESSION_CGROUPS,
 };
 use agent_shell::cleanup::{SweepPlan, MAX_SCANNED_PROCESSES, MAX_SWEEP_ROUNDS};
 use agent_shell::error::CgroupError;
@@ -680,6 +680,15 @@ fn a_session_cgroup_kills_a_zombie_led_group_whose_live_thread_forks_hoppers() -
         assert_eq!(seen.first().map(String::as_str), Some("zombie\n"));
         assert_everything_gone(&cgroup, &mut hopper, &seen)?;
     }
+    Ok(())
+}
+
+
+#[test]
+fn an_unparsable_cgroup_text_is_cut_in_the_log() -> TestResult {
+    let long = "9".repeat(MAX_LOGGED_CHARS + 1);
+    assert_eq!(logged_prefix(&long).len(), MAX_LOGGED_CHARS);
+    assert_eq!(logged_prefix("x"), "x");
     Ok(())
 }
 

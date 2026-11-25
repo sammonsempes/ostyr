@@ -69,6 +69,10 @@ pub const MAX_PROCS_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_COMPONENT_BYTES: usize = 255;
 
 
+/// The characters of an unparsable cgroup file text kept in the log line.
+pub const MAX_LOGGED_CHARS: usize = 64;
+
+
 /// Session cgroups looked at in one cleanup.
 pub const MAX_SESSION_CGROUPS: usize = 16;
 
@@ -249,8 +253,17 @@ pub fn session_names(agent: &OwnedFd) -> Result<Vec<String>, CgroupError> {
 }
 
 
+pub fn logged_prefix(text: &str) -> String {
+    text.chars().take(MAX_LOGGED_CHARS).collect::<String>()
+}
+
+
 pub fn parse_pid(line: &str) -> Result<Pid, CgroupError> {
-    line.parse::<i32>().ok().and_then(Pid::from_raw).ok_or(CgroupError::Malformed)
+    line.parse::<i32>().ok().and_then(Pid::from_raw).ok_or_else(|| {
+        let shown = logged_prefix(line);
+        tracing::error!(?shown, "unparsable pid line in a cgroup file");
+        CgroupError::Malformed
+    })
 }
 
 
@@ -274,7 +287,11 @@ pub fn parse_populated(text: &str) -> Result<bool, CgroupError> {
             "0" => Some(false),
             _other => None,
         })
-        .ok_or(CgroupError::Malformed)
+        .ok_or_else(|| {
+            let shown = logged_prefix(text);
+            tracing::error!(?shown, "unparsable cgroup.events text");
+            CgroupError::Malformed
+        })
 }
 
 
