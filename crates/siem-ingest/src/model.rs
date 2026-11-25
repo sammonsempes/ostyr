@@ -125,6 +125,7 @@ pub struct LoopReport {
     pub host_metrics_skipped: u64,
     pub dead_lettered: u64,
     pub dead_letter_failed: u64,
+    pub dead_letter_backoffs: u64,
     pub pull_byte_cap: u64,
     pub head_pulled_alone: u64,
 }
@@ -219,4 +220,12 @@ pub struct Collected {
 pub struct Pulled {
     pub messages: Vec<async_nats::jetstream::Message>,
     pub byte_cap_end: bool,
+}
+
+
+/// Why the service loop returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Stopped(LoopReport),
+    CycleCap(LoopReport),
 }

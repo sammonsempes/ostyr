@@ -74,7 +74,7 @@ const SIZE_FIVE: usize = 5;
 const SIZE_EIGHT: usize = 8;
 
 
-const STATE_FIELDS: usize = 30;
+const STATE_FIELDS: usize = 31;
 
 
 const BAD_BYTE: u8 = 0xff;
@@ -438,6 +438,7 @@ fn every_setting_is_bounded() -> TestResult {
         |settings| settings.nats_ca_file = Some(PathBuf::new()),
         |settings| settings.nats_credentials_file = Some(PathBuf::new()),
         |settings| settings.nats_password_file = Some(PathBuf::new()),
+        |settings| settings.audit_file = Some(PathBuf::from("audit.log")),
         |settings| settings.nats_user = Some("ops".to_owned()),
         |settings| settings.nats_password_file = Some(PathBuf::from("/etc/nats.password")),
         |settings| {
@@ -483,6 +484,7 @@ fn every_setting_is_bounded() -> TestResult {
         nats_credentials_file: Some(PathBuf::from("/etc/nats.creds")),
         nats_user: Some("ops".to_owned()),
         nats_password_file: Some(PathBuf::from("/etc/nats.password")),
+        audit_file: Some(PathBuf::from("/var/audit.log")),
         ..defaults
     };
     let state = settings_state(&with_files);
@@ -490,6 +492,7 @@ fn every_setting_is_bounded() -> TestResult {
     assert_eq!(state.get("nats_credentials_file").map(String::as_str), Some("/etc/nats.creds"));
     assert_eq!(state.get("nats_password_file").map(String::as_str), Some("/etc/nats.password"));
     assert_eq!(state.get("nats_user").map(String::as_str), Some("ops"));
+    assert_eq!(state.get("audit_file").map(String::as_str), Some("/var/audit.log"));
     Ok(())
 }
 

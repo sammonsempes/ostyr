@@ -1,11 +1,14 @@
 use crate::error::{IngestError, SettingsError};
 use crate::nats_settings::*;
+use core_audit::tenant::AUDIT_TENANT;
+use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
-use core_config::types::{BoxError, ConfigState, SharedAuditFn};
+use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use serde::{Deserialize, Serialize};
 use siem_schema::identifier::validate_identifier;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use ureq::http::Uri;
 
 
@@ -133,6 +136,7 @@ pub struct IngestSettings {
     pub nats_ack_wait_ms: u64,
     pub nats_ping_interval_ms: u64,
     pub nats_max_headers: usize,
+    pub audit_file: Option<PathBuf>,
 }
 
 
@@ -169,6 +173,7 @@ impl Default for IngestSettings {
             nats_ack_wait_ms: DEFAULT_NATS_ACK_WAIT_MS,
             nats_ping_interval_ms: DEFAULT_NATS_PING_INTERVAL_MS,
             nats_max_headers: DEFAULT_NATS_MAX_HEADERS,
+            audit_file: None,
         }
     }
 }
@@ -279,7 +284,21 @@ pub fn validate_settings(settings: &IngestSettings) -> Result<(), SettingsError>
         ("backoff_initial_ms", settings.backoff_initial_ms),
         ("backoff_max_ms", settings.backoff_max_ms),
     )?;
+    settings.audit_file.as_ref().map_or(Ok(()), |path| check_audit_file(path))?;
     validate_nats_settings(settings)
+}
+
+
+/// The audit log is opened once at start from this path, so it must name one file whatever the working directory is.
+pub fn check_audit_file(path: &Path) -> Result<(), SettingsError> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        Err(SettingsError::Invalid {
+            field: "audit_file",
+            reason: "must be an absolute path",
+        })
+    }
 }
 
 
@@ -337,6 +356,10 @@ pub fn settings_state(settings: &IngestSettings) -> ConfigState {
         ("nats_ack_wait_ms", settings.nats_ack_wait_ms.to_string()),
         ("nats_ping_interval_ms", settings.nats_ping_interval_ms.to_string()),
         ("nats_max_headers", settings.nats_max_headers.to_string()),
+        (
+            "audit_file",
+            settings.audit_file.as_ref().map_or_else(String::new, |path| path.display().to_string()),
+        ),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
@@ -353,17 +376,53 @@ pub fn validate_subscriber() -> Subscriber<IngestSettings> {
 }
 
 
+/// Reads and validates the file once; the caller derives the audit path and the start-only baseline from this one value.
+pub fn load_settings(path: &Path) -> Result<IngestSettings, IngestError> {
+    let settings: IngestSettings = load_file(path)?;
+    validate_settings(&settings)?;
+    Ok(settings)
+}
+
+
+/// The first call returns the baseline the caller read; later calls read the file, and one that names another audit file is refused.
+pub fn settings_loader(path: PathBuf, baseline: IngestSettings) -> Box<LoaderFn<IngestSettings>> {
+    let seeded = AtomicBool::new(false);
+    Box::new(move || {
+        if seeded.swap(true, Ordering::SeqCst) {
+            let current: IngestSettings = load_file(&path)?;
+            if current.audit_file == baseline.audit_file {
+                Ok(current)
+            } else {
+                Err(ConfigError::WatchedFile {
+                    file: "settings.audit_file".to_owned(),
+                    reason: "the audit file is read at start only, restart the service to change it".to_owned(),
+                })
+            }
+        } else {
+            Ok(baseline.clone())
+        }
+    })
+}
+
+
 /// Fails when the file is unreadable or its first settings are invalid; a later invalid file is refused by `reload` and the old settings stay.
 pub fn open_settings(path: PathBuf, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<IngestSettings>, IngestError> {
+    let baseline = load_settings(&path)?;
+    open_settings_from(path, baseline, audit)
+}
+
+
+/// Same as `open_settings` over a baseline the caller already parsed, that value is the engine's first settings and the start-only baseline; the file is read again only by reloads.
+pub fn open_settings_from(path: PathBuf, baseline: IngestSettings, audit: Box<SharedAuditFn>) -> Result<ReloadEngine<IngestSettings>, IngestError> {
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
-        tenant: "all".to_owned(),
+        tenant: AUDIT_TENANT.to_owned(),
         module: MODULE.to_owned(),
         target: path.display().to_string(),
         request_id: RELOAD_REQUEST_ID.to_owned(),
     };
     let engine = open_engine(
-        Box::new(move || load_file(&path)),
+        settings_loader(path, baseline),
         settings_state,
         vec![validate_subscriber()],
         audit,

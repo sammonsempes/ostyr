@@ -1211,6 +1211,24 @@ fn a_refused_durable_is_logged_by_field_once_until_a_fetch_works() -> Result<(),
 
 
 #[test]
+fn a_connect_refused_for_the_payload_limit_is_logged_by_variant_name_without_server_numbers() -> Result<(), Box<dyn Error + Send + Sync>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let rig = rig(NORMAL_MS, "", |state| state.max_payload = HUGE_PAYLOAD)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let dispatch = tracing::Dispatch::new(siem_ingest::logging::build_subscriber(move || writer.clone(), None)?);
+    tracing::dispatcher::with_default(&dispatch, || assert!(fetch_batch(&rig.link, FETCH_MAX).is_err()));
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    let line = logs.lines().find(|line| line.contains("ingestion is stalled")).ok_or("no named line")?;
+    assert!(line.contains("variant=\"PayloadLimit\""), "{line}");
+    assert!(!line.contains("8388608"), "{line}");
+    let worked: Result<Vec<_>, NatsError> = Ok(Vec::new());
+    siem_ingest::nats::log_refusal(&rig.link, &worked);
+    Ok(())
+}
+
+
+#[test]
 fn a_fetch_window_that_reaches_the_response_threshold_is_refused_by_name() -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = tempdir()?;
     let last_accepted = siem_ingest::nats_settings::RESPONSE_THRESHOLD_MS - SHORT_MS - 1;

@@ -49,6 +49,9 @@ pub const ORIGINAL_BYTES_HEADER: &str = "Ostyr-Original-Bytes";
 pub const TRUNCATED_HEADER: &str = "Ostyr-Truncated";
 
 
+pub const PAYLOAD_LIMIT_VARIANT: &str = "PayloadLimit";
+
+
 /// A dead-letter body is cut here; the stream's `--max-msg-size` (lab `DEAD_MAX_MSG_SIZE`, 8192) leaves 4 KiB for the headers.
 pub const MAX_DEAD_LETTER_BODY_BYTES: usize = 4096;
 
@@ -557,6 +560,10 @@ pub fn log_refusal(link: &Link, outcome: &Result<Vec<Delivery>, NatsError>) {
         warn!(field, "the pre-created durable is refused, ingestion is stalled");
     }
     *logged = field;
+    if matches!(outcome, Err(NatsError::PayloadLimit { .. })) {
+        let variant = PAYLOAD_LIMIT_VARIANT;
+        warn!(variant, "the server payload limit passes the pull byte cap, ingestion is stalled");
+    }
 }
 
 

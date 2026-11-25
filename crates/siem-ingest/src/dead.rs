@@ -90,7 +90,9 @@ pub fn log_summary(report: &LoopReport) {
     let dead_lettered = report.dead_lettered;
     let dead_letter_failed = report.dead_letter_failed;
     let host_metrics_skipped = report.host_metrics_skipped;
+    let dead_letter_backoffs = report.dead_letter_backoffs;
     info!(dead_lettered, dead_letter_failed, host_metrics_skipped, "ingest summary");
+    info!(dead_letter_backoffs, "ingest backoff summary");
     let pull_byte_cap = report.pull_byte_cap;
     let head_pulled_alone = report.head_pulled_alone;
     info!(pull_byte_cap, head_pulled_alone, "ingest pull summary");
