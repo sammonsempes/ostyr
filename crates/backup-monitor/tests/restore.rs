@@ -218,6 +218,7 @@ fn run(setup: &Setup) -> Result<backup_monitor::restore::RestoreResult, ResticEr
         &Limits::default(),
         PATIENT,
         clock,
+        rustix::process::geteuid().as_raw(),
     )
 }
 
@@ -312,6 +313,7 @@ fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Erro
         &Limits::default(),
         IMPATIENT,
         clock,
+        rustix::process::geteuid().as_raw(),
     )?;
     assert_eq!(result.outcome, RestoreOutcome::Timeout);
     let pid = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().to_owned();
@@ -332,7 +334,8 @@ fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Erro
             },
             &Limits::default(),
             IMPATIENT,
-            clock
+            clock,
+            rustix::process::geteuid().as_raw()
         )?
         .outcome,
         RestoreOutcome::Timeout
@@ -837,6 +840,7 @@ fn too_many_list_lines_and_a_huge_output_are_fixed_errors() -> Result<(), Box<dy
             limits,
             PATIENT,
             clock,
+            rustix::process::geteuid().as_raw(),
         )
     };
     assert!(matches!(
@@ -885,6 +889,7 @@ fn a_failing_or_hanging_list_is_a_fixed_error_within_the_shared_deadline() -> Re
         &Limits::default(),
         IMPATIENT,
         clock,
+        rustix::process::geteuid().as_raw(),
     );
     assert!(matches!(hung, Err(ResticError::Timeout)));
     assert_eq!(runs(&setup), RUNS_WITHOUT_DUMP * TWO_LINES);

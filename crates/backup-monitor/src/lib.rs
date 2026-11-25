@@ -21,6 +21,10 @@ pub mod restore;
 #[cfg(unix)]
 pub mod secrets;
 #[cfg(unix)]
+pub mod serve;
+#[cfg(unix)]
+pub mod service;
+#[cfg(unix)]
 pub mod store;
 pub mod text;
 pub mod types;
