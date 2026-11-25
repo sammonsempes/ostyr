@@ -5,3 +5,6 @@ cloudbase-init	ffbf80515a7311ed00800276a6af7aab23b41d7acf13e79ce3d2d56844f638f7	
 garage	2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8	garage-v2.5.0	2026-11-10	https://garagehq.deuxfleurs.fr/_releases/v2.5.0/x86_64-unknown-linux-musl/garage
 garage-image	23b16d34e0348d9aca9b960a7429a7e6d494974b5288bfb8f6c3ab856895f71e	dxflrs-garage-v2.5.0-amd64-manifest	2026-11-10	https://registry-1.docker.io/v2/dxflrs/garage/manifests/v2.5.0
 sysmon	00ecf1b46aec99299d3ae0bca79dc621458bd014b20b509d7c5c8e8c8611aa54	Sysmon.zip	2026-11-20	https://download.sysinternals.com/files/Sysmon.zip
+rustdesk-image	8ecdab65deb7c84652a626380e31d11a8f1fbafd97916d57f95c20628f943c00	rustdesk-server-1.1.16-index	2026-11-25	https://registry-1.docker.io/v2/rustdesk/rustdesk-server/manifests/1.1.16
+rustdesk-hbbs	374c821722b04f6d7ef063c78bc5b4db7109b8b9613508822d803e31fdc5b625	hbbs-1.1.16	2026-11-25	https://registry-1.docker.io/v2/rustdesk/rustdesk-server/blobs/sha256:be90be096fd9a45ca86d7010e7153467fe66ae7b395bcae9e046b3dfb927bfd5
+rustdesk-hbbr	3ad04953242db5a9a78d45d41d13b9c6ecff651881e3a7f594f8b36a321e2457	hbbr-1.1.16	2026-11-25	https://registry-1.docker.io/v2/rustdesk/rustdesk-server/blobs/sha256:d94d70d66ff6ff2242c915fd9db16295a69dff0c5a33fb88b0b0b892726f44c0

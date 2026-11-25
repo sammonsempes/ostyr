@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Usage: ostyr-rustdesk-start hbbs|hbbr
+# Starts a RustDesk server in the state directory (the key pair is created there at first start, mode 0600 through the unit UMask).
+# hbbs gets the relay address of this VM (first global IPv4 address: the isolated lab network has no default route).
+set -euo pipefail
+
+readonly ATTEMPTS=60
+readonly DELAY_SECONDS=2
+readonly RELAY_PORT=21117
+readonly INSTALL_DIR=/opt/ostyr/rustdesk
+
+role="${1:?usage: ostyr-rustdesk-start hbbs|hbbr}"
+case "$role" in
+    hbbr) exec "$INSTALL_DIR/hbbr" -k _ ;;
+    hbbs) ;;
+    *)
+        echo "ostyr-rustdesk-start: unknown role '$role'" >&2
+        exit 2
+        ;;
+esac
+
+node_ip=""
+for ((attempt = 0; attempt < ATTEMPTS && ${#node_ip} == 0; attempt++)); do
+    node_ip="$(ip -4 -o addr show scope global | awk '{split($4, address, "/"); print address[1]; exit}')"
+    if [[ -z "$node_ip" ]]; then
+        sleep "$DELAY_SECONDS"
+    fi
+done
+[[ -n "$node_ip" ]] || {
+    echo "ostyr-rustdesk-start: no global IPv4 address after $((ATTEMPTS * DELAY_SECONDS)) s" >&2
+    exit 1
+}
+
+exec "$INSTALL_DIR/hbbs" -k _ -r "$node_ip:$RELAY_PORT"
