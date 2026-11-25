@@ -7,6 +7,8 @@ pub mod logging;
 pub mod model;
 pub mod pg;
 pub mod run;
+#[cfg(unix)]
+pub mod serve;
 pub mod settings;
 pub mod store;
 pub mod types;
