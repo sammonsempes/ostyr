@@ -316,7 +316,10 @@ pub fn declarations_loader(file: PathBuf, pinned: String) -> Box<LoaderFn<Declar
         if tenant_of(&loaded.tenant) == pinned {
             Ok(loaded)
         } else {
-            Err(setting_error("tenant", TENANT_SWAP_REASON))
+            Err(ConfigError::WatchedFile {
+                file: "declarations".to_owned(),
+                reason: TENANT_SWAP_REASON.to_owned(),
+            })
         }
     })
 }
@@ -454,7 +457,7 @@ pub fn restore_round(shared: &Shared, declarations: &Declarations, start: usize,
                             key,
                             RunErrorRecord {
                                 tenant: declarations.tenant.clone(),
-                                tested_at: OffsetDateTime::now_utc(),
+                                tested_at: (shared.clock)(),
                                 category,
                             },
                         ));

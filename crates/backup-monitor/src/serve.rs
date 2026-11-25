@@ -47,7 +47,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 const FOREVER: usize = usize::MAX;
 
 
-const RUNNING: bool = false;
+const NO_EXTRA_ROUNDS: usize = 0;
 
 
 /// What `start` needs besides the settings file: the programs, the timing, the one reader of the settings file, the loop bound, the user and the clock.
@@ -348,7 +348,7 @@ pub async fn serve(service: &Service, rounds: usize, interrupt: &mut InterruptWa
     let mut cursor = Cursor::default();
     let mut stopped = false;
     let mut done = 0;
-    while stopped == RUNNING && done < rounds {
+    while !stopped && done < rounds.saturating_add(NO_EXTRA_ROUNDS) {
         let live = current_config(&service.settings);
         if elapsed_seconds(started) >= cursor.check_due {
             stopped = check_turn(service, &mut cursor, &live, started, interrupt).await?;

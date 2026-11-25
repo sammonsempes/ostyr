@@ -1072,6 +1072,47 @@ async fn passes_with(check_interval: u64, restore_interval: u64) -> Result<usize
 }
 
 
+const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
+
+
+async fn repositories_run_by(tested: usize, only: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let (_fake, site) = running_site(recording(), &declarations_text("acme", &NAMES, tested)).await?;
+    let quick: SettingsReader = Arc::new(|file: &Path| {
+        let mut settings = load_settings(file)?;
+        settings.interval_seconds = SHORT_INTERVAL;
+        settings.restore_interval_seconds = SHORT_INTERVAL;
+        Ok(settings)
+    });
+    let mut built = options(&site, TWO_ROUNDS, Duration::ZERO);
+    built.read = quick;
+    start(&site.settings, built, never()).await?;
+    let text = fs::read_to_string(site.bin.join("args"))?;
+    Ok(text
+        .lines()
+        .filter(|line| line.contains(only))
+        .filter_map(|line| NAMES.iter().find(|name| line.contains(&format!("/srv/{name}"))))
+        .map(|name| (*name).to_owned())
+        .collect())
+}
+
+
+#[tokio::test]
+async fn the_service_resumes_each_cut_check_round_at_the_next_repository() -> TestResult {
+    let mut ran = repositories_run_by(0, "cat config").await?;
+    ran.dedup();
+    assert_eq!(ran, ["alpha", "beta"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_service_resumes_each_cut_restore_round_at_the_next_repository() -> TestResult {
+    let ran = repositories_run_by(THREE, "dump").await?;
+    assert_eq!(ran, ["alpha", "beta"]);
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn a_schedule_that_is_not_due_is_skipped_in_a_pass() -> TestResult {
     assert_eq!(passes_with(SHORT_INTERVAL, LIVE_INTERVAL).await?, THREE);
