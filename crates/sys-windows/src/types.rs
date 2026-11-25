@@ -70,3 +70,43 @@ pub enum DirAclError {
     #[error("{operation} failed with code {code:#010x}")]
     Windows { operation: &'static str, code: u32 },
 }
+
+
+/// A pseudo-console size already checked against the bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsoleSize {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+
+/// Whether the console of a session is still to be closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseState {
+    Open,
+    Closed,
+}
+
+
+#[derive(Debug, Error)]
+pub enum ConsoleError {
+    #[error("console size {columns}x{rows} is outside 1..={max_columns} columns and 1..={max_rows} rows")]
+    BadSize {
+        columns: u32,
+        rows: u32,
+        max_columns: u16,
+        max_rows: u16,
+    },
+    #[error("environment variable name is empty, holds '=' or NUL")]
+    BadEnvironmentName,
+    #[error("environment variable {name} has a NUL in its value")]
+    BadEnvironmentValue { name: String },
+    #[error("environment variable {name} is defined twice")]
+    DuplicateEnvironmentName { name: String },
+    #[error("program path is empty, holds a quote or NUL")]
+    BadProgramPath,
+    #[error("windows directory {0:?} does not start with a drive letter and a colon")]
+    BadWindowsDirectory(String),
+    #[error("the console is already closed")]
+    AlreadyClosed,
+}

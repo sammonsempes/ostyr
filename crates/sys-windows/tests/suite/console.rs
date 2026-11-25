@@ -1,0 +1,185 @@
+use crate::types::TestResult;
+use sys_windows::console::{
+    begin_close, close_on_drop, command_line, console_size, environment_block, session_environment, MAX_CONSOLE_COLUMNS, MAX_CONSOLE_ROWS,
+};
+use sys_windows::types::{CloseState, ConsoleError, ConsoleSize};
+
+
+const SYSTEM_DIRECTORY: &str = "C:\\Windows\\System32";
+
+
+const WINDOWS_DIRECTORY: &str = "C:\\Windows";
+
+
+const SAMPLE: u32 = 10;
+
+
+fn decode(block: &[u16]) -> Vec<String> {
+    block.split(|unit| *unit == 0).map(String::from_utf16_lossy).collect()
+}
+
+
+#[test]
+fn the_command_line_quotes_the_program_and_blocks_autorun() -> TestResult {
+    assert_eq!(command_line("C:\\Windows\\System32\\cmd.exe")?, "\"C:\\Windows\\System32\\cmd.exe\" /D");
+    Ok(())
+}
+
+
+#[test]
+fn the_command_line_refuses_an_empty_quoted_or_nul_program() -> TestResult {
+    assert!(matches!(command_line(""), Err(ConsoleError::BadProgramPath)));
+    assert!(matches!(command_line("a\" /C calc"), Err(ConsoleError::BadProgramPath)));
+    assert!(matches!(command_line("a\0b"), Err(ConsoleError::BadProgramPath)));
+    Ok(())
+}
+
+
+#[test]
+fn a_size_inside_the_bounds_is_accepted() -> TestResult {
+    assert_eq!(console_size(1, 1)?, ConsoleSize { columns: 1, rows: 1 });
+    let largest = console_size(u32::from(MAX_CONSOLE_COLUMNS), u32::from(MAX_CONSOLE_ROWS))?;
+    assert_eq!(
+        largest,
+        ConsoleSize {
+            columns: MAX_CONSOLE_COLUMNS,
+            rows: MAX_CONSOLE_ROWS
+        }
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_size_outside_the_bounds_is_refused() -> TestResult {
+    let columns_over = u32::from(MAX_CONSOLE_COLUMNS) + 1;
+    let rows_over = u32::from(MAX_CONSOLE_ROWS) + 1;
+    assert!(matches!(console_size(0, SAMPLE), Err(ConsoleError::BadSize { .. })));
+    assert!(matches!(console_size(SAMPLE, 0), Err(ConsoleError::BadSize { .. })));
+    assert!(matches!(console_size(columns_over, SAMPLE), Err(ConsoleError::BadSize { .. })));
+    assert!(matches!(console_size(SAMPLE, rows_over), Err(ConsoleError::BadSize { .. })));
+    assert!(matches!(console_size(u32::MAX, SAMPLE), Err(ConsoleError::BadSize { .. })));
+    assert!(matches!(console_size(SAMPLE, u32::MAX), Err(ConsoleError::BadSize { .. })));
+    Ok(())
+}
+
+
+#[test]
+fn the_block_is_sorted_case_insensitively_and_double_nul_terminated() -> TestResult {
+    let block = environment_block(&[("b", "2"), ("A", "1"), ("c", "")])?;
+    assert_eq!(decode(&block), vec!["A=1", "b=2", "c=", "", ""]);
+    assert!(block.ends_with(&[0, 0]));
+    Ok(())
+}
+
+
+#[test]
+fn the_block_is_utf16() -> TestResult {
+    let block = environment_block(&[("N", "\u{1F600}")])?;
+    assert_eq!(block, "N=\u{1F600}\0\0".encode_utf16().collect::<Vec<u16>>());
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_block_is_two_nuls() -> TestResult {
+    assert_eq!(environment_block(&[])?, vec![0, 0]);
+    Ok(())
+}
+
+
+#[test]
+fn a_name_with_equals_nul_or_nothing_is_refused() -> TestResult {
+    assert!(matches!(environment_block(&[("A=B", "x")]), Err(ConsoleError::BadEnvironmentName)));
+    assert!(matches!(environment_block(&[("A\0B", "x")]), Err(ConsoleError::BadEnvironmentName)));
+    assert!(matches!(environment_block(&[("", "x")]), Err(ConsoleError::BadEnvironmentName)));
+    Ok(())
+}
+
+
+#[test]
+fn a_value_with_nul_is_refused_by_name() -> TestResult {
+    assert!(matches!(environment_block(&[("A", "x\0y")]), Err(ConsoleError::BadEnvironmentValue { name }) if name == "A"));
+    Ok(())
+}
+
+
+#[test]
+fn a_value_may_hold_equals() -> TestResult {
+    assert_eq!(decode(&environment_block(&[("A", "x=y")])?), vec!["A=x=y", "", ""]);
+    Ok(())
+}
+
+
+#[test]
+fn a_name_defined_twice_in_any_case_is_refused() -> TestResult {
+    assert!(matches!(
+        environment_block(&[("Path", "1"), ("PATH", "2")]),
+        Err(ConsoleError::DuplicateEnvironmentName { name }) if name == "PATH"
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_session_environment_is_the_exact_fixed_list() -> TestResult {
+    let block = session_environment(SYSTEM_DIRECTORY, WINDOWS_DIRECTORY, "s1")?;
+    let expected = vec![
+        "ComSpec=C:\\Windows\\System32\\cmd.exe",
+        "OSTYR_SESSION=s1",
+        "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem",
+        "PATHEXT=.COM;.EXE;.BAT;.CMD",
+        "SystemDrive=C:",
+        "SystemRoot=C:\\Windows",
+        "TEMP=C:\\Windows\\Temp",
+        "TMP=C:\\Windows\\Temp",
+        "windir=C:\\Windows",
+        "",
+        "",
+    ];
+    assert_eq!(decode(&block), expected);
+    Ok(())
+}
+
+
+#[test]
+fn the_session_environment_refuses_a_windows_directory_without_a_drive() -> TestResult {
+    for bad in ["", "C", "1:\\x", "CC:\\x", "\\\\server\\share"] {
+        assert!(
+            matches!(session_environment(SYSTEM_DIRECTORY, bad, "s"), Err(ConsoleError::BadWindowsDirectory(_))),
+            "{bad}"
+        );
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_session_label_goes_through_the_value_check() -> TestResult {
+    assert!(matches!(
+        session_environment(SYSTEM_DIRECTORY, WINDOWS_DIRECTORY, "a\0"),
+        Err(ConsoleError::BadEnvironmentValue { .. })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_console_closes_once_and_drop_after_close_does_nothing() -> TestResult {
+    let mut state = CloseState::Open;
+    begin_close(&mut state)?;
+    assert_eq!(state, CloseState::Closed);
+    assert!(matches!(begin_close(&mut state), Err(ConsoleError::AlreadyClosed)));
+    assert!(!close_on_drop(&mut state));
+    Ok(())
+}
+
+
+#[test]
+fn drop_closes_an_open_console_once() -> TestResult {
+    let mut state = CloseState::Open;
+    assert!(close_on_drop(&mut state));
+    assert!(!close_on_drop(&mut state));
+    assert_eq!(state, CloseState::Closed);
+    Ok(())
+}
