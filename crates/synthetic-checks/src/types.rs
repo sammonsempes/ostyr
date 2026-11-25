@@ -1,4 +1,7 @@
+use crate::model::Check;
 use crate::probe::{FetchCaps, HttpRequest, HttpResponse};
+use alerts::error::StoreError;
+use alerts::model::Alert;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -24,3 +27,18 @@ pub type Handshake<'a> = dyn Fn(SocketAddr, &str, Duration, usize, usize) -> io:
 
 /// One echo request to the address, `Ok` when the matching reply arrives within the time left.
 pub type Ping<'a> = dyn Fn(IpAddr, Duration) -> io::Result<()> + 'a;
+
+
+/// Probes one check and answers whether it succeeded.
+pub type Probe<'a> = dyn Fn(&Check) -> bool + 'a;
+
+
+/// Wall-clock seconds since the epoch.
+pub type WallClock<'a> = dyn Fn() -> u64 + 'a;
+
+
+/// Stores the alerts and answers how many were new.
+pub type Store<'a> = dyn Fn(&[Alert]) -> Result<usize, StoreError> + 'a;
+
+
+pub type Stopped<'a> = dyn Fn() -> bool + 'a;
