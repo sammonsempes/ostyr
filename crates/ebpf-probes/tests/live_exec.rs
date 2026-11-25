@@ -3,9 +3,9 @@
 use aya::programs::loaded_programs;
 use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
 use ebpf_probes::error::LoadError;
-use ebpf_probes::loader::{drain_exec, load_exec_probe, load_exec_probe_from_bytes, run_exec_probe, Probe};
+use ebpf_probes::loader::{drain_exec, drain_probes, load_exec_probe, load_exec_probe_from_bytes, prepare_probes_from_bytes, run_exec_probe, Probe};
 use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
-use ebpf_probes::shape::{ShapeError, PROGRAM_NAME};
+use ebpf_probes::shape::{ProbeSpec, ShapeError, EXEC_PROBE, PROGRAM_NAME};
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
@@ -151,5 +151,40 @@ fn a_stop_set_before_the_attach_attaches_nothing_and_leaves_no_program() -> Resu
         gone.iter().all(|unloaded| *unloaded),
         "a program loaded by the stopped run is still listed: {fresh:?}"
     );
+    Ok(())
+}
+
+
+const GHOST_PROGRAM: &str = "ghost_program";
+
+
+#[test]
+fn a_table_naming_a_missing_section_fails_whole_and_named_and_loads_nothing() -> Result<(), Box<dyn Error>> {
+    let before = program_ids()?;
+    let bytes = read_object(Path::new(EXEC_OBJECT_PATH))?;
+    let ghost = ProbeSpec {
+        program: GHOST_PROGRAM,
+        ..EXEC_PROBE
+    };
+    let refused = prepare_probes_from_bytes(&bytes, &[EXEC_PROBE, ghost])
+        .err()
+        .ok_or("a missing section loaded")?;
+    assert_eq!(refused, LoadError::Shape(ShapeError::MissingProgram(GHOST_PROGRAM)));
+    assert!(refused.to_string().contains(GHOST_PROGRAM) || refused.source().is_some_and(|cause| cause.to_string().contains(GHOST_PROGRAM)));
+    let fresh: Vec<u32> = program_ids()?.into_iter().filter(|id| !before.contains(id)).collect();
+    assert!(fresh.is_empty(), "programs left loaded: {fresh:?}");
+    Ok(())
+}
+
+
+#[test]
+fn the_shared_drain_reports_each_probe_by_name() -> Result<(), Box<dyn Error>> {
+    let mut probe = load()?;
+    let child = run_true_as_nobody()?;
+    let drains = drain_probes(&mut probe, MAX_DRAIN_PER_POLL);
+    let names: Vec<&str> = drains.iter().map(|entry| entry.name).collect();
+    assert_eq!(names, [EXEC_PROBE.name]);
+    let found = drains.iter().any(|entry| entry.drained.records.iter().any(|record| record.pid == child));
+    assert!(found, "no record for pid {child}");
     Ok(())
 }

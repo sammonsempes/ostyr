@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 
-use ebpf_probes::shape::{check_object_bytes, ShapeError, DROPS_NAME, PROGRAM_NAME, RING_NAME, RODATA_NAME};
+use ebpf_probes::shape::{
+    check_object_bytes, check_object_bytes_for, AttachKind, ProbeSpec, ShapeError, DROPS_NAME, EXEC_PROBE, PROBE_TABLE, PROGRAM_NAME, RING_NAME,
+    RODATA_NAME,
+};
 use std::error::Error;
 
 
@@ -388,7 +391,7 @@ fn a_missing_or_mistyped_map_is_named() -> Result<(), Box<dyn Error>> {
 fn a_missing_extra_or_mistyped_program_is_named() -> Result<(), Box<dyn Error>> {
     let mut none = good_spec();
     none.programs = Vec::new();
-    assert_eq!(verdict(&none)?, Err(ShapeError::MissingProgram));
+    assert_eq!(verdict(&none)?, Err(ShapeError::MissingProgram(PROGRAM_NAME)));
     let mut extra = good_spec();
     extra
         .programs
@@ -399,7 +402,7 @@ fn a_missing_extra_or_mistyped_program_is_named() -> Result<(), Box<dyn Error>> 
     assert_eq!(verdict(&renamed)?, Err(ShapeError::ExtraProgram));
     let mut kprobe = good_spec();
     kprobe.programs = vec![("kprobe/sched_process_exec".to_string(), PROGRAM_NAME.to_string())];
-    assert_eq!(verdict(&kprobe)?, Err(ShapeError::WrongProgramType));
+    assert_eq!(verdict(&kprobe)?, Err(ShapeError::WrongProgramType(PROGRAM_NAME)));
     Ok(())
 }
 
@@ -424,8 +427,8 @@ fn every_refusal_has_fixed_text_without_object_content() -> Result<(), Box<dyn E
         ShapeError::MissingMap(RING_NAME),
         ShapeError::WrongMapType(DROPS_NAME),
         ShapeError::ExtraProgram,
-        ShapeError::MissingProgram,
-        ShapeError::WrongProgramType,
+        ShapeError::MissingProgram(PROGRAM_NAME),
+        ShapeError::WrongProgramType(PROGRAM_NAME),
     ];
     let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
     assert!(texts.iter().all(|text| text.starts_with("exec ") && !text.contains(MARKER)));
@@ -435,5 +438,82 @@ fn every_refusal_has_fixed_text_without_object_content() -> Result<(), Box<dyn E
     marked.maps.push((MARKER.to_string(), MAP_TYPE_HASH, 0));
     let refused = verdict(&marked)?.err().ok_or("accepted")?;
     assert!(!format!("{refused} {refused:?}").contains(MARKER));
+    Ok(())
+}
+
+
+const GHOST_PROGRAM: &str = "ghost_program";
+
+
+const SECOND_RING: &str = "OTHER_EVENTS";
+
+
+const SECOND_DROPS: &str = "OTHER_DROPS";
+
+
+const SECOND_PROGRAM: &str = "other_program";
+
+
+const SECOND_SECTION: &str = "tracepoint/sched/other_program";
+
+
+fn second_probe() -> ProbeSpec {
+    ProbeSpec {
+        name: "other",
+        program: SECOND_PROGRAM,
+        ring: SECOND_RING,
+        drops: SECOND_DROPS,
+        attach: AttachKind::TracePoint {
+            category: "sched",
+            name: SECOND_PROGRAM,
+        },
+    }
+}
+
+
+#[test]
+fn the_production_table_is_the_exec_probe_alone() -> Result<(), Box<dyn Error>> {
+    assert_eq!(PROBE_TABLE, [EXEC_PROBE]);
+    assert_eq!(EXEC_PROBE.program, PROGRAM_NAME);
+    Ok(())
+}
+
+
+#[test]
+fn a_table_naming_a_missing_program_fails_whole_and_named() -> Result<(), Box<dyn Error>> {
+    let bytes = elf_of(&good_spec())?;
+    let ghost = ProbeSpec {
+        program: GHOST_PROGRAM,
+        ..EXEC_PROBE
+    };
+    assert_eq!(
+        check_object_bytes_for(&bytes, &[EXEC_PROBE, ghost]),
+        Err(ShapeError::MissingProgram(GHOST_PROGRAM))
+    );
+    assert_eq!(check_object_bytes_for(&bytes, &[EXEC_PROBE]), Ok(()));
+    assert!(ShapeError::MissingProgram(GHOST_PROGRAM).to_string().contains(GHOST_PROGRAM));
+    Ok(())
+}
+
+
+#[test]
+fn a_two_probe_object_is_judged_against_its_table() -> Result<(), Box<dyn Error>> {
+    let mut two = good_spec();
+    two.maps.push((SECOND_RING.to_string(), MAP_TYPE_RINGBUF, 0));
+    two.maps.push((SECOND_DROPS.to_string(), MAP_TYPE_PERCPU_ARRAY, 0));
+    two.programs.push((SECOND_SECTION.to_string(), SECOND_PROGRAM.to_string()));
+    let bytes = elf_of(&two)?;
+    let table = [EXEC_PROBE, second_probe()];
+    assert_eq!(check_object_bytes_for(&bytes, &table), Ok(()));
+    assert_eq!(check_object_bytes(&bytes), Err(ShapeError::ExtraMap));
+    let mut wrong = two;
+    wrong.programs = vec![
+        (TRACEPOINT_SECTION.to_string(), PROGRAM_NAME.to_string()),
+        ("kprobe/other_program".to_string(), SECOND_PROGRAM.to_string()),
+    ];
+    assert_eq!(
+        check_object_bytes_for(&elf_of(&wrong)?, &table),
+        Err(ShapeError::WrongProgramType(SECOND_PROGRAM))
+    );
     Ok(())
 }

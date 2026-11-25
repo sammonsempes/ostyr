@@ -21,6 +21,37 @@ pub const RODATA_NAME: &str = ".rodata";
 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachKind {
+    TracePoint { category: &'static str, name: &'static str },
+}
+
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeSpec {
+    pub name: &'static str,
+    pub program: &'static str,
+    pub ring: &'static str,
+    pub drops: &'static str,
+    pub attach: AttachKind,
+}
+
+
+pub const EXEC_PROBE: ProbeSpec = ProbeSpec {
+    name: "exec",
+    program: PROGRAM_NAME,
+    ring: RING_NAME,
+    drops: DROPS_NAME,
+    attach: AttachKind::TracePoint {
+        category: "sched",
+        name: PROGRAM_NAME,
+    },
+};
+
+
+pub const PROBE_TABLE: [ProbeSpec; 1] = [EXEC_PROBE];
+
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShapeError {
     Parse,
     PinnedMap,
@@ -28,8 +59,8 @@ pub enum ShapeError {
     MissingMap(&'static str),
     WrongMapType(&'static str),
     ExtraProgram,
-    MissingProgram,
-    WrongProgramType,
+    MissingProgram(&'static str),
+    WrongProgramType(&'static str),
 }
 
 
@@ -42,8 +73,8 @@ impl fmt::Display for ShapeError {
             ShapeError::MissingMap(name) => write!(formatter, "exec object lacks map {name}"),
             ShapeError::WrongMapType(name) => write!(formatter, "exec map {name} has the wrong type"),
             ShapeError::ExtraProgram => write!(formatter, "exec object holds a program that is not expected"),
-            ShapeError::MissingProgram => write!(formatter, "exec object lacks program {PROGRAM_NAME}"),
-            ShapeError::WrongProgramType => write!(formatter, "exec program {PROGRAM_NAME} is not a tracepoint"),
+            ShapeError::MissingProgram(name) => write!(formatter, "exec object lacks program {name}"),
+            ShapeError::WrongProgramType(name) => write!(formatter, "exec program {name} has the wrong attach type"),
         }
     }
 }
@@ -58,28 +89,54 @@ fn map_type_is(maps: &HashMap<String, Map>, name: &'static str, expected: u32) -
 }
 
 
-/// Refuses an object unless it holds exactly the two exec maps, the rodata map and the one tracepoint program, with no pinning anywhere.
-pub fn check_shape(object: &Object) -> Result<(), ShapeError> {
-    let unpinned = object.maps.values().all(|map| map.pinning() == PinningType::None);
-    unpinned.then_some(()).ok_or(ShapeError::PinnedMap)?;
-    let expected = [RING_NAME, DROPS_NAME, RODATA_NAME];
-    let known = object.maps.keys().all(|name| expected.contains(&name.as_str()));
-    known.then_some(()).ok_or(ShapeError::ExtraMap)?;
-    map_type_is(&object.maps, RING_NAME, BPF_MAP_TYPE_RINGBUF as u32)?;
-    map_type_is(&object.maps, DROPS_NAME, BPF_MAP_TYPE_PERCPU_ARRAY as u32)?;
-    let rodata = object.maps.get(RODATA_NAME).ok_or(ShapeError::MissingMap(RODATA_NAME))?;
-    let rodata_kind = rodata.section_kind() == EbpfSectionKind::Rodata;
-    rodata_kind.then_some(()).ok_or(ShapeError::WrongMapType(RODATA_NAME))?;
-    let only_program = object.programs.keys().all(|name| name == PROGRAM_NAME);
-    only_program.then_some(()).ok_or(ShapeError::ExtraProgram)?;
-    let program = object.programs.get(PROGRAM_NAME).ok_or(ShapeError::MissingProgram)?;
-    let tracepoint = matches!(program.section, ProgramSection::TracePoint);
-    tracepoint.then_some(()).ok_or(ShapeError::WrongProgramType)
+fn section_matches(attach: &AttachKind, section: &ProgramSection) -> bool {
+    match attach {
+        AttachKind::TracePoint { .. } => matches!(section, ProgramSection::TracePoint),
+    }
 }
 
 
-/// Parses the checked bytes with aya's own object parser and judges the result; these are the bytes aya loads afterwards.
-pub fn check_object_bytes(bytes: &[u8]) -> Result<(), ShapeError> {
+fn probe_maps_ok(object: &Object, spec: &ProbeSpec) -> Result<(), ShapeError> {
+    map_type_is(&object.maps, spec.ring, BPF_MAP_TYPE_RINGBUF as u32)?;
+    map_type_is(&object.maps, spec.drops, BPF_MAP_TYPE_PERCPU_ARRAY as u32)
+}
+
+
+fn probe_program_ok(object: &Object, spec: &ProbeSpec) -> Result<(), ShapeError> {
+    let program = object.programs.get(spec.program).ok_or(ShapeError::MissingProgram(spec.program))?;
+    section_matches(&spec.attach, &program.section)
+        .then_some(())
+        .ok_or(ShapeError::WrongProgramType(spec.program))
+}
+
+
+/// Refuses an object unless it holds exactly the maps, the rodata map and the programs of `table`, each program of its attach kind, with no pinning anywhere.
+pub fn check_shape_for(object: &Object, table: &[ProbeSpec]) -> Result<(), ShapeError> {
+    let unpinned = object.maps.values().all(|map| map.pinning() == PinningType::None);
+    unpinned.then_some(()).ok_or(ShapeError::PinnedMap)?;
+    let known = object
+        .maps
+        .keys()
+        .all(|name| name == RODATA_NAME || table.iter().any(|spec| spec.ring == name || spec.drops == name));
+    known.then_some(()).ok_or(ShapeError::ExtraMap)?;
+    table.iter().try_for_each(|spec| probe_maps_ok(object, spec))?;
+    let rodata = object.maps.get(RODATA_NAME).ok_or(ShapeError::MissingMap(RODATA_NAME))?;
+    let rodata_kind = rodata.section_kind() == EbpfSectionKind::Rodata;
+    rodata_kind.then_some(()).ok_or(ShapeError::WrongMapType(RODATA_NAME))?;
+    let only_known = object.programs.keys().all(|name| table.iter().any(|spec| spec.program == name));
+    only_known.then_some(()).ok_or(ShapeError::ExtraProgram)?;
+    table.iter().try_for_each(|spec| probe_program_ok(object, spec))
+}
+
+
+/// Parses the checked bytes with aya's own object parser and judges the result against `table`; these are the bytes aya loads afterwards.
+pub fn check_object_bytes_for(bytes: &[u8], table: &[ProbeSpec]) -> Result<(), ShapeError> {
     let object = Object::parse(bytes).map_err(|_| ShapeError::Parse)?;
-    check_shape(&object)
+    check_shape_for(&object, table)
+}
+
+
+/// `check_object_bytes_for` with the production table.
+pub fn check_object_bytes(bytes: &[u8]) -> Result<(), ShapeError> {
+    check_object_bytes_for(bytes, &PROBE_TABLE)
 }
