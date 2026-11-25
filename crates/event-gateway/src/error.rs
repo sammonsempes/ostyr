@@ -39,7 +39,7 @@ pub enum GatewayError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Audit(#[from] AuditError),
-    #[error("audit file {}: {source}", .path.display())]
+    #[error("audit file {path:?}: {source}")]
     AuditFile {
         path: PathBuf,
         #[source]

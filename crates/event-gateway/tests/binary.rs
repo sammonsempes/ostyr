@@ -56,12 +56,6 @@ fn write_leaf(dir: &Path, name: &str, issuer: &Issuer<'static, KeyPair>, params:
 }
 
 
-const RELOAD_POLLS: u32 = 200;
-
-
-const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
-
 const SERVING_MARKER: &str = "serving";
 
 
@@ -332,19 +326,56 @@ fn an_unwritable_server_audit_or_a_bad_revocation_file_refuses_the_start_without
 }
 
 
+const RELOAD_ENGINES: usize = 2;
+
+
+const RELOADED_MARKER: &str = "configuration reloaded";
+
+
 #[test]
 fn a_sighup_right_after_serving_reloads_and_keeps_the_gateway_up() -> TestResult {
     let dir = tempdir()?;
     let site = write_site(dir.path(), 1)?;
-    let running = start(&site)?;
-    fs::write(dir.path().join("gateway.yaml"), "nats_url: \"nats://127.0.0.1:2\"\n")?;
+    let elsewhere = tempdir()?;
+    let linked = ["gateway.yaml", "channel.yaml"].map(|name| (dir.path().join(name), elsewhere.path().join(name)));
+    linked.iter().try_for_each(|(link, target)| -> TestResult {
+        fs::rename(link, target)?;
+        Ok(std::os::unix::fs::symlink(target, link)?)
+    })?;
+    let mut running = start(&site)?;
+    let (_, gateway_target) = linked.first().ok_or("no gateway link")?;
+    fs::write(gateway_target, "nats_url: \"nats://127.0.0.1:2\"\n")?;
+    let (_, channel_target) = linked.last().ok_or("no channel link")?;
+    fs::write(channel_target, "max_message_bytes: 2000000\n")?;
     send(&running, "-HUP")?;
-    let audit = dir.path().join("gateway-audit.log");
-    (0..RELOAD_POLLS)
-        .find_map(|_| {
-            std::thread::sleep(RELOAD_POLL);
-            fs::read_to_string(&audit).ok().filter(|text| text.contains("config.reload"))
-        })
-        .ok_or("no reload audit line after SIGHUP")?;
+    let reloads = running
+        .reader
+        .by_ref()
+        .lines()
+        .filter(|line| line.as_ref().is_ok_and(|text| text.contains(RELOADED_MARKER)))
+        .take(RELOAD_ENGINES)
+        .count();
+    assert_eq!(reloads, RELOAD_ENGINES);
+    assert!(fs::read_to_string(dir.path().join("gateway-audit.log"))?.contains("config.reload"));
     stop_with(running, "-TERM")
+}
+
+
+#[test]
+fn an_audit_path_with_escapes_is_refused_on_one_escaped_line() -> TestResult {
+    let dir = tempdir()?;
+    let site = write_site(dir.path(), 1)?;
+    let gateway_file = dir.path().join("escaped.yaml");
+    fs::write(
+        &gateway_file,
+        format!(
+            "settings_file: {}\naudit_file: \"{}/none\\e[31m\\nsecond/audit.log\"\n",
+            dir.path().join("gateway.yaml").display(),
+            dir.path().display()
+        ),
+    )?;
+    let output = run_to_end(&[&site.server_file, &gateway_file], None)?;
+    let text = String::from_utf8(output.stderr.clone())?;
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    refused_without_serving(&output, "\\u{1b}")
 }
