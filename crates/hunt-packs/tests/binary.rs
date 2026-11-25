@@ -9,9 +9,11 @@ mod stub;
 use common::types::TestResult;
 use core_audit::log::open_file_log;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_config::load::load_file as load_settings_file;
 use hunt_packs::model::HuntPack;
 use hunt_packs::packs::load_file;
-use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, AUDIT_TENANT};
+use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, start_from, AUDIT_TENANT};
+use hunt_packs::settings::HuntSettings;
 use hunt_packs::store::GET_SQL;
 use hunt_packs::types::InterruptWait;
 use metric_alerts::fetch::FetchError;
@@ -351,6 +353,23 @@ async fn start_returns_its_report_after_its_rounds_and_counts_the_refused_tenant
     let report = start(&settings_file, u64::MAX, after_the_first_round(fake)).await?;
     assert_eq!((report.rounds, report.ticks, report.refused_tenants), (1, 1, 1));
     assert_eq!(fs::read_to_string(dir.path().join("audit.log"))?.lines().count(), 0);
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_from_uses_the_caller_read_for_the_audit_path_and_the_baseline() -> TestResult {
+    let dir = tempdir()?;
+    let (fake, ca_pem) = fake_with(accepting()).await?;
+    let settings_file = write_site(dir.path(), fake.port, &ca_pem)?;
+    let mut first = load_settings_file::<HuntSettings>(&settings_file)?;
+    first.audit_file = dir.path().join("first-audit.log");
+    start_from(&settings_file, first, u64::MAX, after_the_first_round(fake)).await?;
+    assert!(!dir.path().join("audit.log").exists());
+    let audit = fs::read_to_string(dir.path().join("first-audit.log"))?;
+    assert_eq!(audit.lines().count(), 1, "{audit}");
+    assert!(audit.contains("\"tenant\":\"all\""), "{audit}");
+    assert!(audit.contains("denied"), "{audit}");
     Ok(())
 }
 

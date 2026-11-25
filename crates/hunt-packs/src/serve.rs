@@ -139,6 +139,12 @@ pub fn reload_context(hunt_file: &Path) -> ReloadContext {
 
 pub async fn start(hunt_file: &Path, rounds: u64, interrupt: InterruptWait) -> Result<ServiceReport, Box<dyn Error>> {
     let first = load_file::<HuntSettings>(hunt_file)?;
+    start_from(hunt_file, first, rounds, interrupt).await
+}
+
+
+/// The service from the one read of the settings file: that value is the audit path and the engine baseline.
+pub async fn start_from(hunt_file: &Path, first: HuntSettings, rounds: u64, interrupt: InterruptWait) -> Result<ServiceReport, Box<dyn Error>> {
     first.audit_file.is_absolute().then_some(()).ok_or(HuntSettingsError::AuditFile)?;
     let audit_log = open_file_log(&first.audit_file)?;
     let context = reload_context(hunt_file);
