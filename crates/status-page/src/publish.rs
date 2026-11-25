@@ -2,7 +2,7 @@ use crate::error::{StatusPageError, StoreError};
 use crate::model::{IncidentInput, Omitted, PageConfig, PageState, RenderedPage, DEFAULT_LIMITS};
 use crate::render::render_omitting;
 use crate::snapshot::{publish, snapshot_of};
-use crate::store::is_refused;
+use crate::store::{check_marks, check_readable, check_required};
 use crate::store_model::PublishedRead;
 use crate::types::IncidentReadFn;
 use core_pg::query::{CLIENT_DEADLINE_MARGIN, QUERY_WINDOWS};
@@ -92,7 +92,7 @@ pub fn omission_reason(size_cut: bool) -> &'static str {
 
 
 /// Fits the page: unresolved stay, the resolved set is halved per attempt; returns what it leaves out, rows beyond the limit included.
-pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPage, Omitted), StatusPageError> {
+pub fn fit_page(config: &PageConfig, read: &PublishedRead, unread: bool) -> Result<(RenderedPage, Omitted), StatusPageError> {
     let (mut published, unpublished): (Vec<IncidentInput>, Vec<IncidentInput>) =
         read.incidents.iter().cloned().partition(|incident| incident.published);
     published.sort_by_key(|incident| {
@@ -116,6 +116,7 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPa
                 all: total - kept,
                 ongoing: ongoing - kept.min(unresolved),
                 reason: omission_reason(kept < published.len()),
+                unread,
             };
             (render_omitting(config, &[], &subset, &[], 0, &DEFAULT_LIMITS, omitted), omitted)
         })
@@ -128,30 +129,38 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPa
 }
 
 
-pub fn is_clean(text: &str, multiline: bool) -> bool {
-    !text.chars().any(|character| is_refused(character, multiline))
+/// The T628 write-path checks (non-blank, readable, bounded mark runs, no control or blank character) applied to a stored text.
+pub fn check_stored(field: &'static str, text: &str, multiline: bool) -> Result<(), StoreError> {
+    check_required(field, text, usize::MAX, multiline)?;
+    check_readable(field, text)?;
+    check_marks(field, text)
 }
 
 
-/// Leaves out what a direct database writer stored with a control, bidi or blank character; returns the read, the incidents and the updates left out.
+pub fn is_clean(text: &str, multiline: bool) -> bool {
+    check_stored("text", text, multiline).is_ok()
+}
+
+
+/// Leaves out stored text the write path would refuse (totals keep counting it); returns the read and the incident and update counts left out.
 pub fn refuse_unsafe_text(read: &PublishedRead) -> (PublishedRead, usize, usize) {
     let (clean, refused): (Vec<IncidentInput>, Vec<IncidentInput>) = read
         .incidents
         .iter()
         .cloned()
         .partition(|incident| is_clean(&incident.public_title, false));
-    let refused_ongoing = refused.iter().filter(|incident| incident.resolved_at.is_none()).count();
     let (incidents, updates_refused) = clean.into_iter().fold((Vec::new(), 0), |(mut kept, count), mut incident| {
         let before = incident.updates.len();
         incident.updates.retain(|update| is_clean(&update.message, true));
         let removed = before - incident.updates.len();
+        incident.omitted_updates += removed;
         kept.push(incident);
         (kept, count + removed)
     });
     let safe = PublishedRead {
         incidents,
-        total: read.total.saturating_sub(refused.len()),
-        ongoing: read.ongoing.saturating_sub(refused_ongoing),
+        total: read.total,
+        ongoing: read.ongoing,
     };
     (safe, refused.len(), updates_refused)
 }
@@ -159,28 +168,38 @@ pub fn refuse_unsafe_text(read: &PublishedRead) -> (PublishedRead, usize, usize)
 
 /// Every component is `unknown` (no state is passed) until the checks feed is wired; returns what the page left out.
 pub fn publish_page(config: &PageConfig, state: &PageState, read: &PublishedRead) -> Result<Omitted, StatusPageError> {
+    publish_read(config, state, read, false)
+}
+
+
+/// As `publish_page`; `unread` marks a page published before any store read succeeded. The tenant is checked before the refusal.
+pub fn publish_read(config: &PageConfig, state: &PageState, read: &PublishedRead, unread: bool) -> Result<Omitted, StatusPageError> {
+    let foreign = read.incidents.iter().any(|incident| incident.tenant != config.tenant);
+    if foreign {
+        Err(StatusPageError::TenantMismatch)?;
+    }
     let (safe, incidents_refused, updates_refused) = refuse_unsafe_text(read);
     if incidents_refused + updates_refused > 0 {
         tracing::warn!(incidents_refused, updates_refused, "unsafe stored text left out");
     }
-    let (rendered, omitted) = fit_page(config, &safe)?;
+    let (rendered, omitted) = fit_page(config, &safe, unread)?;
     publish(state, snapshot_of(&config.tenant, &rendered)).map(|()| omitted)
 }
 
 
 /// The page before `serve` accepts: a failed read or render gives a page without incidents, never a missing one.
 pub async fn first_publish(config: &PageConfig, state: &PageState, read: &IncidentReadFn, scope: &TenantScope) -> Result<(), StatusPageError> {
-    let fetched = fetch(read, scope, declared_services(config), READ_DEADLINE)
-        .await
-        .unwrap_or_else(|error| {
-            let class = error_class(&error);
-            tracing::warn!(class, "first incident read failed");
-            PublishedRead::default()
-        });
-    let omitted = publish_page(config, state, &fetched).or_else(|error| {
+    let fetched = fetch(read, scope, declared_services(config), READ_DEADLINE).await;
+    let unread = fetched.is_err();
+    let rows = fetched.unwrap_or_else(|error| {
+        let class = error_class(&error);
+        tracing::warn!(class, "first incident read failed");
+        PublishedRead::default()
+    });
+    let omitted = publish_read(config, state, &rows, unread).or_else(|error| {
         let class = render_class(&error);
         tracing::warn!(class, "first render failed, publishing without incidents");
-        publish_page(config, state, &PublishedRead::default())
+        publish_read(config, state, &PublishedRead::default(), true)
     })?;
     log_omitted(state, omitted);
     Ok(())

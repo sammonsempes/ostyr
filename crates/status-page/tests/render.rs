@@ -395,6 +395,7 @@ fn a_cut_of_updates_and_of_incidents_is_stated_never_silent() -> TestResult {
         all: UNLISTED,
         ongoing: 0,
         reason: "size",
+        unread: false,
     };
     let page = render_omitting(&config(), &[], &[cut], &[], NOW, &DEFAULT_LIMITS, omitted)?;
     assert!(page.json.contains("\"omitted_updates\":3"));

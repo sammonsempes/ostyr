@@ -66,7 +66,9 @@ pub fn render_html(page: &PublicPage) -> String {
     let components: String = page.components.iter().map(component_item).collect();
     let incidents: String = page.incidents.iter().map(incident_item).collect();
     let title = encode_text(&page.title);
-    let omitted = if page.omitted_ongoing > 0 {
+    let omitted = if page.unread {
+        "<p>Incidents have not been read yet.</p>".to_owned()
+    } else if page.omitted_ongoing > 0 {
         format!(
             "<p>{} incidents not shown, {} of them ongoing.</p>",
             page.omitted_incidents, page.omitted_ongoing
