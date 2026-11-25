@@ -11,6 +11,7 @@ use ipnet::Ipv6Net;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::Path;
+use url::{Host, Url};
 
 
 pub const CHECKS_KEY: &str = "checks";
@@ -79,13 +80,30 @@ pub fn validate_nat64_prefix(prefix: Option<Ipv6Net>) -> Result<(), CheckError> 
 }
 
 
-/// An ICMP target is an IP literal or a plain host name: no port, path, userinfo or leading `-`.
+/// The host of an ICMP target, parsed as TCP and TLS parse theirs: an IP literal first (bare IPv6 included), otherwise the host of an `https` authority.
+pub fn icmp_host(target: &str) -> Option<Host<String>> {
+    target
+        .parse::<IpAddr>()
+        .ok()
+        .map(|address| match address {
+            IpAddr::V4(v4) => Host::Ipv4(v4),
+            IpAddr::V6(v6) => Host::Ipv6(v6),
+        })
+        .or_else(|| {
+            Url::parse(&format!("https://{target}"))
+                .ok()
+                .and_then(|url| url.host().map(|found| found.to_owned()))
+        })
+}
+
+
+/// An ICMP target is an IP literal or a plain host name the URL parser accepts: no port, path, userinfo or leading `-`.
 pub fn icmp_target_ok(target: &str) -> bool {
     let name = !target.starts_with('-')
         && target
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || ICMP_HOST_EXTRA_CHARS.contains(&character));
-    name || target.parse::<IpAddr>().is_ok()
+    (name || target.parse::<IpAddr>().is_ok()) && icmp_host(target).is_some()
 }
 
 
