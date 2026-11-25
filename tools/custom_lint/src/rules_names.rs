@@ -42,10 +42,81 @@ pub fn is_short_ident(token: &Token) -> bool {
 }
 
 
-pub fn forbidden_ident(context: &Context) -> Vec<Violation> {
-    significant_tokens(&context.source)
+const FOREIGN_FIELD_NAMES: [&str; 2] = ["X", "Y"];
+
+
+const FOREIGN_FIELD_PATHS: [&str; 2] = ["crates/sys-windows/src/", "crates/sys-windows/tests/"];
+
+
+pub fn is_foreign_field_path(path: &std::path::Path) -> bool {
+    let normalised = path.to_string_lossy().replace('\\', "/");
+    FOREIGN_FIELD_PATHS.iter().any(|prefix| normalised.contains(prefix))
+}
+
+
+pub fn enclosing_open(tokens: &[Token], index: usize) -> Option<(usize, TokenKind)> {
+    tokens
         .iter()
-        .filter(|token| is_short_ident(token) && !ALLOWED_SHORT_IDENTS.contains(&token.text))
+        .enumerate()
+        .take(index)
+        .rev()
+        .scan(0usize, |depth, (position, token)| {
+            let found = match token.kind {
+                TokenKind::CloseBrace | TokenKind::CloseParen | TokenKind::CloseBracket => {
+                    *depth += 1;
+                    None
+                }
+                TokenKind::OpenBrace | TokenKind::OpenParen | TokenKind::OpenBracket if *depth == 0 => Some((position, token.kind)),
+                TokenKind::OpenBrace | TokenKind::OpenParen | TokenKind::OpenBracket => {
+                    *depth -= 1;
+                    None
+                }
+                _ => None,
+            };
+            Some(found)
+        })
+        .flatten()
+        .next()
+}
+
+
+pub fn head_has_keyword(tokens: &[Token], open_index: usize, words: &[&str]) -> bool {
+    tokens
+        .iter()
+        .take(open_index)
+        .rev()
+        .take_while(|token| !matches!(token.kind, TokenKind::Semi | TokenKind::OpenBrace | TokenKind::CloseBrace))
+        .any(|token| words.iter().any(|word| is_keyword(token, word)))
+}
+
+
+pub fn is_struct_expression_field(tokens: &[Token], index: usize) -> bool {
+    let followed_by_colon = kind_at(tokens, index + 1) == Some(TokenKind::Colon);
+    let after_separator = before(tokens, index, 1).is_some_and(|previous| matches!(previous.kind, TokenKind::OpenBrace | TokenKind::Comma));
+    let brace = enclosing_open(tokens, index).filter(|(_, kind)| *kind == TokenKind::OpenBrace);
+    let in_definition = brace.is_some_and(|(open, _)| {
+        head_has_keyword(tokens, open, &["struct", "union"])
+            || enclosing_open(tokens, open).is_some_and(|(parent, _)| head_has_keyword(tokens, parent, &["enum"]))
+    });
+    followed_by_colon && after_separator && brace.is_some() && !in_definition
+}
+
+
+pub fn is_foreign_field(tokens: &[Token], index: usize) -> bool {
+    let accessed = before(tokens, index, 1).is_some_and(|previous| previous.kind == TokenKind::Dot);
+    accessed || is_struct_expression_field(tokens, index)
+}
+
+
+pub fn forbidden_ident(context: &Context) -> Vec<Violation> {
+    let tokens = significant_tokens(&context.source);
+    let foreign_path = is_foreign_field_path(&context.path);
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| is_short_ident(token) && !ALLOWED_SHORT_IDENTS.contains(&token.text))
+        .filter(|(index, token)| !(foreign_path && FOREIGN_FIELD_NAMES.contains(&token.text) && is_foreign_field(&tokens, *index)))
+        .map(|(_, token)| token)
         .map(|token| {
             at_offset(
                 context,
