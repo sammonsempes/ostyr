@@ -117,3 +117,61 @@ pub fn global_mutable_state_is_reported() -> anyhow::Result<()> {
     assert_eq!(report("global-mutable", "fn a() {\n    static J: Mutex<u8> = x();\n}\n")?, vec!["2:5"]);
     Ok(())
 }
+
+
+const WINDOWS_PATH: &str = "crates/sys-windows/src/console.rs";
+
+
+const REFUSED_IN_NESTED: usize = 3;
+
+
+fn report_at(path: &str, source: &str) -> anyhow::Result<Vec<String>> {
+    Ok(lint_source(Path::new(path), source)?
+        .iter()
+        .filter(|violation| violation.rule == "forbidden-ident")
+        .map(|violation| format!("{}:{}", violation.line, violation.column))
+        .collect())
+}
+
+
+#[test]
+pub fn win32_field_names_are_admitted_in_sys_windows() -> anyhow::Result<()> {
+    assert!(report_at(WINDOWS_PATH, "fn go(col: i16, row: i16) -> Coord { Coord { X: col, Y: row } }\n")?.is_empty());
+    assert!(report_at(WINDOWS_PATH, "fn go(size: Coord) -> i16 { size.X + size.Y }\n")?.is_empty());
+    assert!(report_at("crates/sys-windows/tests/size.rs", "fn go(col: i16) -> Coord { Coord { X: col } }\n")?.is_empty());
+    Ok(())
+}
+
+
+#[test]
+pub fn win32_field_names_are_refused_elsewhere() -> anyhow::Result<()> {
+    assert_eq!(
+        report_at("crates/other/src/lib.rs", "fn go(col: i16) -> Coord { Coord { X: col } }\n")?.len(),
+        1
+    );
+    assert_eq!(report_at("crates/other/src/lib.rs", "fn go(size: Coord) -> i16 { size.X }\n")?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+pub fn win32_field_names_are_refused_as_bindings_in_sys_windows() -> anyhow::Result<()> {
+    assert_eq!(report_at(WINDOWS_PATH, "fn go() { let X = 1; }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "fn go(Y: u8) {}\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "struct Coord { X: u8 }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "enum Shape { Variant { Y: u8 } }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "fn go() { let Z = 1; }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "fn go(col: u8, Y: u8) {}\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "union Shape { col: u8, Y: u8 }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "fn go() { let X: u8 = 1; }\n")?.len(), 1);
+    assert_eq!(report_at(WINDOWS_PATH, "fn go() { let list = [col, X]; }\n")?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+pub fn win32_field_names_skip_nested_groups() -> anyhow::Result<()> {
+    let source = "fn go(col: i16) -> Coord { Coord { A: [1, 2], B: Inner { Z: 1 }, X: wrap(col), Y: { 1 } } }\n";
+    assert_eq!(report_at(WINDOWS_PATH, source)?.len(), REFUSED_IN_NESTED);
+    Ok(())
+}
