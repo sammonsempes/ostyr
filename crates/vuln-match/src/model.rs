@@ -56,6 +56,8 @@ pub struct OsvRecord {
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
+    pub upstream: Vec<String>,
+    #[serde(default)]
     pub affected: Vec<Affected>,
 }
 
