@@ -1,5 +1,8 @@
 pub mod console;
 pub mod descriptor;
+pub mod job_command;
+pub mod job_output;
+pub mod job_spawn;
 pub mod judge;
 pub mod native;
 pub mod session;

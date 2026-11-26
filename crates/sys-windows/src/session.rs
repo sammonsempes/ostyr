@@ -98,8 +98,8 @@ struct ConsoleEnds {
 }
 
 
-struct AttributeList {
-    buffer: Vec<usize>,
+pub(crate) struct AttributeList {
+    pub(crate) buffer: Vec<usize>,
 }
 
 
@@ -112,10 +112,10 @@ struct Launch {
 }
 
 
-struct Started {
-    process: OwnedHandle,
-    thread: OwnedHandle,
-    process_id: u32,
+pub(crate) struct Started {
+    pub(crate) process: OwnedHandle,
+    pub(crate) thread: OwnedHandle,
+    pub(crate) process_id: u32,
 }
 
 
@@ -143,7 +143,7 @@ fn coord(columns: i16, rows: i16) -> COORD {
 }
 
 
-fn raw(handle: &OwnedHandle) -> HANDLE {
+pub(crate) fn raw(handle: &OwnedHandle) -> HANDLE {
     HANDLE(handle.as_raw_handle())
 }
 
@@ -153,7 +153,7 @@ fn lock<Value>(mutex: &Mutex<Value>) -> MutexGuard<'_, Value> {
 }
 
 
-fn windows_error(operation: &'static str, error: &windows::core::Error) -> ConsoleError {
+pub(crate) fn windows_error(operation: &'static str, error: &windows::core::Error) -> ConsoleError {
     ConsoleError::Windows {
         operation,
         code: error.code().0.cast_unsigned(),
@@ -161,7 +161,7 @@ fn windows_error(operation: &'static str, error: &windows::core::Error) -> Conso
 }
 
 
-fn io_failure(operation: &'static str, error: &std::io::Error) -> ConsoleError {
+pub(crate) fn io_failure(operation: &'static str, error: &std::io::Error) -> ConsoleError {
     ConsoleError::Io {
         operation,
         kind: error.kind(),
@@ -169,7 +169,7 @@ fn io_failure(operation: &'static str, error: &std::io::Error) -> ConsoleError {
 }
 
 
-fn list_pointer(buffer: &mut [usize]) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+pub(crate) fn list_pointer(buffer: &mut [usize]) -> LPPROC_THREAD_ATTRIBUTE_LIST {
     LPPROC_THREAD_ATTRIBUTE_LIST(buffer.as_mut_ptr().cast())
 }
 
@@ -190,7 +190,7 @@ fn windows_directory() -> Result<String, ConsoleError> {
 }
 
 
-fn make_pipe() -> Result<(OwnedHandle, OwnedHandle), ConsoleError> {
+pub(crate) fn make_pipe() -> Result<(OwnedHandle, OwnedHandle), ConsoleError> {
     let mut read = HANDLE::default();
     let mut write = HANDLE::default();
     // SAFETY: both out pointers are valid; no security attributes means neither handle is inheritable.
@@ -224,6 +224,12 @@ fn open_console(size: ConsoleSize) -> Result<ConsoleEnds, ConsoleError> {
 
 
 fn attribute_list(console: HPCON) -> Result<AttributeList, ConsoleError> {
+    let value = std::ptr::with_exposed_provenance::<c_void>(console.0.cast_unsigned());
+    build_attribute_list(PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize, value, std::mem::size_of::<HPCON>())
+}
+
+
+pub(crate) fn build_attribute_list(attribute: usize, value: *const c_void, size: usize) -> Result<AttributeList, ConsoleError> {
     let mut bytes = 0;
     // SAFETY: no list and a size of zero only ask for the required size, written to `bytes`.
     let sizing = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
@@ -239,20 +245,9 @@ fn attribute_list(console: HPCON) -> Result<AttributeList, ConsoleError> {
     unsafe { InitializeProcThreadAttributeList(Some(list_pointer(&mut buffer)), 1, None, &mut bytes) }
         .map_err(|error| windows_error("InitializeProcThreadAttributeList", &error))?;
     let mut list = AttributeList { buffer };
-    let value = std::ptr::with_exposed_provenance::<c_void>(console.0.cast_unsigned());
-    // SAFETY: the list was initialised for one attribute; the pseudo-console attribute value is the handle itself, which outlives CreateProcessW.
-    unsafe {
-        UpdateProcThreadAttribute(
-            list_pointer(&mut list.buffer),
-            0,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-            Some(value),
-            std::mem::size_of::<HPCON>(),
-            None,
-            None,
-        )
-    }
-    .map_err(|error| windows_error("UpdateProcThreadAttribute", &error))?;
+    // SAFETY: the list was initialised for one attribute; the caller keeps what `value` points at alive until CreateProcessW returns.
+    unsafe { UpdateProcThreadAttribute(list_pointer(&mut list.buffer), 0, attribute, Some(value), size, None, None) }
+        .map_err(|error| windows_error("UpdateProcThreadAttribute", &error))?;
     Ok(list)
 }
 
@@ -268,7 +263,7 @@ fn set_job_information<Value>(job: &OwnedHandle, class: JOBOBJECTINFOCLASS, valu
 }
 
 
-fn create_job() -> Result<OwnedHandle, ConsoleError> {
+pub(crate) fn create_job() -> Result<OwnedHandle, ConsoleError> {
     // SAFETY: no security attributes and no name: a private, unnamed job.
     let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(|error| windows_error("CreateJobObjectW", &error))?;
     // SAFETY: the job was just created and nothing else owns it.
@@ -326,7 +321,7 @@ fn create_shell(launch: &mut Launch, attributes: &mut AttributeList) -> Result<S
 }
 
 
-fn join_job(job: &OwnedHandle, started: &Started, hook: AssignHook) -> Result<(), ConsoleError> {
+pub(crate) fn join_job(job: &OwnedHandle, started: &Started, hook: AssignHook) -> Result<(), ConsoleError> {
     hook(started.process_id).map_err(|code| ConsoleError::Windows {
         operation: "AssignProcessToJobObject",
         code,
@@ -343,7 +338,7 @@ fn join_job(job: &OwnedHandle, started: &Started, hook: AssignHook) -> Result<()
 }
 
 
-fn kill_process(process: &OwnedHandle) {
+pub(crate) fn kill_process(process: &OwnedHandle) {
     // SAFETY: the process handle is open and owned by the caller.
     if let Err(error) = unsafe { TerminateProcess(raw(process), KILLED_EXIT_CODE) } {
         tracing::warn!(%error, "terminating a child that could not join its job failed");
@@ -517,9 +512,14 @@ fn release_console(session: &Session, console: Option<Arc<Owned<HPCON>>>, deadli
 
 
 fn wait_process(session: &Session, deadline: Instant) -> Result<(), ConsoleError> {
+    wait_for_process(&session.process, deadline)
+}
+
+
+pub(crate) fn wait_for_process(process: &OwnedHandle, deadline: Instant) -> Result<(), ConsoleError> {
     let millis = u32::try_from(remaining(deadline).as_millis()).unwrap_or(CLOSE_WAIT_MILLIS);
-    // SAFETY: the process handle is open for the life of the session.
-    let waited = unsafe { WaitForSingleObject(raw(&session.process), millis) };
+    // SAFETY: the process handle is open for the whole call, which the caller's reference guarantees.
+    let waited = unsafe { WaitForSingleObject(raw(process), millis) };
     if waited == WAIT_OBJECT_0 {
         Ok(())
     } else if waited == WAIT_TIMEOUT {
@@ -550,16 +550,25 @@ pub fn close_console(session: &Session) -> Result<(), ConsoleError> {
 
 /// Whether the shell is a member of the session's job (false only if the assignment was skipped).
 pub fn shell_in_job(session: &Session) -> Result<bool, ConsoleError> {
+    process_in_job(&session.process, &session.job)
+}
+
+
+pub(crate) fn process_in_job(process: &OwnedHandle, job: &OwnedHandle) -> Result<bool, ConsoleError> {
     let mut member = BOOL::default();
-    // SAFETY: both handles are open for the life of the session and `member` is a valid out pointer.
-    unsafe { IsProcessInJob(raw(&session.process), Some(raw(&session.job)), &mut member) }
-        .map_err(|error| windows_error("IsProcessInJob", &error))?;
+    // SAFETY: both handles are open for the whole call and `member` is a valid out pointer.
+    unsafe { IsProcessInJob(raw(process), Some(raw(job)), &mut member) }.map_err(|error| windows_error("IsProcessInJob", &error))?;
     Ok(member.as_bool())
 }
 
 
 /// The limit flags and the active process limit the job enforces.
 pub fn job_limits(session: &Session) -> Result<(u32, u32), ConsoleError> {
+    limits_of(&session.job)
+}
+
+
+pub(crate) fn limits_of(job: &OwnedHandle) -> Result<(u32, u32), ConsoleError> {
     let mut extended = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).map_err(|_| ConsoleError::Windows {
         operation: "QueryInformationJobObject size",
@@ -567,7 +576,7 @@ pub fn job_limits(session: &Session) -> Result<(u32, u32), ConsoleError> {
     })?;
     let target = std::ptr::from_mut(&mut extended).cast::<c_void>();
     // SAFETY: the job handle is open and `target` points at a writable structure of `size` bytes matching the class.
-    unsafe { QueryInformationJobObject(Some(raw(&session.job)), JobObjectExtendedLimitInformation, target, size, None) }
+    unsafe { QueryInformationJobObject(Some(raw(job)), JobObjectExtendedLimitInformation, target, size, None) }
         .map_err(|error| windows_error("QueryInformationJobObject", &error))?;
     Ok((
         extended.BasicLimitInformation.LimitFlags.0,
