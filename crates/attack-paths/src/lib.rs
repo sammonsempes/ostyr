@@ -8,6 +8,8 @@ pub mod error;
 pub mod model;
 pub mod paths;
 pub mod report;
+pub mod serve;
+pub mod settings;
 pub mod store;
 pub mod tags;
 pub mod types;
