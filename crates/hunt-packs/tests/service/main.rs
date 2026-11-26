@@ -9,12 +9,13 @@ use core_config::reload::{current_config, ReloadContext, ReloadEngine};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::clock::Reading;
-use hunt_packs::model::HuntPack;
+use hunt_packs::model::{Cost, HuntPack};
 use hunt_packs::packs::{load_packs_partial, MAX_ENTRIES};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::due_runs;
 use hunt_packs::service::{reload_round, run_service, settings_digest, tick_round, ServiceReport, SettingsSource};
 use hunt_packs::settings::{open_hunt, HuntSettings};
+use hunt_packs::stat_model::{StatHunt, Statistic};
 use hunt_packs::store::{Param, GET_SQL, SET_SQL};
 use hunt_packs::tick::{Hooks, DEFAULT_MAX_TENANTS};
 use hunt_packs::types::SleepFuture;
@@ -195,7 +196,11 @@ async fn drive(rig: &Rig, max_ticks: u64, hang: bool, on_sleep: &mut OnSleep<'_>
     let shared = Rc::clone(&rig.log);
     let mut runner = move |pack: &HuntPack, tenant: &str, end: i64| -> Result<HuntOutcome, RunError> {
         shared.borrow_mut().push((tenant.to_owned(), pack.id.clone(), end));
-        Ok(HuntOutcome { matches: 0, finding: false })
+        Ok(HuntOutcome {
+            matches: 0,
+            finding: false,
+            bound: None,
+        })
     };
     let mut hooks = Hooks {
         run: &mut runner,
@@ -608,5 +613,57 @@ fn a_directory_with_too_many_entries_is_an_error() -> TestResult {
     let dir = tempfile::tempdir()?;
     (0..=MAX_ENTRIES).try_for_each(|index| fs::write(dir.path().join(format!("{index}.txt")), ""))?;
     assert!(load_packs_partial(dir.path()).is_err());
+    Ok(())
+}
+
+
+fn stat_hunt(statistic: Statistic) -> StatHunt {
+    StatHunt {
+        id: "rare-process".to_owned(),
+        statistic,
+        query: "SELECT 1 FROM events WHERE tenant = {tenant:String} AND t >= {window_start:DateTime64(3)} AND t < {window_end:DateTime64(3)}"
+            .to_owned(),
+        schedule_seconds: HOUR as u64,
+        window_seconds: HOUR as u64,
+        cost: Cost {
+            max_rows: 1,
+            max_seconds: 1,
+            max_bytes_read: Some(1),
+        },
+        max_rows: 1,
+        max_matches: 0,
+    }
+}
+
+
+#[tokio::test]
+async fn statistical_hunts_are_scheduled_beside_the_packs_and_a_clash_is_dropped_and_counted() -> TestResult {
+    let rig = rig()?;
+    fs::write(
+        rig.dir.path().join("packs/good.yaml"),
+        PACK_TEXT.replace("id: p1", "id: rarity.rare-process"),
+    )?;
+    let mut settings = (*current_config(&rig.engine)).clone();
+    settings.tenants = vec!["a".to_owned()];
+    settings.stat_hunts = vec![
+        stat_hunt(Statistic::Rarity { max_entities: 1 }),
+        stat_hunt(Statistic::Beaconing { min_regularity_ppm: 1 }),
+    ];
+    let store: Store = RefCell::new(HashMap::new());
+    let mut exec = exec_over(&store);
+    let seen = Rc::clone(&rig.log);
+    let mut runner = move |pack: &HuntPack, tenant: &str, end: i64| -> Result<HuntOutcome, RunError> {
+        seen.borrow_mut().push((tenant.to_owned(), pack.id.clone(), end));
+        Err(RunError::Window)
+    };
+    let mut hooks = Hooks {
+        run: &mut runner,
+        due: due_runs,
+    };
+    let mut report = ServiceReport::default();
+    tick_round(&settings, START, &mut exec, &mut hooks, &mut report).await;
+    let ids: Vec<String> = rig.log.borrow().iter().map(|(_, id, _)| id.clone()).collect();
+    assert_eq!(ids, vec!["beaconing.rare-process".to_owned(), "rarity.rare-process".to_owned()]);
+    assert_eq!((report.refused_stat_hunts, report.ticks), (1, 1));
     Ok(())
 }

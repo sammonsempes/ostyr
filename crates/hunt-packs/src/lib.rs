@@ -16,6 +16,8 @@ pub mod schedule;
 pub mod serve;
 pub mod service;
 pub mod settings;
+pub mod stat_model;
+pub mod stat_run;
 pub mod store;
 pub mod text;
 pub mod tick;

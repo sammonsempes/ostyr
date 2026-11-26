@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::thread::{spawn, JoinHandle};
+use std::thread::{sleep, spawn, JoinHandle};
+use std::time::Duration;
 
 
 const HEADER_END: &str = "\r\n\r\n";
@@ -13,6 +14,12 @@ const MAX_READS: usize = 10_000;
 
 
 const ZERO: u8 = 0;
+
+
+const ACCEPT_POLL: Duration = Duration::from_millis(50);
+
+
+const MAX_ACCEPT_POLLS: usize = 400;
 
 
 pub const CLEAN_NAMES: [&str; 19] = [
@@ -38,9 +45,27 @@ pub const CLEAN_NAMES: [&str; 19] = [
 ];
 
 
+/// The hang guard: a connection that never comes is a named error after a bounded number of polls, never a blocked thread.
+pub fn accept_guarded(listener: &TcpListener) -> io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let accepted = (0..MAX_ACCEPT_POLLS).find_map(|_| match listener.accept() {
+        Ok((stream, _)) => Some(Ok(stream)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            sleep(ACCEPT_POLL);
+            None
+        }
+        Err(error) => Some(Err(error)),
+    });
+    let stream = accepted.unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, "the client never connected")))?;
+    stream.set_nonblocking(false)?;
+    listener.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+
 /// Answers the settings check of a run with a profile that changed nothing outside the pins.
 pub fn serve_check(listener: &TcpListener) -> io::Result<String> {
-    let (stream, _) = listener.accept()?;
+    let stream = accept_guarded(listener)?;
     serve(stream, "200 OK", "", format!("{}\n", CLEAN_NAMES.join("\n")).as_bytes())
 }
 
@@ -75,7 +100,7 @@ pub fn read_request(stream: &mut TcpStream) -> io::Result<String> {
 pub fn reply(listener: TcpListener, status: &'static str, extra: &'static str, body: Vec<u8>) -> JoinHandle<io::Result<String>> {
     spawn(move || {
         serve_check(&listener)?;
-        let (stream, _) = listener.accept()?;
+        let stream = accept_guarded(&listener)?;
         serve(stream, status, extra, &body)
     })
 }

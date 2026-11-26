@@ -6,7 +6,7 @@ use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::{due_runs, RunWindow, ScheduleError};
-use hunt_packs::store::{last_done, record_done, Param, FINDING_SQL, GET_SQL, SET_SQL};
+use hunt_packs::store::{last_done, record_done, Param, FINDING_CONFLICT, FINDING_INSERTED, FINDING_SQL, GET_SQL, SET_SQL};
 use hunt_packs::tick::{
     check_limits, tick, Hooks, PackStatus, RunRecord, TickError, TickLimits, DEFAULT_MAX_RUNS_PER_TICK, MAX_CLOCK_SKEW, MAX_RUNS_PER_TICK_CEILING,
     MAX_TENANTS_CEILING,
@@ -23,6 +23,9 @@ use types::{Calls, Log, Store, TestResult};
 
 
 const HOUR: i64 = 3_600;
+
+
+const BOUND_MATCHES: u64 = 11;
 
 
 const MIDNIGHT: i64 = 1_641_600_000;
@@ -104,6 +107,7 @@ fn recorder(log: &Log, fails: fn(i64) -> bool) -> impl FnMut(&HuntPack, &str, i6
             Ok(HuntOutcome {
                 matches: 1,
                 finding: (end / HOUR) % EVEN == 0,
+                bound: None,
             })
         }
     }
@@ -138,8 +142,12 @@ fn answer(store: &Store, scope: &TenantScope, sql: &'static str, params: &[Param
         (FINDING_SQL, [Param::Text(pack), _, Param::Int(end), Param::Int(matches), _]) => {
             let key = (tenant, format!("{pack}@{end}"));
             let fresh = !map.contains_key(&key);
-            map.entry(key).or_insert(*matches);
-            Ok(if fresh { vec![*end] } else { Vec::new() })
+            let held = *map.entry(key).or_insert(*matches);
+            Ok(match (fresh, held == *matches) {
+                (true, _) => vec![FINDING_INSERTED],
+                (false, true) => Vec::new(),
+                (false, false) => vec![FINDING_CONFLICT],
+            })
         }
         _ => Err(PgError::InvalidTenant),
     }
@@ -766,5 +774,67 @@ async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it(
     let refusals = text.lines().filter(|line| line.contains("hunt finding refused for good")).count();
     assert_eq!(refusals, 1);
     assert!(text.contains("tenant a pack p"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_bound_outcome_is_stored_under_the_bound_id_and_the_window_advances() -> TestResult {
+    let (store, calls, _log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = |_pack: &HuntPack, _tenant: &str, _end: i64| -> Result<HuntOutcome, RunError> {
+        Ok(HuntOutcome {
+            matches: BOUND_MATCHES,
+            finding: true,
+            bound: Some(BOUND_MATCHES - 1),
+        })
+    };
+    let packs = [pack("rarity.p", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(report.findings_failed, 0);
+    assert_eq!(stored(&store, "a", &format!("rarity.p.bound@{H4}")), Some(BOUND_MATCHES as i64));
+    assert_eq!(stored(&store, "a", &format!("rarity.p@{H4}")), None);
+    assert_eq!(stored(&store, "a", "rarity.p"), Some(H4));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_finding_that_collides_with_another_hunts_is_refused_counted_and_named_never_stored() -> TestResult {
+    let (store, calls, _log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = |pack: &HuntPack, _tenant: &str, _end: i64| -> Result<HuntOutcome, RunError> {
+        Ok(HuntOutcome {
+            matches: if pack.id == "rarity.x" { BOUND_MATCHES } else { 1 },
+            finding: true,
+            bound: (pack.id == "rarity.x").then_some(BOUND_MATCHES - 1),
+        })
+    };
+    let packs = [pack("rarity.x", Source::Clickhouse), pack("rarity.x.bound", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!((report.findings_refused, report.findings_failed), (1, 0));
+    let second = report.packs.get(1).ok_or("no second entry")?;
+    assert_eq!(
+        (second.pack_id.as_str(), second.findings_refused, &second.status),
+        ("rarity.x.bound", 1, &PackStatus::Done)
+    );
+    assert_eq!(stored(&store, "a", &format!("rarity.x.bound@{H4}")), Some(BOUND_MATCHES as i64));
+    assert_eq!(stored(&store, "a", "rarity.x.bound"), Some(H4));
     Ok(())
 }
