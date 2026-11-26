@@ -20,6 +20,7 @@ use response_playbooks::bundle::{load_bundle, validate_bundle};
 use response_playbooks::error::RoundError;
 use response_playbooks::feed::{alert_json, summary_value};
 use response_playbooks::model::{ConditionOutcome, Mode, Trace, TraceEvent};
+use response_playbooks::render::{render_trace_redacted, write_dry_run_redacted};
 use response_playbooks::runs::{
     bounded_trace, cut_text, playbook_run_id, row_of as run_row_of, run_rows, RunRow, COUNT_SQL, CUT_MARKER, INSERT_SQL, LOCK_SQL, MAX_PLAYBOOK_RUNS,
     MAX_TRACE_BYTES, MIGRATIONS, MIGRATION_NAMESPACE, PRUNE_SQL,
@@ -1630,5 +1631,49 @@ async fn a_refused_begin_runs_no_statement_and_a_failed_rollback_keeps_the_first
     *lock(&env.fake.fail_rollback) = true;
     assert!(matches!(round(&env, &mut Vec::new()).await, Err(RoundError::Audit(_))));
     assert_eq!(left(&env), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_redacted_trace_holds_no_marker_and_names_parameters_and_kinds() -> TestResult {
+    let env = env()?;
+    let trace = trace_of("pb", marker_events());
+    let text = render_trace_redacted(&env.live.bundle.catalogue, &trace);
+    assert!(!text.contains(MARKER), "{text}");
+    assert!(
+        text.starts_with("playbook pb v1 mode=simulate\n") && text.contains("\"kind\":\"action\""),
+        "{text}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_round_writes_no_alert_value_to_its_trace_output() -> TestResult {
+    let env = env()?;
+    let mut marked = whoami("e1");
+    marked.rule_title = format!("title {MARKER}");
+    marked.host_name = Some(format!("host-{MARKER}"));
+    put(&env, vec![row_of(&marked, FIRST_SEQ, 0)]);
+    let mut trace = Vec::new();
+    round(&env, &mut trace).await?;
+    let text = String::from_utf8(trace)?;
+    assert!(text.contains("\"kind\":\"action\"") && text.contains("\"channel\":"), "{text}");
+    assert!(!text.contains(MARKER), "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn the_redacted_writer_reports_a_failing_output() -> TestResult {
+    let env = env()?;
+    let report = DryRunReport {
+        tenant_refused: false,
+        alerts_not_run: 0,
+        trace_events: 0,
+        alerts: Vec::new(),
+    };
+    assert!(write_dry_run_redacted(&mut FailingWriter, &report, &env.live.bundle.catalogue).is_err());
     Ok(())
 }
