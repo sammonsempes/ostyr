@@ -359,7 +359,11 @@ pub fn apply(tenant: &mut Tenant, document: &Value, caps: &Caps) -> Result<(bool
                 set_status(&mut conflict, "open");
                 conflict
             }));
-            tenant.events.extend(items(document, "events"));
+            items(document, "events").into_iter().for_each(|event| {
+                if !tenant.events.contains(&event) {
+                    tenant.events.push(event);
+                }
+            });
             tenant.applies += 1;
         }
         Ok((fresh, refused, duplicates, String::new()))
