@@ -1,4 +1,5 @@
 use crate::error::PlantRefusal;
+use crate::types::{ExistsFn, Identity, IdentityFn, RunFn, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 
@@ -218,4 +219,64 @@ pub enum FimEvent {
         policy: String,
         bytes: usize,
     },
+}
+
+
+/// What the package database says about the new content of a watched file; it annotates an event and never changes its severity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum PackageVerdict {
+    Match {
+        package: String,
+        evra: String,
+        algo: &'static str,
+        installed_at: u64,
+    },
+    Mismatch {
+        package: String,
+        evra: String,
+    },
+    Config,
+    UnverifiableDigest {
+        algo: &'static str,
+    },
+    Unowned,
+    AmbiguousOwner,
+    Unverified {
+        reason: &'static str,
+    },
+    NotApplicable,
+}
+
+
+/// The content of a file as the caller read it from one `O_NOFOLLOW` handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEvidence {
+    pub path: String,
+    pub sha256: Sha256Digest,
+    pub identity: Identity,
+}
+
+
+/// The exit code and the standard output of a package tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub code: i32,
+    pub stdout: String,
+}
+
+
+/// The system calls package correlation makes; a test replaces them.
+#[derive(Debug, Clone, Copy)]
+pub struct PackageOps {
+    pub run: RunFn,
+    pub identity: IdentityFn,
+    pub exists: ExistsFn,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Manager {
+    Rpm,
+    Dpkg,
 }

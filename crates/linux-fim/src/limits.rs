@@ -144,3 +144,6 @@ pub fn default_limits() -> Limits {
 
 
 pub const UNRESOLVED_NAME: &str = "[unresolved]";
+
+
+pub const SHA256_BYTES: usize = 32;

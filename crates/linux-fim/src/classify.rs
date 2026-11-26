@@ -52,6 +52,9 @@ const WRITE_HOOKS: &[&str] = &[
 ];
 
 
+const CONTENT_HOOKS: &[&str] = &[HOOK_PERMISSION, HOOK_PATH_TRUNCATE, HOOK_FILE_TRUNCATE, HOOK_MMAP];
+
+
 const SECOND_PAIR: usize = 2;
 
 
@@ -163,6 +166,19 @@ pub fn arg_count(line: &str) -> usize {
         .ok()
         .and_then(|counted| counted.process_kprobe)
         .map_or(0, |kprobe| kprobe.args.len())
+}
+
+
+/// Whether the line is a content hook (write, truncate, shared mapping) of the `fim-` policy of the role, the only one a package update explains.
+pub fn content_line(line: &str, policies: &[String]) -> bool {
+    serde_json::from_str::<ExportLine>(line)
+        .ok()
+        .and_then(|parsed| parsed.process_kprobe)
+        .is_some_and(|kprobe| {
+            let named = kprobe.policy_name.as_deref().unwrap_or(NO_FUNCTION);
+            let function = kprobe.function_name.as_deref().unwrap_or(NO_FUNCTION);
+            policies.iter().any(|policy| policy == named) && named.starts_with(POLICY_PREFIX) && CONTENT_HOOKS.contains(&function)
+        })
 }
 
 

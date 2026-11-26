@@ -1,9 +1,26 @@
-use crate::model::TracingPolicy;
+use crate::limits::SHA256_BYTES;
+use crate::model::{ToolOutput, TracingPolicy};
 use serde_saphyr::SerializeError;
 
 
 /// Serialises a policy to text; a test double injects a failure.
 pub type SerializeFn = fn(&TracingPolicy) -> Result<String, SerializeError>;
+
+
+/// A SHA-256 digest.
+pub type Sha256Digest = [u8; SHA256_BYTES];
+
+
+/// Runs one package tool (binary path, arguments); a test double returns a canned output or an error.
+pub type RunFn = fn(&str, &[&str]) -> std::io::Result<ToolOutput>;
+
+
+/// The kernel device and inode a path names now, without following a final link; a test double injects a failure or a swap.
+pub type IdentityFn = fn(&str) -> std::io::Result<Identity>;
+
+
+/// Whether a path exists; a test double stands for a Debian or a Red Hat family host.
+pub type ExistsFn = fn(&str) -> bool;
 
 
 /// The kernel device number and the inode number of a file.

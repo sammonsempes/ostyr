@@ -127,12 +127,12 @@ fn write_executables() -> Result<PathBuf, String> {
 }
 
 
-fn executable(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+pub fn executable(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     Ok(SHARED_EXECUTABLES.as_ref().map_err(|error| error.clone())?.join(name))
 }
 
 
-fn tree() -> Result<TempDir, Box<dyn Error>> {
+pub fn tree() -> Result<TempDir, Box<dyn Error>> {
     executable("echo")?;
     Ok(tempdir_in(env!("CARGO_TARGET_TMPDIR"))?)
 }

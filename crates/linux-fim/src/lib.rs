@@ -7,6 +7,8 @@ pub mod error;
 pub mod limits;
 pub mod model;
 #[cfg(target_os = "linux")]
+pub mod package;
+#[cfg(target_os = "linux")]
 pub mod plant;
 pub mod policy;
 pub mod roles;
