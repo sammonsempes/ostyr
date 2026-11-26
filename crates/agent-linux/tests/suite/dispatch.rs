@@ -171,7 +171,17 @@ fn only_the_three_actions_become_orders_and_each_keeps_kind_and_sequence() -> Te
     );
     assert_eq!(order_of(&command(Action::Isolate, THIRD)), Some(order(AdminKind::Isolate, THIRD)));
     assert_eq!(order_of(&command(Action::Uninstall, FIRST)), None);
-    assert_eq!(order_of(&command(Action::Kill { process_id: 1 }, FIRST)), None);
+    assert_eq!(
+        order_of(&command(
+            Action::Kill {
+                process_id: 1,
+                start_ticks: 1,
+                boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned()
+            },
+            FIRST
+        )),
+        None
+    );
     assert_eq!(kind_name(AdminKind::Ping), "ping");
     assert_eq!(kind_name(AdminKind::CollectStatus), "collect_status");
     assert_eq!(kind_name(AdminKind::Isolate), "isolate");

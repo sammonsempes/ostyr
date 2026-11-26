@@ -67,7 +67,11 @@ fn every_sensitive_action_is_refused_with_a_routine_key() -> TestResult {
     let setup = setup()?;
     let actions = [
         Action::Isolate,
-        Action::Kill { process_id: PROCESS_ID },
+        Action::Kill {
+            process_id: PROCESS_ID,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+        },
         Action::RunScript { script: "id".to_owned() },
         Action::Update { version: "1.0".to_owned() },
         Action::Uninstall,
@@ -93,7 +97,14 @@ fn routine_actions_are_not_sensitive() -> TestResult {
         (Action::Ping, "ping"),
         (Action::CollectStatus, "collect_status"),
         (Action::Isolate, "isolate"),
-        (Action::Kill { process_id: PROCESS_ID }, "kill"),
+        (
+            Action::Kill {
+                process_id: PROCESS_ID,
+                start_ticks: 1,
+                boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+            },
+            "kill",
+        ),
         (Action::RunScript { script: String::new() }, "run_script"),
         (Action::Update { version: String::new() }, "update"),
         (Action::Uninstall, "uninstall"),
@@ -249,7 +260,14 @@ fn short_signature_is_refused() -> TestResult {
 #[test]
 fn a_flipped_bit_in_each_part_is_refused() -> TestResult {
     let setup = setup()?;
-    let original: Envelope = postcard::from_bytes(&sensitive_envelope(&command(1, Action::Kill { process_id: PROCESS_ID }))?)?;
+    let original: Envelope = postcard::from_bytes(&sensitive_envelope(&command(
+        1,
+        Action::Kill {
+            process_id: PROCESS_ID,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+        },
+    ))?)?;
     let flip = |bytes: &[u8]| {
         bytes
             .iter()

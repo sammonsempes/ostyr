@@ -59,8 +59,21 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
         "install_updates" => parse_install_updates(&text),
         "reboot" => parse_reboot(&text),
         "open_shell" => parse_open_shell(&text),
-        "kill" => text.parse().map(|process_id| Action::Kill { process_id }).map_err(|_| CliError::Number),
+        "kill" => parse_kill(&text),
         other => Err(CliError::UnknownAction(other.to_owned())),
+    }
+}
+
+
+/// `<pid>,<start-ticks>,<boot-id>`.
+pub fn parse_kill(text: &str) -> Result<Action, CliError> {
+    match text.split(',').collect::<Vec<&str>>().as_slice() {
+        [process_id, start_ticks, boot_id] => Ok(Action::Kill {
+            process_id: process_id.parse().map_err(|_| CliError::Number)?,
+            start_ticks: start_ticks.parse().map_err(|_| CliError::Number)?,
+            boot_id: (*boot_id).to_owned(),
+        }),
+        _ => Err(CliError::Parameter("kill takes <pid>,<start-ticks>,<boot-id>")),
     }
 }
 

@@ -112,9 +112,18 @@ fn actions_parse_by_name() -> TestResult {
         parse_action("change_policy", Some("p")).ok(),
         Some(Action::ChangePolicy { policy: "p".to_owned() })
     );
-    assert_eq!(parse_action("kill", Some("1")).ok(), Some(Action::Kill { process_id: 1 }));
-    assert!(matches!(parse_action("kill", Some("x")), Err(CliError::Number)));
-    assert!(matches!(parse_action("kill", None), Err(CliError::Number)));
+    assert_eq!(
+        parse_action("kill", Some("1,1,0a1b2c3d-4e5f-6789-abcd-ef0123456789")).ok(),
+        Some(Action::Kill {
+            process_id: 1,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned()
+        })
+    );
+    assert!(matches!(parse_action("kill", Some("x,1,b")), Err(CliError::Number)));
+    assert!(matches!(parse_action("kill", Some("1,x,b")), Err(CliError::Number)));
+    assert!(matches!(parse_action("kill", Some("1,2")), Err(CliError::Parameter(_))));
+    assert!(matches!(parse_action("kill", None), Err(CliError::Parameter(_))));
     assert!(matches!(parse_action("format", None), Err(CliError::UnknownAction(_))));
     assert!(matches!(parse_sequence("x"), Err(CliError::Number)));
     let refusal = parse_sequence("secret-input").err().ok_or("a bad number was accepted")?;
@@ -164,7 +173,16 @@ fn signing_reports_usage_and_failures() -> TestResult {
 fn a_session_accepts_refuses_and_reports() -> TestResult {
     let setup = setup()?;
     let seed = seed_hex(crate::common::SENSITIVE_SEED);
-    let good = signed_line(&[&seed, "sensitive-1", "sensitive", "agent-1", "acme", "1", "kill", "4"])?;
+    let good = signed_line(&[
+        &seed,
+        "sensitive-1",
+        "sensitive",
+        "agent-1",
+        "acme",
+        "1",
+        "kill",
+        "4,1,0a1b2c3d-4e5f-6789-abcd-ef0123456789",
+    ])?;
     let other = signed_line(&[&seed, "sensitive-1", "sensitive", "agent-2", "acme", "2", "ping"])?;
     let input = format!("{good}{good}{other}not hex\n");
     let mut out = Vec::new();
