@@ -205,3 +205,45 @@ pub const STATE_MODE: u32 = 0o600;
 
 
 pub const STATE_RADIX: u32 = 10;
+
+
+pub const MIN_INTERVAL_SECONDS: u64 = 60;
+
+
+pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
+
+
+pub const MAX_ROUNDS: u64 = 10_000_000;
+
+
+pub const MAX_LOGGED_FEED_NAMES: usize = 10;
+
+
+pub const ROUND_CAP_EXIT_CODE: u8 = 3;
+
+
+pub const MAX_FEED_FILE_BYTES: u64 = 268_435_456;
+
+
+pub const MAX_FEED_IOCS: usize = 100_000;
+
+
+pub const MAX_ROUND_IOCS: usize = MAX_READ_ROWS;
+
+
+pub const MAX_DOCUMENT_ITEMS: usize = 1_000_000;
+
+
+pub const MAX_STIX_OBJECTS: usize = 1_000_000;
+
+
+pub const MAX_MISP_OBJECTS: usize = 100_000;
+
+
+pub const MAX_MISP_TAGS: usize = 1_000;
+
+
+pub const MAX_READER_SKEW_SECONDS: i64 = 600;
+
+
+pub const MAX_STORED_IOCS: usize = 2 * MAX_ROUND_IOCS;
