@@ -11,3 +11,5 @@ pub mod model;
 pub mod report;
 #[cfg(unix)]
 pub mod scan;
+#[cfg(unix)]
+pub mod types;
