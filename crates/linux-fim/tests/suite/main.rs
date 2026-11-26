@@ -5,6 +5,8 @@ mod content;
 mod events;
 mod identity;
 #[cfg(target_os = "linux")]
+mod package;
+#[cfg(target_os = "linux")]
 mod plant;
 mod policy;
 mod roles;
