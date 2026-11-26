@@ -2,7 +2,6 @@ use crate::error::{HeaderError, KeaError, RowError};
 use crate::header::{parse_header, Columns};
 use crate::row::{convert_row, Converted};
 use crate::types::{FileIdentity, LeaseKey, MalformedCounts, SeenLeases};
-use core_export::ecs::EcsEvent;
 use ecs_normalise::stream::{read_raw_line, RawLine};
 use std::collections::VecDeque;
 #[cfg(not(unix))]
@@ -239,11 +238,11 @@ fn count_malformed(counts: &mut Counts, error: &RowError) {
 }
 
 
-fn handle_row(columns: &Columns, state_seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>, raw: RawLine) {
+fn handle_row(columns: &Columns, state_seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>, raw: RawLine) {
     match row_text(raw).and_then(|text| convert_row(columns, &text)) {
-        Ok(Converted { event, key, .. }) => match remember_key(state_seen, key, limits.max_seen, counts) {
+        Ok(converted) => match remember_key(state_seen, converted.key.clone(), limits.max_seen, counts) {
             Remembered::Fresh => {
-                out.push(event);
+                out.push(converted);
                 counts.processed += 1;
             }
             Remembered::Known => counts.duplicate += 1,
@@ -254,7 +253,7 @@ fn handle_row(columns: &Columns, state_seen: &mut SeenLeases, limits: &Limits, c
 }
 
 
-fn handle_line(state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>, raw: RawLine) -> Result<(), KeaError> {
+fn handle_line(state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>, raw: RawLine) -> Result<(), KeaError> {
     match state.columns.as_ref() {
         None => {
             let columns = header_text(raw)?;
@@ -266,7 +265,7 @@ fn handle_line(state: &mut FollowState, limits: &Limits, counts: &mut Counts, ou
 }
 
 
-fn read_lines(file: &File, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<usize, KeaError> {
+fn read_lines(file: &File, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>) -> Result<usize, KeaError> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(state.offset))?;
     from_fn(|| next_line(&mut reader, limits.max_line).transpose())
@@ -334,7 +333,7 @@ fn read_chain_step(
     state: &mut FollowState,
     limits: &Limits,
     counts: &mut Counts,
-    out: &mut Vec<EcsEvent>,
+    out: &mut Vec<Converted>,
 ) -> Result<bool, KeaError> {
     if active {
         let drained = read_lines(current, state, limits, counts, out)? < limits.max_lines;
@@ -355,7 +354,7 @@ fn read_chain_step(
 }
 
 
-fn read_new(opened: Opened, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<(), KeaError> {
+fn read_new(opened: Opened, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>) -> Result<(), KeaError> {
     let mut current = register(opened, state, counts);
     let result = (0..=MAX_OPEN_HANDLES).try_fold(true, |active, _| read_chain_step(&mut current, active, state, limits, counts, out));
     state.open = Some(current);
@@ -380,11 +379,14 @@ pub enum RowOutcome {
 
 
 /// Remembers the row; it is emitted only when new, that is created at or after `limits.started`.
-fn recover_row(columns: &Columns, seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>, raw: RawLine) -> RowOutcome {
+fn recover_row(columns: &Columns, seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>, raw: RawLine) -> RowOutcome {
     match row_text(raw).and_then(|text| convert_row(columns, &text)) {
-        Ok(Converted { event, key, cltt }) => match (remember_key(seen, key, limits.max_seen, counts), cltt >= limits.started) {
+        Ok(converted) => match (
+            remember_key(seen, converted.key.clone(), limits.max_seen, counts),
+            converted.cltt >= limits.started,
+        ) {
             (Remembered::Fresh, true) => {
-                out.push(event);
+                out.push(converted);
                 counts.recovered += 1;
                 RowOutcome::Read
             }
@@ -420,7 +422,7 @@ fn handle_compacted_line(
     seen: &mut SeenLeases,
     limits: &Limits,
     counts: &mut Counts,
-    out: &mut Vec<EcsEvent>,
+    out: &mut Vec<Converted>,
     raw: RawLine,
 ) -> Result<(), KeaError> {
     match held.columns.as_ref() {
@@ -438,7 +440,7 @@ fn handle_compacted_line(
 
 
 /// Reads up to `max_lines` lines of the held compacted file from its saved offset; returns the lines read.
-fn read_held(held: &mut Compacted, seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<usize, KeaError> {
+fn read_held(held: &mut Compacted, seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>) -> Result<usize, KeaError> {
     let file = held.file.try_clone()?;
     let mut reader = BufReader::new(&file);
     reader.seek(SeekFrom::Start(held.offset))?;
@@ -453,7 +455,7 @@ fn read_held(held: &mut Compacted, seen: &mut SeenLeases, limits: &Limits, count
 }
 
 
-fn continue_compacted(state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) {
+fn continue_compacted(state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>) {
     match state.compacted.take() {
         Some(mut held) if !held.done => {
             match read_held(&mut held, &mut state.seen, limits, counts, out) {
@@ -498,7 +500,7 @@ fn replace_compacted(state: &mut FollowState, counts: &mut Counts, file: File, i
 
 
 /// Follows `<path>.2` (Kea's compacted state): a new identity is read from its header over as many polls as its length needs, so rows lost to a rotation that was never seen come back here.
-fn recover_compacted(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>, rotated: bool) {
+fn recover_compacted(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>, rotated: bool) {
     match open_regular(&compacted_path(path)) {
         Ok(Some((file, found, _))) => {
             state.missing_counted = false;
@@ -538,7 +540,7 @@ fn warn_column_count(before: u64, counts: &Counts) {
 
 
 /// Reads the lines added since the last call into `out`; a replaced file is first read to its end through the old handle, then the new one is read from its header; a shorter file restarts at the header, a non-regular file is refused.
-pub fn poll(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<(), KeaError> {
+pub fn poll(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<Converted>) -> Result<(), KeaError> {
     match open_regular(path)? {
         None => {
             counts.absent += 1;

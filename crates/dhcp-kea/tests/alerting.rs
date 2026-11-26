@@ -12,9 +12,9 @@ use core_pg::error::PgError;
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use dhcp_kea::alerting::{
-    advance_cursor, alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, next_chunk_of, peer_fields,
-    store_unknown_device_alerts, unknown_device_alerts, unknown_device_alerts_in_order, Lookup, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS,
-    MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY, UNKNOWN_RULE_ID,
+    advance_cursor, alerted_in_batch, alerted_macs, candidate_macs, day_of, dropped_alert, mac_of, micros_of, next_chunk_of, path_digest,
+    peer_fields, plan_alerts, store_unknown_device_alerts, unknown_device_alerts, unknown_device_alerts_in_order, Lookup, RoundKey, ALERTED_SQL,
+    DROPPED_RULE_ID, MAX_LOOKUP_CHUNKS, MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MAX_WAITING_MACS, MICROS_PER_SECOND, UNKNOWN_RULE_ID,
 };
 use dhcp_kea::cursor::{read_cursor, write_cursor, MIGRATIONS, MIGRATION_NAMESPACE, READ_SQL as CURSOR_READ_SQL, WRITE_SQL as CURSOR_WRITE_SQL};
 use dhcp_kea::header::parse_header;
@@ -340,18 +340,21 @@ fn leases_without_a_usable_mac_are_counted_not_alerted() -> TestResult {
 
 
 #[test]
-fn a_flood_is_cut_with_one_visible_alert() -> TestResult {
+fn a_delay_raises_no_alert_and_the_cut_waits() -> TestResult {
     let scope = tenant_scope("acme")?;
     let leases = many_leases(MAX_UNKNOWN_PER_RUN + EXTRA)?;
     let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS);
-    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
-    let flood = alerts.last().ok_or("no flood")?;
-    assert_eq!(flood.rule_id, FLOOD_RULE_ID);
-    assert_eq!(summary_of(flood)?.get("omitted").and_then(Value::as_u64), Some(EXTRA as u64));
-    assert_eq!(
-        alerts.iter().filter(|alert| alert.rule_id == UNKNOWN_RULE_ID).count(),
-        MAX_UNKNOWN_PER_RUN
+    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN);
+    assert!(alerts.iter().all(|alert| alert.rule_id == UNKNOWN_RULE_ID));
+    let plan = plan_alerts(
+        &scope,
+        &leases,
+        &BTreeSet::new(),
+        NOW_MICROS,
+        (&[], &BTreeSet::new()),
+        &RoundKey::default(),
     );
+    assert_eq!((plan.waiting.len(), plan.dropped, plan.loss.is_none()), (EXTRA, 0, true));
     let exact = many_leases(MAX_UNKNOWN_PER_RUN)?;
     let (uncut, _uncut_rejected) = unknown_device_alerts(&scope, &exact, &BTreeSet::new(), NOW_MICROS);
     assert_eq!(uncut.len(), MAX_UNKNOWN_PER_RUN);
@@ -359,16 +362,49 @@ fn a_flood_is_cut_with_one_visible_alert() -> TestResult {
 }
 
 
+fn key_of(path_digest: &str, started_micros: u64, round: u64) -> RoundKey {
+    RoundKey {
+        path_digest: path_digest.to_owned(),
+        started_micros,
+        round,
+    }
+}
+
+
 #[test]
-fn a_flood_alert_is_one_per_tenant_and_utc_day() -> TestResult {
+fn a_loss_alert_id_holds_the_path_the_process_start_and_the_round_and_no_wall_clock() -> TestResult {
     let scope = tenant_scope("acme")?;
     let other = tenant_scope("other")?;
-    let same_day = NOW_MICROS + MICROS_PER_SECOND;
-    let next_day = NOW_MICROS + SECONDS_PER_DAY * MICROS_PER_SECOND;
-    assert_eq!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, EXTRA, same_day).id);
-    assert_ne!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, 1, next_day).id);
-    assert_ne!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&other, 1, NOW_MICROS).id);
-    assert_eq!(flood_alert(&scope, 1, NOW_MICROS).event_ids, ["flood", "day:2023-11-14"]);
+    let key = key_of("digest-a", START_MICROS, 1);
+    let first = dropped_alert(&scope, 1, NOW_MICROS, &key);
+    assert_eq!(first.id, dropped_alert(&scope, EXTRA, NOW_MICROS + MICROS_PER_SECOND, &key).id);
+    assert_ne!(
+        first.id,
+        dropped_alert(&scope, 1, NOW_MICROS, &key_of("digest-a", START_MICROS, NEXT_ROUND)).id
+    );
+    assert_ne!(first.id, dropped_alert(&scope, 1, NOW_MICROS, &key_of("digest-b", START_MICROS, 1)).id);
+    assert_ne!(
+        first.id,
+        dropped_alert(&scope, 1, NOW_MICROS, &key_of("digest-a", START_MICROS + 1, 1)).id
+    );
+    assert_ne!(first.id, dropped_alert(&other, 1, NOW_MICROS, &key).id);
+    assert_eq!(first.rule_id, DROPPED_RULE_ID);
+    assert_eq!(
+        first.event_ids,
+        [
+            "dropped".to_owned(),
+            "digest-a".to_owned(),
+            START_MICROS.to_string(),
+            "round:1".to_owned()
+        ]
+    );
+    assert!(first.rule_title.contains("not looked up or dropped"));
+    assert_eq!(
+        summary_of(&dropped_alert(&scope, EXTRA, NOW_MICROS, &key))?
+            .get("dropped")
+            .and_then(Value::as_u64),
+        Some(EXTRA as u64)
+    );
     assert_eq!(
         (day_of(NOW_MICROS).as_str(), day_of(0).as_str(), day_of(u64::MAX).as_str()),
         ("2023-11-14", "1970-01-01", "9999-12-31")
@@ -378,24 +414,29 @@ fn a_flood_alert_is_one_per_tenant_and_utc_day() -> TestResult {
 
 
 #[test]
-fn one_omitted_mac_still_raises_the_flood_alert() -> TestResult {
+fn one_mac_over_the_cap_waits_and_raises_nothing_more() -> TestResult {
     let scope = tenant_scope("acme")?;
     let leases = many_leases(MAX_UNKNOWN_PER_RUN + 1)?;
     let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS);
-    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
-    let flood = alerts.last().ok_or("no flood")?;
-    assert_eq!(flood.rule_id, FLOOD_RULE_ID);
-    assert_eq!(summary_of(flood)?.get("omitted").and_then(Value::as_u64), Some(1));
+    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN);
     Ok(())
 }
 
 
 async fn run_once(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<Vec<Alert>, Box<dyn std::error::Error>> {
     let lookup = alerted_in_batch(exec, scope, leases, &BTreeSet::new()).await;
-    let (alerts, _rejected) = unknown_device_alerts_in_order(scope, leases, &lookup.skip, NOW_MICROS, &lookup.scan_order);
-    store_unknown_device_alerts(exec, scope, &alerts).await?;
+    let plan = plan_alerts(
+        scope,
+        leases,
+        &lookup.skip,
+        NOW_MICROS,
+        (&lookup.scan_order, &lookup.deferred),
+        &RoundKey::default(),
+    );
+    let stored: Vec<Alert> = plan.alerts.iter().chain(plan.loss.iter()).cloned().collect();
+    store_unknown_device_alerts(exec, scope, &stored).await?;
     advance_cursor(exec, scope, &lookup).await;
-    Ok(alerts)
+    Ok(stored)
 }
 
 
@@ -425,14 +466,9 @@ async fn later_runs_reach_the_devices_the_first_run_cut() -> TestResult {
         (MAX_UNKNOWN_PER_RUN, MAX_UNKNOWN_PER_RUN, rest)
     );
     assert!(first_ids.is_disjoint(&second_ids) && first_ids.is_disjoint(&third_ids) && second_ids.is_disjoint(&third_ids));
-    let first_flood = first.last().ok_or("no flood")?;
-    assert_eq!(
-        summary_of(first_flood)?.get("omitted").and_then(Value::as_u64),
-        Some((FLOOD_MACS - MAX_UNKNOWN_PER_RUN) as u64)
-    );
-    assert_eq!((first.len(), third.len()), (MAX_UNKNOWN_PER_RUN + 1, rest));
+    assert_eq!((first.len(), third.len()), (MAX_UNKNOWN_PER_RUN, rest));
     assert!(fourth.is_empty());
-    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), FLOOD_MACS + 1);
+    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), FLOOD_MACS);
     Ok(())
 }
 
@@ -484,15 +520,15 @@ async fn the_lookup_is_bounded_scoped_and_skipped_when_empty() -> TestResult {
 
 
 #[tokio::test]
-async fn a_replay_inserts_nothing_and_a_flood_stores_the_cap_plus_one() -> TestResult {
+async fn a_replay_inserts_nothing_and_a_cut_stores_the_cap() -> TestResult {
     let scope = tenant_scope("acme")?;
     let store = Store::default();
     let exec = executor(&store);
     let leases = many_leases(MAX_UNKNOWN_PER_RUN + EXTRA)?;
     let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS);
-    assert_eq!(store_unknown_device_alerts(&exec, &scope, &alerts).await?, MAX_UNKNOWN_PER_RUN + 1);
+    assert_eq!(store_unknown_device_alerts(&exec, &scope, &alerts).await?, MAX_UNKNOWN_PER_RUN);
     assert_eq!(store_unknown_device_alerts(&exec, &scope, &alerts).await?, 0);
-    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), MAX_UNKNOWN_PER_RUN + 1);
+    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), MAX_UNKNOWN_PER_RUN);
     Ok(())
 }
 
@@ -646,10 +682,11 @@ async fn a_second_tenant_with_the_same_macs_sees_none_as_alerted() -> TestResult
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    let skipped = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await.skip;
+    let lookup = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await;
     let candidates = candidate_macs(&leases, &BTreeSet::new());
     let second_chunk: BTreeSet<String> = candidates.iter().skip(MAX_LOOKUP_MACS).cloned().collect();
-    assert_eq!(skipped, second_chunk);
+    assert!(lookup.skip.is_empty());
+    assert_eq!(lookup.deferred, second_chunk);
     Ok(())
 }
 
@@ -807,7 +844,14 @@ async fn the_scan_wraps_around_the_end_of_the_candidate_list() -> TestResult {
     assert_eq!(lookups_so_far(&store) - before, MAX_LOOKUP_CHUNKS);
     let first_mac = candidate_macs(&leases, &BTreeSet::new()).into_iter().next().ok_or("no mac")?;
     assert!(lookup.skip.contains(&first_mac));
-    assert_eq!(lookup.skip, alerted);
+    let unscanned: BTreeSet<String> = candidate_macs(&leases, &BTreeSet::new())
+        .into_iter()
+        .skip((WRAPPED_START - 1) * MAX_LOOKUP_MACS)
+        .take(MAX_LOOKUP_MACS)
+        .collect();
+    assert_eq!(lookup.deferred, unscanned);
+    assert_eq!(lookup.skip.union(&lookup.deferred).cloned().collect::<BTreeSet<String>>(), alerted);
+    assert!(lookup.skip.is_disjoint(&lookup.deferred));
     assert_eq!(
         lookup.scan_order.first().map(String::as_str),
         candidate_macs(&leases, &BTreeSet::new())
@@ -1010,5 +1054,82 @@ async fn the_cap_warning_is_emitted_once_per_capped_run_only() -> TestResult {
         text.contains("total=50003") && text.contains("scanned=10") && text.contains("start=0"),
         "{text}"
     );
+    Ok(())
+}
+
+
+const TEN_THOUSAND: usize = 10_000;
+
+
+#[tokio::test]
+async fn the_loss_count_is_the_macs_dropped_and_not_the_ones_that_wait() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(TEN_THOUSAND)?;
+    let lookup = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert_eq!(lookup.deferred.len(), TEN_THOUSAND - MAX_LOOKUP_MACS);
+    let plan = plan_alerts(
+        &scope,
+        &leases,
+        &lookup.skip,
+        NOW_MICROS,
+        (&lookup.scan_order, &lookup.deferred),
+        &RoundKey::default(),
+    );
+    let dropped = TEN_THOUSAND - MAX_UNKNOWN_PER_RUN - MAX_WAITING_MACS;
+    assert_eq!(plan.dropped, dropped);
+    let loss = plan.loss.as_ref().ok_or("no loss alert")?;
+    assert_eq!(loss.rule_id, DROPPED_RULE_ID);
+    assert_eq!(summary_of(loss)?.get("dropped").and_then(Value::as_u64), Some(dropped as u64));
+    assert_eq!(plan.alerts.len(), MAX_UNKNOWN_PER_RUN);
+    assert!(plan.alerts.iter().all(|alert| alert.rule_id == UNKNOWN_RULE_ID));
+    assert_eq!(plan.waiting.len(), MAX_WAITING_MACS);
+    let first_waiting = plan.waiting.first().and_then(mac_of);
+    assert_eq!(
+        first_waiting,
+        Some(mac_number(MAX_UNKNOWN_PER_RUN).to_ascii_uppercase().replace(':', "-"))
+    );
+    let (all, _rejected) = unknown_device_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS);
+    assert_eq!(all.last().map(|alert| alert.rule_id.as_str()), Some(DROPPED_RULE_ID));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unscanned_mac_is_never_alerted_unlooked_and_waits_without_an_alert() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let leases = many_leases(THREE_CHUNKS)?;
+    let deferred: BTreeSet<String> = candidate_macs(&leases, &BTreeSet::new()).into_iter().skip(1).collect();
+    let plan = plan_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS, (&[], &deferred), &RoundKey::default());
+    assert_eq!((plan.alerts.len(), plan.waiting.len(), plan.dropped), (1, THREE_CHUNKS - 1, 0));
+    assert!(plan.loss.is_none());
+    assert_eq!(unknown_ids(&plan.alerts).len(), 1);
+    Ok(())
+}
+
+
+const START_MICROS: u64 = 1_700_000_000_123_456;
+
+
+const NEXT_ROUND: u64 = 2;
+
+
+#[test]
+fn the_path_digest_follows_the_canonical_path_dot_dot_included_and_a_missing_path_is_digested_as_written() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let other_dir = tempfile::tempdir()?;
+    let real = dir.path().join("kea-leases4.csv");
+    std::fs::write(&real, "x")?;
+    std::fs::create_dir(dir.path().join("sub"))?;
+    let link = dir.path().join("sub").join("..").join("kea-leases4.csv");
+    let same_name = other_dir.path().join("kea-leases4.csv");
+    std::fs::write(&same_name, "x")?;
+    assert_eq!(path_digest(&real), path_digest(&link));
+    assert_ne!(path_digest(&real), path_digest(&same_name));
+    let missing = dir.path().join("missing.csv");
+    assert_eq!(path_digest(&missing), path_digest(&missing));
+    assert_ne!(path_digest(&missing), path_digest(&real));
+    assert_eq!(path_digest(&real).len(), alerts::id::ID_HEX_LENGTH);
     Ok(())
 }
