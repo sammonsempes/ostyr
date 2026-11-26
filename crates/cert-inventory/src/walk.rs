@@ -135,7 +135,10 @@ fn count_unreadable(state: &mut ScanState, error: io::Error, path: &Path) -> Opt
 /// Scans one root: depth first with an explicit stack of open directories, at most `max_depth` deep and `max_listed` entries listed.
 pub fn scan_root(settings: &ScanSettings, root: &Path, before_open: fn(&Path), max_listed: usize, state: &mut ScanState) {
     match open_root(root) {
-        Err(error) => record_error(state, format!("{}: {}", error.kind(), cut_path(root))),
+        Err(error) => {
+            state.roots_refused += 1;
+            record_error(state, format!("{}: {}", error.kind(), cut_path(root)));
+        }
         Ok(level) => {
             let mut stack = vec![level];
             let finished = (0..max_listed)
