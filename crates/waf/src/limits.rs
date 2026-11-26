@@ -291,3 +291,18 @@ pub const UNTRUSTED_CA_ROOT_DIR: &str = "the ca_root_file directory must be abso
 
 /// Refusal text when the CA root file is not trusted.
 pub const UNTRUSTED_CA_ROOT_FILE: &str = "the ca_root_file must be a regular file owned by root or this user, closed to group and others";
+
+
+pub const DEBOUNCE_MILLIS: u64 = 300;
+
+
+pub const SERVICE_ACTOR: &str = "ostyr-waf";
+
+
+pub const SERVICE_MODULE: &str = "waf";
+
+
+pub const SERVICE_REQUEST_ID: &str = "waf-reload";
+
+
+pub const AUDIT_DECLARED_KEYS: [&str; 7] = ["result", "diff", "reason", "changed_settings", "changed_files", "diff_sha256", "late"];

@@ -75,6 +75,11 @@ pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigEr
             .then_some(())
             .ok_or_else(|| refuse_setting(format!("{name} is not a plain absolute path")))
     })?;
+    settings.audit_file.iter().try_for_each(|value| {
+        path_text_ok(value)
+            .then_some(())
+            .ok_or_else(|| refuse_setting("audit_file is not a plain absolute path".to_owned()))
+    })?;
     (MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS)
         .contains(&settings.deadline_seconds)
         .then_some(())
@@ -173,16 +178,17 @@ pub fn config_error(failure: WafError) -> ConfigError {
 }
 
 
-/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`) that differs from the running one is refused, never half applied.
+/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`, `audit_file`) that differs from the running one is refused, never half applied.
 pub fn check_start_only(running: &ApplySettings, loaded: &ApplySettings) -> Result<(), ConfigError> {
     let fields = [
         ("routes_file", running.routes_file == loaded.routes_file),
         ("out_dir", running.out_dir == loaded.out_dir),
         ("admin_socket", running.admin_socket == loaded.admin_socket),
+        ("audit_file", running.audit_file == loaded.audit_file),
     ];
     fields.iter().try_for_each(|(name, same)| {
         same.then_some(())
-            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart waf_apply")))
+            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart ostyr-waf")))
     })
 }
 
