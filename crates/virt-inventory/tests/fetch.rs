@@ -18,7 +18,10 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use types::TestResult;
 use virt_inventory::error::FetchError;
-use virt_inventory::fetch::{build_agent, endpoint, fetch_inventory, get_body, read_body, remaining, token_header, PERMISSIONS_PATH, RESOURCES_PATH};
+use virt_inventory::fetch::{
+    build_agent, endpoint, fetch_inventory, get_body, is_handshake_failure, read_body, remaining, token_header, transport_error, PERMISSIONS_PATH,
+    RESOURCES_PATH,
+};
 use virt_inventory::inventory::{inventory_degraded_nodes, inventory_items, Inventory};
 use virt_inventory::limits::Limits;
 use virt_inventory::settings::FetchSettings;
@@ -205,6 +208,7 @@ fn an_endless_permissions_body_is_cut_at_the_limit() -> TestResult {
         extra: "",
         body: Vec::new(),
         endless: true,
+        hold: None,
     };
     let Run { outcome, seen } = run(vec![endless], limits_with(SMALL_MAX))?;
     assert!(matches!(refusal(outcome)?, FetchError::TooLarge { max: SMALL_MAX }));
@@ -220,6 +224,7 @@ fn a_redirect_is_not_followed() -> TestResult {
         extra: "location: https://localhost:1/other\r\n",
         body: Vec::new(),
         endless: false,
+        hold: None,
     };
     let Run { outcome, seen } = run(vec![reply(OK, AUDITOR), redirect], Limits::default())?;
     assert!(matches!(refusal(outcome)?, FetchError::Status(STATUS_REDIRECT)));
@@ -379,4 +384,70 @@ fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) ->
 #[cfg(not(unix))]
 fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path.as_ref(), content)
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_server_certificate_of_another_ca_is_a_certificate_refusal_never_a_down_host() -> TestResult {
+    let serving = spawn_stand_in(vec![reply(OK, AUDITOR)])?;
+    let trusted = spawn_stand_in(Vec::new())?;
+    let directory = tempdir()?;
+    let settings = settings_for(directory.path(), serving.port, &trusted.ca_pem, Limits::default())?;
+    let error = refusal(fetch_inventory(&settings))?;
+    assert!(matches!(error, FetchError::Certificate), "{error:?}");
+    assert!(!chain_text(&error).contains(TOKEN));
+    let seen = serving.seen.join().map_err(|_| "stand-in panicked")?;
+    assert!(seen.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn only_a_tls_failure_is_a_handshake_failure() -> TestResult {
+    let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, "wrapped");
+    assert!(is_handshake_failure(&ureq::Error::Io(wrapped)));
+    assert!(is_handshake_failure(&ureq::Error::Tls("x")));
+    assert!(is_handshake_failure(&ureq::Error::Rustls(rustls::Error::HandshakeNotComplete)));
+    assert!(!is_handshake_failure(&ureq::Error::Io(std::io::ErrorKind::InvalidData.into())));
+    assert!(!is_handshake_failure(&ureq::Error::Io(std::io::Error::other("refused"))));
+    assert!(!is_handshake_failure(&ureq::Error::HostNotFound));
+    assert!(matches!(
+        transport_error(&ureq::Error::HostNotFound),
+        FetchError::Transport(InsertClass::Unavailable)
+    ));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_ca_file_a_group_can_write_a_symlink_or_in_a_writable_directory_is_refused() -> TestResult {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    const GROUP_WRITABLE_MODE: u32 = 0o664;
+    const READABLE_MODE: u32 = 0o644;
+    const OPEN_MODE: u32 = 0o777;
+    const PRIVATE_MODE: u32 = 0o700;
+    let stand_in = spawn_stand_in(Vec::new())?;
+    let mut rigged = rig(&stand_in, Limits::default())?;
+    let directory = rigged._directory.path().to_path_buf();
+    build_agent(&rigged.settings)?;
+    fs::set_permissions(directory.join("ca.pem"), fs::Permissions::from_mode(GROUP_WRITABLE_MODE))?;
+    let group_writable = build_agent(&rigged.settings).err().ok_or("expected a refusal")?;
+    assert!(matches!(group_writable, FetchError::CaFile(_)));
+    assert!(
+        group_writable.to_string().contains("written by its group or by others"),
+        "{group_writable}"
+    );
+    fs::set_permissions(directory.join("ca.pem"), fs::Permissions::from_mode(READABLE_MODE))?;
+    symlink(directory.join("ca.pem"), directory.join("link.pem"))?;
+    rigged.settings.ca_file = directory.join("link.pem");
+    assert!(matches!(build_agent(&rigged.settings), Err(FetchError::CaFile(_))));
+    rigged.settings.ca_file = directory.join("ca.pem");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(OPEN_MODE))?;
+    let refused = build_agent(&rigged.settings).err().ok_or("expected a refusal");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(PRIVATE_MODE))?;
+    let text = chain_text(&refused?);
+    assert!(text.contains("not trusted"), "{text}");
+    Ok(())
 }

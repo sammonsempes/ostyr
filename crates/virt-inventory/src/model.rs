@@ -94,3 +94,28 @@ pub struct InventoryDiff {
     pub unreadable: Vec<ItemKey>,
     pub retired_unreadable: Vec<ItemKey>,
 }
+
+
+/// What a round needs, built from one snapshot of the live settings: the fetch settings, the cmdb connection settings and the store caps.
+pub struct Context {
+    pub fetch: crate::settings::FetchSettings,
+    pub pg: core_pg::settings::PgSettings,
+    pub limits: cmdb::model::Limits,
+}
+
+
+/// The two settings files as one value, swapped as a whole by the reload engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Live {
+    pub service: crate::service::ServiceSettings,
+    pub fetch: crate::settings::FetchSettings,
+    pub limits: cmdb::model::Limits,
+}
+
+
+/// What a good round did: the CMDB sync report and what the parse skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundReport {
+    pub sync: crate::cmdb_sync::SyncReport,
+    pub skipped: Skipped,
+}
