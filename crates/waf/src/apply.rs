@@ -75,6 +75,11 @@ pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigEr
             .then_some(())
             .ok_or_else(|| refuse_setting(format!("{name} is not a plain absolute path")))
     })?;
+    settings.audit_file.iter().try_for_each(|value| {
+        path_text_ok(value)
+            .then_some(())
+            .ok_or_else(|| refuse_setting("audit_file is not a plain absolute path".to_owned()))
+    })?;
     (MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS)
         .contains(&settings.deadline_seconds)
         .then_some(())
@@ -173,16 +178,17 @@ pub fn config_error(failure: WafError) -> ConfigError {
 }
 
 
-/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`) that differs from the running one is refused, never half applied.
+/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`, `audit_file`) that differs from the running one is refused, never half applied.
 pub fn check_start_only(running: &ApplySettings, loaded: &ApplySettings) -> Result<(), ConfigError> {
     let fields = [
         ("routes_file", running.routes_file == loaded.routes_file),
         ("out_dir", running.out_dir == loaded.out_dir),
         ("admin_socket", running.admin_socket == loaded.admin_socket),
+        ("audit_file", running.audit_file == loaded.audit_file),
     ];
     fields.iter().try_for_each(|(name, same)| {
         same.then_some(())
-            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart waf_apply")))
+            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart ostyr-waf")))
     })
 }
 
@@ -449,7 +455,13 @@ pub fn shared_sink(sink: &Arc<SharedAuditFn>) -> Box<SharedAuditFn> {
 
 /// A refusal at start as one `denied` entry with the text a reload refusal uses; an audit failure is logged and the refusal is returned.
 pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failure: ConfigError) -> ConfigError {
-    let reason = failure.to_string();
+    audit_denied(context, audit, failure.to_string());
+    failure
+}
+
+
+/// One `denied` entry with the fixed reason; an audit failure is logged.
+pub fn audit_denied(context: &ReloadContext, audit: &SharedAuditFn, reason: String) {
     error!(%reason, "start refused");
     let entry = reload_entry(
         context,
@@ -459,7 +471,13 @@ pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failu
     if let Err(audit_error) = audit(entry) {
         error!(%audit_error, "cannot audit the refused start");
     }
-    failure
+}
+
+
+/// The first delivery's failure, an unknown outcome included, as one `denied` entry before the start stops.
+pub fn audit_first_delivery_failure(context: &ReloadContext, audit: &SharedAuditFn, failure: DeliverError) -> OpenError {
+    audit_denied(context, audit, format!("the first configuration was refused: {failure}"));
+    OpenError::Deliver(failure)
 }
 
 
@@ -544,7 +562,7 @@ pub fn open_apply_with_program(
         context.clone(),
     )
     .map_err(refused)?;
-    let delivery = deliver(&current_config(&engine), runner)?;
+    let delivery = deliver(&current_config(&engine), runner).map_err(|failure| audit_first_delivery_failure(&context, sink.as_ref(), failure))?;
     late.store(delivery == Delivery::Late, Ordering::SeqCst);
     let entry = reload_entry(
         &engine.context,

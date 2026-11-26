@@ -13,6 +13,8 @@ pub mod model;
 pub mod order;
 pub mod render;
 pub mod runner;
+#[cfg(target_os = "linux")]
+pub mod serve;
 pub mod tls;
 pub mod types;
 pub mod validate;
