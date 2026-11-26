@@ -1,5 +1,6 @@
 use crate::batch::{AlertRun, DryRunReport};
-use crate::model::{ConditionOutcome, Mode, Trace, TraceEvent};
+use crate::model::{Catalogue, ConditionOutcome, Mode, Trace, TraceEvent};
+use crate::runs::event_json;
 use crate::types::ParamMap;
 use std::io::{self, Write};
 use unicode_general_category::{get_general_category, GeneralCategory};
@@ -117,7 +118,27 @@ pub fn counted(count: usize, label: &str) -> Option<String> {
 }
 
 
+/// One trace without a single value: the header and one fixed-schema JSON line per event (names and kinds of parameters only).
+pub fn render_trace_redacted(catalogue: &Catalogue, trace: &Trace) -> String {
+    std::iter::once(format!("playbook {} v{} mode={}", trace.playbook, trace.version, mode_label(trace.mode)))
+        .map(|line| escape_controls(&line))
+        .chain(trace.events.iter().map(|event| event_json(catalogue, event).to_string()))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+
 pub fn alert_block(run: &AlertRun) -> String {
+    alert_block_with(run, &render_trace)
+}
+
+
+pub fn alert_block_redacted(catalogue: &Catalogue, run: &AlertRun) -> String {
+    alert_block_with(run, &|trace| render_trace_redacted(catalogue, trace))
+}
+
+
+pub fn alert_block_with(run: &AlertRun, render: &dyn Fn(&Trace) -> String) -> String {
     let skipped = run.skipped.map(|reason| format!("  skipped: {reason}\n"));
     let notes = [
         counted(run.matches_over_bound, "matching playbooks not run (per-alert bound)"),
@@ -126,7 +147,7 @@ pub fn alert_block(run: &AlertRun) -> String {
     ];
     std::iter::once(format!("alert {} {}\n", run.position, run.request_id))
         .chain(skipped)
-        .chain(run.traces.iter().map(render_trace))
+        .chain(run.traces.iter().map(render))
         .chain(notes.into_iter().flatten())
         .collect()
 }
@@ -156,4 +177,14 @@ pub fn render_dry_run(report: &DryRunReport) -> String {
 pub fn write_dry_run(out: &mut impl Write, report: &DryRunReport) -> io::Result<()> {
     out.write_all(header(report).as_bytes())?;
     report.alerts.iter().try_for_each(|run| out.write_all(alert_block(run).as_bytes()))
+}
+
+
+/// The service's stdout trace: the same blocks as `write_dry_run` but no alert-derived value (condition text, reasons, asset ids, parameter values).
+pub fn write_dry_run_redacted(out: &mut impl Write, report: &DryRunReport, catalogue: &Catalogue) -> io::Result<()> {
+    out.write_all(header(report).as_bytes())?;
+    report
+        .alerts
+        .iter()
+        .try_for_each(|run| out.write_all(alert_block_redacted(catalogue, run).as_bytes()))
 }

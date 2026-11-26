@@ -2,7 +2,7 @@ use crate::batch::{dry_run_batch, AlertRun, DryRunLimits, DryRunReport, Line};
 use crate::bundle::{Bundle, MODULE};
 use crate::error::RoundError;
 use crate::feed::alert_json;
-use crate::render::write_dry_run;
+use crate::render::write_dry_run_redacted;
 use crate::runs::{run_rows, store_runs, RunRow, BOUND_NAME, MAX_PLAYBOOK_RUNS};
 use crate::types::{ControlFn, LiveFn, NowFn, WaitFn};
 use alerts::id::is_alert_id;
@@ -588,7 +588,7 @@ pub async fn run_round<Out: Write>(
             .collect();
         let report = simulate_page(live, lines).await?;
         if let Some(found) = &report {
-            write_dry_run(trace_out, found).map_err(RoundError::Trace)?;
+            write_dry_run_redacted(trace_out, found, &live.bundle.catalogue).map_err(RoundError::Trace)?;
         }
         let outcome = outcome_of(&items, &sorted, report.as_ref(), live.settings.page_size);
         let rows = run_rows(tenant_of(scope), &sorted.runnable, report.as_ref(), &live.bundle.catalogue);
