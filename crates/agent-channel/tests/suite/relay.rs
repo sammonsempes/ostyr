@@ -13,7 +13,7 @@ use agent_channel::agent_app::{dialer, ended_on_rate, execute_fn, load_agent_fil
 use agent_channel::client::{run_commands_until, subscribe};
 use agent_channel::error::{AppError, ChannelError, EndpointFault};
 use agent_channel::model::{
-    CommandRun, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
+    CommandRun, Executors, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
 };
 use agent_channel::relay::{
     check_scope, endpoint_addresses, error_text, hold_internal, is_held, is_rate_refusal, kind_of, pinned_dialer, select_endpoint, selection_order,
@@ -218,7 +218,14 @@ async fn the_file_refuses_a_bad_endpoint_list_by_entry_index() -> TestResult {
     assert_eq!(agent_with(&agent, "10.0.0.1:443", &[]).relays.len(), 0);
     let cases: Vec<(&str, Vec<&str>, usize, EndpointFault)> = vec![
         ("10.0.0.1:443", vec!["10.0.0.1:0443"], 1, EndpointFault::Duplicate),
-        ("10.0.0.1:443", vec!["[::ffff:10.0.0.1]:443"], 1, EndpointFault::Duplicate),
+        ("10.0.0.1:443", vec!["[::ffff:10.0.0.1]:443"], 1, EndpointFault::Embedded),
+        ("[::192.168.101.86]:443", vec![], 0, EndpointFault::Embedded),
+        ("10.0.0.1:443", vec!["[::ffff:0:10.0.0.2]:443"], 1, EndpointFault::Embedded),
+        ("10.0.0.1:443", vec!["[64:ff9b::10.0.0.2]:443"], 1, EndpointFault::Embedded),
+        ("10.0.0.1:443", vec!["[64:ff9b:1::1]:443"], 1, EndpointFault::Embedded),
+        ("10.0.0.1:443", vec!["[2002:a00:2::1]:443"], 1, EndpointFault::Embedded),
+        ("10.0.0.1:443", vec!["[2001::1]:443"], 1, EndpointFault::Embedded),
+        ("[::2]:443", vec![], 0, EndpointFault::Embedded),
         ("[::1]:443", vec!["[0:0::1]:443"], 1, EndpointFault::Duplicate),
         (
             "10.0.0.1:443",
@@ -259,6 +266,7 @@ async fn the_file_refuses_a_bad_endpoint_list_by_entry_index() -> TestResult {
         EndpointFault::ServerName,
         EndpointFault::LinkLocal,
         EndpointFault::Scoped,
+        EndpointFault::Embedded,
     ]
     .iter()
     .map(ToString::to_string)
@@ -759,7 +767,14 @@ fn accept_any_acl(_directory: &std::fs::File, _shown: &Path) -> Result<(), sys_w
 
 async fn run_held(agent: &AgentFile, hold: &HoldDown) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
     let dirs = open_spool_dirs_with(agent, accept_any_acl)?;
-    Ok(bounded(run_agent(agent, &dirs, &|_delay| Box::pin(std::future::ready(())), None, hold)).await??)
+    Ok(bounded(run_agent(
+        agent,
+        &dirs,
+        &|_delay| Box::pin(std::future::ready(())),
+        &Executors::default(),
+        hold,
+    ))
+    .await??)
 }
 
 

@@ -91,6 +91,8 @@ pub enum IsolationError {
     Json(#[from] serde_json::Error),
     #[error("isolation needs at least one endpoint")]
     NoEndpoints,
+    #[error("isolation would cut the agent's own channel: an endpoint of the agent file is not a listed isolation endpoint")]
+    ChannelNotListed,
     #[error("the table is not the one that was applied: {0}")]
     Mismatch(String),
     #[error(transparent)]

@@ -7,6 +7,8 @@ pub mod capabilities;
 #[cfg(unix)]
 pub mod cursor;
 #[cfg(unix)]
+pub mod dispatch;
+#[cfg(unix)]
 pub mod error;
 #[cfg(target_os = "linux")]
 pub mod exec_events;

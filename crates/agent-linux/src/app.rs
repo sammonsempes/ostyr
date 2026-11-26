@@ -1,11 +1,13 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
+use crate::dispatch::{admin_execute_fn, admin_queue, run_admin_worker, run_with_admin, AdminEnv};
 use crate::error::SourceError;
 use crate::exec_events::{system_offset, ExecSink};
 use crate::exec_probe::{end_on_spool_error, run_exec_controller, spawn_thread, stop_exec_controller, Controller, ProbeEnv, PRODUCTION_PROBE};
 use crate::hostmetrics::statvfs_path;
 use crate::metrics::run_metrics;
-use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
+use crate::model::{LinuxFile, MetricsEnv, Paths, StateDir, Totals, UpdateEnv, LINUX_MODULE, NFT_PATH, SYSTEMCTL_PATH};
+use crate::nft::run_nft;
 use crate::run::run_source;
 use crate::sensor::{monotonic_seconds, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
@@ -14,10 +16,11 @@ use crate::types::{ProbeFn, RunFn, SpoolLock};
 use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
-use agent_channel::relay::HoldDown;
+use agent_channel::model::Executors;
+use agent_channel::relay::{endpoint_addresses, HoldDown};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
 use agent_channel::spool_dirs::{open_parent, open_spool_dirs, SpoolDirs};
-use agent_channel::types::{ExecuteFn, PauseFn};
+use agent_channel::types::PauseFn;
 use agent_shell::compose::production_shared;
 use agent_shell::hooks::production_hooks;
 use agent_shell::model::{SharedHooks, SHELL_ACCOUNT};
@@ -29,21 +32,23 @@ use core_config::watch::watch_files;
 use patch_inventory::limits::default_limits;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::Notify;
 
 
 /// Pause between two agent runs; a run ends when its streams end, the next one claims the events spooled meanwhile.
 pub const AGENT_CYCLE_SECONDS: u64 = 5;
 
 
-/// Runs the agent `max_runs` times, every run with the same shell executor; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
-pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn, shell: Option<&ExecuteFn<'_>>) -> u64 {
+/// Runs the agent `max_runs` times, every run with the same executors; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
+pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn, executors: &Executors<'_>) -> u64 {
     let mut succeeded = 0;
     let hold = HoldDown::default();
     for _ in 0..max_runs {
-        let outcome = run_agent(agent, checked, pause, shell, &hold)
+        let outcome = run_agent(agent, checked, pause, executors, &hold)
             .await
             .inspect_err(|error| tracing::warn!(%error, "agent run failed"));
         succeeded += u64::from(outcome.is_ok());
@@ -119,9 +124,21 @@ pub async fn run_linux_with(
     );
     let shell = async { Ok::<u64, SourceError>(run_shell_worker_with(orders, slot, &shell_shared, SHELL_ACCOUNT, production_hooks).await) };
     let (agent_ref, dirs_ref) = (&agent, &dirs);
+    let restart = Notify::new();
+    let restart_ref = &restart;
+    let (admin_queue_sender, admin_orders) = admin_queue();
+    let admin_executor = admin_execute_fn(admin_queue_sender);
     let cycles = async move {
-        let runs = run_agent_cycles(agent_ref, dirs_ref, max_polls, pause, Some(executor.as_ref())).await;
+        let executors = Executors {
+            shell: Some(executor.as_ref()),
+            ping: Some(admin_executor.as_ref()),
+            collect_status: Some(admin_executor.as_ref()),
+            isolate: Some(admin_executor.as_ref()),
+            restart: Some(restart_ref),
+        };
+        let runs = run_agent_cycles(agent_ref, dirs_ref, max_polls, pause, &executors).await;
         drop(executor);
+        drop(admin_executor);
         Ok::<u64, SourceError>(runs)
     };
     let env = SensorEnv {
@@ -149,6 +166,23 @@ pub async fn run_linux_with(
     };
     let cursor_file = file.cursor_file.clone();
     let state = tokio::task::spawn_blocking(move || open_state_dir(&cursor_file)).await??;
+    let admin_state = StateDir {
+        handle: state.handle.try_clone()?,
+    };
+    let channel_addresses = endpoint_addresses(&agent)?;
+    let admin_audit = shared_log_audit(&log);
+    let admin_env = AdminEnv {
+        run: run_nft,
+        nft: Path::new(NFT_PATH),
+        state: &admin_state,
+        tenant: &agent.tenant,
+        audit: admin_audit.as_ref(),
+        settings_file: path,
+        channel: &channel_addresses,
+        restart: restart_ref,
+    };
+    let stopping = AtomicBool::new(false);
+    let admin = run_admin_worker(admin_orders, &admin_env, &stopping);
     let update_env = UpdateEnv {
         lists_dir: APT_LISTS_DIR.into(),
         spool: paths.spool.clone(),
@@ -211,10 +245,8 @@ pub async fn run_linux_with(
         end_on_spool_error(ended)?;
         Ok::<(), SourceError>(())
     };
-    let outcome = tokio::select! {
-        joined = async { tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe) } => Some(joined),
-        () = terminate => None,
-    };
+    let producers = async { tokio::try_join!(source, cycles, sensor, updates, metrics, shell, exec_probe) };
+    let outcome = run_with_admin(producers, admin, terminate, &stopping).await;
     let stopped = stop_exec_controller(controller, &exec_env, exec_audit.as_ref(), pause).await;
     let stop_result = end_on_spool_error(stopped);
     let finished = match outcome {

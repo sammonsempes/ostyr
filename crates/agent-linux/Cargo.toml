@@ -10,6 +10,7 @@ ebpf = ["ebpf-probes/ebpf-load"]
 
 [dependencies]
 agent-channel = { path = "../agent-channel" }
+agent-command = { path = "../agent-command" }
 agent-shell = { path = "../agent-shell" }
 arc-swap = "1.9.3"
 core-audit = { path = "../core-audit" }
@@ -22,13 +23,15 @@ linux-fim = { path = "../linux-fim" }
 patch-inventory = { path = "../patch-inventory" }
 parking_lot = "0.12"
 rustix = { version = "1", features = ["fs", "process", "time"] }
+futures-util = "0.3"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 thiserror = "2"
 time = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "signal", "sync"] }
+tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 

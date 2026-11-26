@@ -11,6 +11,7 @@ use crate::model::{
 };
 use crate::trusted::read_trusted_capped;
 use crate::types::{SettingsEngine, SharedExecProbe, SharedMetrics, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
+use agent_channel::relay::ipv4_embedding;
 use arc_swap::ArcSwap;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
@@ -129,7 +130,13 @@ pub fn unusable_address(address: &IpAddr) -> bool {
 }
 
 
-/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a zero port.
+/// True for an IPv6 address in an IPv4-embedding or translation range: the ruleset would render an `ip6` rule no IPv4 packet matches, so it is refused.
+pub fn embedded_address(address: &IpAddr) -> bool {
+    ipv4_embedding(address)
+}
+
+
+/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, an unusable or IPv4-embedding address.
 pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
     [
         ("isolation.endpoints", file.isolation.endpoints.len() > MAX_ENDPOINTS),
@@ -140,6 +147,11 @@ pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
             file.isolation.endpoints.iter().any(|endpoint| unusable_address(&endpoint.address)),
         ),
         ("isolation.dns.address", file.isolation.dns.iter().any(unusable_address)),
+        (
+            "isolation.endpoints.embedded",
+            file.isolation.endpoints.iter().any(|endpoint| embedded_address(&endpoint.address)),
+        ),
+        ("isolation.dns.embedded", file.isolation.dns.iter().any(embedded_address)),
     ]
     .into_iter()
     .filter_map(|(name, invalid)| invalid.then_some(name))

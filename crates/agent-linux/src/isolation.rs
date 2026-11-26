@@ -410,6 +410,25 @@ pub fn chain_is_exact(items: &[ItemJson], name: &str, priority: i64) -> bool {
 }
 
 
+/// An address the listing prints is compared as the parsed address, never as text: `nft` and Rust print one IPv6 address in different forms.
+pub fn canonical_expr(mut expr: Value) -> Value {
+    if let Some(right) = expr.get_mut("match").and_then(|matching| matching.get_mut("right")) {
+        if let Some(address) = right.as_str().and_then(|text| text.parse::<IpAddr>().ok()) {
+            *right = json!(address.to_string());
+        }
+    }
+    expr
+}
+
+
+pub fn canonical_chain(items: &[ItemJson], chain: &str) -> Vec<Vec<Value>> {
+    chain_exprs(items, chain)
+        .into_iter()
+        .map(|rule| rule.into_iter().map(canonical_expr).collect())
+        .collect()
+}
+
+
 /// Checks a `nft -j list table` output against what `render_ruleset` produced: one table, four chains with policy drop, exactly the expected rules.
 pub fn check_listing(text: &str, settings: &IsolationSettings) -> Result<(), IsolationError> {
     let listing: ListingJson = serde_json::from_str(text)?;
@@ -448,9 +467,9 @@ pub fn check_listing(text: &str, settings: &IsolationSettings) -> Result<(), Iso
             (
                 "rules",
                 rule_count != expected_input.len() + expected_output.len() + expected_postrouting.len()
-                    || chain_exprs(&items, CHAIN_INPUT) != expected_input
-                    || chain_exprs(&items, CHAIN_OUTPUT) != expected_output
-                    || chain_exprs(&items, CHAIN_POSTROUTING) != expected_postrouting,
+                    || canonical_chain(&items, CHAIN_INPUT) != expected_input
+                    || canonical_chain(&items, CHAIN_OUTPUT) != expected_output
+                    || canonical_chain(&items, CHAIN_POSTROUTING) != expected_postrouting,
             ),
         ]
         .into_iter()
