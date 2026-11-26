@@ -11,6 +11,7 @@ use crate::types::{FieldTable, SelectionSql};
 pub struct SqlOptions {
     pub table: String,
     pub id_column: String,
+    pub projection: Option<String>,
 }
 
 
@@ -19,6 +20,7 @@ impl Default for SqlOptions {
         Self {
             table: "events".to_string(),
             id_column: "event.id".to_string(),
+            projection: None,
         }
     }
 }
@@ -86,7 +88,7 @@ fn logsource_source<'a>(rule: &'a Rule, mapping: &'a FieldMapping) -> Result<Sou
 }
 
 
-/// Compiles one Sigma rule text to a `SELECT` of the matching event ids; the logsource becomes a filter on category or provider and operating system.
+/// Compiles one Sigma rule text to a `SELECT` of the matching event ids, or of `options.projection` (trusted SQL from a const, never rule text); the logsource becomes a filter on category or provider and operating system.
 pub fn compile_rule(text: &str, mapping: &FieldMapping, options: &SqlOptions) -> Result<String, SigmaError> {
     let rule = parse_rule(text)?;
     let source = logsource_source(&rule, mapping)?;
@@ -107,9 +109,10 @@ pub fn compile_rule(text: &str, mapping: &FieldMapping, options: &SqlOptions) ->
     } else {
         [source.filter].into_iter().chain(os).chain([condition]).collect()
     };
+    let id_column = quote_identifier(&options.id_column)?;
     Ok(format!(
         "SELECT {} FROM {} WHERE {}",
-        quote_identifier(&options.id_column)?,
+        options.projection.as_deref().unwrap_or(&id_column),
         quote_identifier(&options.table)?,
         filters.join(" AND ")
     ))

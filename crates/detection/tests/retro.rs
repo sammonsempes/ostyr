@@ -6,10 +6,12 @@ mod types;
 
 use detection::error::RetroError;
 use detection::retro::{
-    absorb, body_failure, check_refusal, fetch_with, id_allowed, read_changed, read_ids, refusal, retro_run, retro_statement, run_retro,
-    send_request, validate_retro, window_epochs, RetroIds, RetroOutcome, RetroQuery, RetroReply, RetroRequest, RetroSettings, MAX_RETRO_BYTES,
-    MAX_RETRO_DAYS, MAX_RETRO_ROWS,
+    absorb, body_failure, check_refusal, entity_of, event_of, fetch_with, hash_expression, hash_part, id_allowed, read_changed, read_ids, refusal,
+    retro_identity, retro_projection, retro_run, retro_statement, run_retro, send_request, validate_retro, window_epochs, EventRow, HashKind,
+    RetroIds, RetroOutcome, RetroQuery, RetroReply, RetroRequest, RetroSettings, HASH_COLUMNS, MAX_RETRO_BYTES, MAX_RETRO_DAYS, MAX_RETRO_ROWS,
+    MAX_ROW_BYTES,
 };
+use sha2::{Digest, Sha256};
 use siem_ingest::error::InsertClass;
 use siem_ingest::reader_profile::pins;
 use sigma_sql::mapping::{parse_mapping, FieldMapping};
@@ -23,6 +25,7 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::macros::datetime;
 use time::OffsetDateTime;
+use tokio::net::TcpSocket;
 use types::{Run, Scripted, TestResult};
 use ureq::http::StatusCode;
 
@@ -66,7 +69,7 @@ const CHUNK: usize = 4096;
 const MAX_READS: usize = 10_000;
 
 
-const OVER_BYTES: usize = 4_200_000;
+const OVER_BYTES: usize = 67_200_000;
 
 
 const HTTP_OK: u16 = 200;
@@ -117,9 +120,6 @@ const RESULT_ROWS_CODE: u32 = 396;
 const OTHER_CODE: u32 = 60;
 
 
-const ID_LIMIT: usize = 128;
-
-
 const OVER_USER_BYTES: usize = 129;
 
 
@@ -148,6 +148,42 @@ const OVER_CHECK_BYTES: usize = 5000;
 
 
 const BAD_UTF8: [u8; 2] = [0xff, 0xfe];
+
+
+const HASH_WIDTH: usize = 64;
+
+
+const SECOND_ROW: usize = 2;
+
+
+const THIRD_ROW: usize = 3;
+
+
+const FOURTH_ROW: usize = 4;
+
+
+const BAD_FLAG: u8 = 2;
+
+
+const BASE_MS: i64 = 1_793_664_000_000;
+
+
+const ENTITY_LIMIT: usize = 256;
+
+
+const ID_KEEP: usize = 64;
+
+
+const MEGABYTE: usize = 1_048_576;
+
+
+const KNOWN_MS: i64 = 1_793_664_000_123;
+
+
+const ID_CUT: usize = 63;
+
+
+const KNOWN_HASH: &str = "74fa251e3d1796528576b6dc40c9ab9dd1b9269bb8a5c2b4d7c1c36e2c0b717b";
 
 
 fn settings() -> RetroSettings {
@@ -210,8 +246,59 @@ fn ok_text(text: &str) -> Result<RetroReply, InsertClass> {
 }
 
 
+fn hash_of(index: usize) -> String {
+    format!("{index:0HASH_WIDTH$x}")
+}
+
+
+fn row_value(index: usize, id: &str, valid: u8, host: &str, user: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ret_ms": (BASE_MS + index as i64).to_string(),
+        "ret_hash": hash_of(index),
+        "ret_id": id,
+        "ret_id_chars": id.chars().count(),
+        "ret_id_valid": valid,
+        "ret_host": host,
+        "ret_host_chars": host.chars().count(),
+        "ret_user": user,
+        "ret_user_chars": user.chars().count(),
+    })
+}
+
+
+fn row_json(index: usize, id: &str, valid: u8, host: &str, user: &str) -> String {
+    row_value(index, id, valid, host, user).to_string()
+}
+
+
 fn id_lines(ids: &[&str]) -> String {
-    ids.iter().map(|id| format!("{{\"event.id\":{}}}\n", serde_json::json!(id))).collect()
+    ids.iter()
+        .enumerate()
+        .map(|(index, id)| format!("{}\n", row_json(index + 1, id, 1, "host-1", "user-1")))
+        .collect()
+}
+
+
+fn identities(found: &RetroIds) -> Vec<String> {
+    found.events.iter().map(|event| event.identity.clone()).collect()
+}
+
+
+fn identity(index: usize, id: &str) -> String {
+    format!("{id}:{}", hash_of(index))
+}
+
+
+fn into_complete(outcome: RetroOutcome) -> Result<RetroIds, Box<dyn Error>> {
+    match outcome {
+        RetroOutcome::Complete(found) => Ok(found),
+        RetroOutcome::RowCap { .. } => Err("row cap".into()),
+    }
+}
+
+
+fn complete(body: String) -> Result<RetroIds, Box<dyn Error>> {
+    into_complete(read_ids(with_body(Box::new(Cursor::new(body.into_bytes()))), WIDE_CAP)?)
 }
 
 
@@ -258,25 +345,36 @@ fn with_body(body: Box<dyn Read>) -> RetroReply {
 #[test]
 fn a_run_checks_the_profile_then_reads_the_ids_in_order() -> TestResult {
     let (outcome, seen) = run_script(vec![ok_text(&clean_reply()), ok_text(&id_lines(&["e1", "e2"]))], &settings(), &query())?;
-    assert_eq!(
-        outcome?,
-        RetroOutcome::Complete(RetroIds {
-            ids: vec!["e1".to_owned(), "e2".to_owned()],
-            refused: 0,
-            rows: IDS_READ
-        })
-    );
+    let found = into_complete(outcome?)?;
+    assert_eq!(identities(&found), vec![identity(1, "e1"), identity(SECOND_ROW, "e2")]);
+    assert_eq!((found.refused, found.rows), (0, IDS_READ));
+    let first = found.events.first().ok_or("no event")?;
+    assert_eq!((first.event_ms, first.event_time.as_str()), (BASE_MS + 1, "2026-11-03T00:00:00.001Z"));
     assert_eq!(seen.len(), IDS_READ);
     let check = seen.first().ok_or("no check")?;
     assert!(check.statement.contains("FROM `system`.`settings` WHERE `changed` SETTINGS "));
     let read = seen.get(1).ok_or("no read")?;
-    assert!(read.statement.starts_with("SELECT `event.id` FROM `events` WHERE "));
+    assert!(read
+        .statement
+        .starts_with("SELECT toString(toUnixTimestamp64Milli(`@timestamp`)) AS `ret_ms`, lower(hex(SHA256(concat("));
+    assert!(read
+        .statement
+        .contains(" AS `ret_hash`, if(isValidUTF8(`event.id`), leftUTF8(`event.id`, 64), '') AS `ret_id`, "));
+    assert!(read
+        .statement
+        .contains("lengthUTF8(`event.id`) AS `ret_id_chars`, isValidUTF8(`event.id`) AS `ret_id_valid`, "));
+    assert!(read
+        .statement
+        .contains("leftUTF8(`host.name`, 257), '') AS `ret_host`, lengthUTF8(`host.name`) AS `ret_host_chars`, "));
+    assert!(read
+        .statement
+        .contains("leftUTF8(`user.name`, 257), '') AS `ret_user`, lengthUTF8(`user.name`) AS `ret_user_chars` FROM `events` WHERE "));
     assert!(read
         .statement
         .contains("`tenant` = {tenant:String} AND `@timestamp` >= toDateTime({start:UInt32}, 'UTC')"));
     assert!(read
         .statement
-        .contains("ORDER BY `@timestamp`, `event.id` LIMIT {limit:UInt64} SETTINGS max_execution_time = 30, max_rows_to_read = 1000000, "));
+        .contains("ORDER BY `@timestamp`, `ret_hash` LIMIT {limit:UInt64} SETTINGS max_execution_time = 30, max_rows_to_read = 1000000, "));
     assert!(read.statement.contains("max_result_rows = 4"));
     assert!(read.statement.ends_with("FORMAT JSONEachRow"));
     assert!(read.settings.contains(&("database", "ostyr".to_owned())));
@@ -302,7 +400,9 @@ fn more_rows_than_the_cap_is_a_named_row_cap_never_a_silent_cut() -> TestResult 
         &query(),
     )?;
     let outcome = result?;
-    assert!(matches!(&outcome, RetroOutcome::RowCap { found, cap } if *cap == ROWS && found.ids == ["e1", "e2", "e3"] && found.rows == ROWS + 1));
+    assert!(
+        matches!(&outcome, RetroOutcome::RowCap { found, cap } if *cap == ROWS && identities(found) == [identity(1, "e1"), identity(SECOND_ROW, "e2"), identity(THIRD_ROW, "e3")] && found.rows == ROWS + 1)
+    );
     Ok(())
 }
 
@@ -314,7 +414,7 @@ fn exactly_the_cap_is_complete() -> TestResult {
         &settings(),
         &query(),
     )?;
-    assert!(matches!(outcome?, RetroOutcome::Complete(found) if found.ids.len() == ROWS));
+    assert!(matches!(outcome?, RetroOutcome::Complete(found) if found.events.len() == ROWS));
     Ok(())
 }
 
@@ -571,16 +671,147 @@ fn a_statement_failure_names_the_rule_error_without_text() -> TestResult {
 
 
 #[test]
-fn an_event_id_outside_the_grammar_is_refused_alone() -> TestResult {
+fn an_event_id_with_a_control_or_format_character_is_refused_alone() -> TestResult {
     assert!(id_allowed("evt-1"));
-    assert!(!id_allowed(""));
-    assert!(!id_allowed(&"a".repeat(ID_LIMIT + 1)));
-    assert!(id_allowed(&"a".repeat(ID_LIMIT)));
+    assert!(id_allowed(""));
     assert!(!id_allowed("a\0b"));
     assert!(!id_allowed("a\nb"));
-    let body = id_lines(&["good", "", "bad\u{7}id", "also-good"]);
-    let outcome = read_ids(with_body(Box::new(Cursor::new(body.into_bytes()))), WIDE_CAP)?;
-    assert!(matches!(&outcome, RetroOutcome::Complete(found) if found.ids == ["good", "also-good"] && found.refused == REFUSED));
+    assert!(!id_allowed("a\u{202e}b"));
+    assert!(!id_allowed("a\u{200b}b"));
+    assert!(id_allowed("caf\u{e9} \u{4e2d}"));
+    let body = [
+        row_json(1, "good", 1, "h", "u"),
+        row_json(SECOND_ROW, "bad\u{7}id", 1, "h", "u"),
+        row_json(THIRD_ROW, "rtl\u{202e}id", 1, "h", "u"),
+        row_json(FOURTH_ROW, "also-good", 1, "h", "u"),
+    ]
+    .join("\n");
+    let found = complete(body)?;
+    assert_eq!(identities(&found), [identity(1, "good"), identity(FOURTH_ROW, "also-good")]);
+    assert_eq!(found.refused, REFUSED);
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_id_is_the_hash_alone_and_a_long_id_is_cut_with_its_length_kept() -> TestResult {
+    assert_eq!(retro_identity("", &hash_of(1)), hash_of(1));
+    let mut long = row_value(SECOND_ROW, &"x".repeat(ID_KEEP), 1, "h", "u");
+    long.as_object_mut()
+        .ok_or("object")?
+        .insert("ret_id_chars".to_owned(), serde_json::json!(MEGABYTE));
+    let found = complete(format!("{}\n{long}\n", row_json(1, "", 1, "h", "u")))?;
+    let first = found.events.first().ok_or("none")?;
+    let second = found.events.get(1).ok_or("one")?;
+    assert_eq!(first.identity, hash_of(1));
+    assert_eq!(second.identity, format!("{}:{}", "x".repeat(ID_CUT), hash_of(SECOND_ROW)));
+    assert_eq!((first.id_chars, second.id_chars), (0, MEGABYTE as u32));
+    Ok(())
+}
+
+
+#[test]
+fn a_forged_duplicate_id_gets_another_identity_because_the_hash_differs() -> TestResult {
+    let found = complete([row_json(1, "victim-id", 1, "h", "u"), row_json(SECOND_ROW, "victim-id", 1, "h", "u")].join("\n"))?;
+    let both = identities(&found);
+    assert_eq!(both.len(), REFUSED);
+    assert_ne!(both.first(), both.get(1));
+    Ok(())
+}
+
+
+#[test]
+fn a_row_out_of_form_is_a_malformed_reply_and_an_invalid_id_is_refused_alone() -> TestResult {
+    let row = |ms: &str, hash: &str, valid: u8| EventRow {
+        ret_ms: ms.to_owned(),
+        ret_hash: hash.to_owned(),
+        ret_id: "e".to_owned(),
+        ret_id_chars: 1,
+        ret_id_valid: valid,
+        ret_host: String::new(),
+        ret_host_chars: 0,
+        ret_user: String::new(),
+        ret_user_chars: 0,
+    };
+    let good = hash_of(1);
+    assert!(matches!(event_of(row("x", &good, 1)), Err(RetroError::MalformedReply)));
+    assert!(matches!(event_of(row("1", "short", 1)), Err(RetroError::MalformedReply)));
+    assert!(matches!(event_of(row("1", &good.replace('0', "G"), 1)), Err(RetroError::MalformedReply)));
+    assert!(matches!(event_of(row("1", &good, BAD_FLAG)), Err(RetroError::MalformedReply)));
+    assert!(matches!(event_of(row("1", &good, 0)), Ok(None)));
+    assert!(matches!(
+        event_of(row("1", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", 1)),
+        Ok(Some(_))
+    ));
+    assert!(matches!(event_of(row("1", &good, 1)), Ok(Some(_))));
+    let clamped = event_of(row(&i64::MAX.to_string(), &good, 1))?.ok_or("none")?;
+    assert_eq!(clamped.event_time, "9999-12-31T23:59:59.999Z");
+    Ok(())
+}
+
+
+#[test]
+fn entities_are_cut_to_the_store_limit_and_a_bad_one_is_none() -> TestResult {
+    assert_eq!(entity_of("host-1").as_deref(), Some("host-1"));
+    assert_eq!(entity_of(""), None);
+    assert_eq!(entity_of("a\u{202e}b"), None);
+    let cut = entity_of(&"h".repeat(ENTITY_LIMIT + 1)).ok_or("none")?;
+    assert_eq!(cut.chars().count(), ENTITY_LIMIT);
+    let found = complete(format!("{}\n", row_json(1, "e", 1, "", "ok-user")))?;
+    let event = found.events.first().ok_or("none")?;
+    assert_eq!((event.host_name.as_deref(), event.user_name.as_deref()), (None, Some("ok-user")));
+    Ok(())
+}
+
+
+#[test]
+fn the_hash_input_is_length_prefixed_and_pinned_by_a_known_row() -> TestResult {
+    assert_eq!(hash_part("a.b", HashKind::Text), "concat(toString(length(`a.b`)), ':', `a.b`)");
+    assert_eq!(hash_part("n", HashKind::Number), "concat(toString(`n`), ';')");
+    assert!(hash_part("arr", HashKind::TextArray).starts_with("concat(toString(length(`arr`)), '[', arrayStringConcat(arrayMap("));
+    let expression = hash_expression();
+    assert!(expression.starts_with("lower(hex(SHA256(concat(concat(toString(toUnixTimestamp64Milli(`@timestamp`)), ';'), "));
+    let names: std::collections::BTreeSet<&str> = HASH_COLUMNS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(HASH_COLUMNS.len(), names.len());
+    let known = |id: &str, message: &str| -> String {
+        let text = |value: &str| format!("{}:{value}", value.len());
+        let parts: Vec<String> = HASH_COLUMNS
+            .iter()
+            .map(|(name, kind)| match (*name, kind) {
+                ("event.id", _) => text(id),
+                ("message", _) => text(message),
+                ("event.category", _) => format!("1[{}]", text("authentication")),
+                ("event.type", _) => format!("1[{}]", text("denied")),
+                ("host.os.type", _) => text("windows"),
+                ("event.provider", _) => text("Microsoft-Windows-Security-Auditing"),
+                ("event.code", _) => text("4625"),
+                ("user.name", _) => text("root-admin"),
+                (_, HashKind::Text) => text(""),
+                (_, HashKind::Number) => "0;".to_owned(),
+                (_, HashKind::TextArray) => "0[]".to_owned(),
+            })
+            .collect();
+        format!("{:x}", Sha256::digest(format!("{KNOWN_MS};{}", parts.concat()).as_bytes()))
+    };
+    assert_eq!(known("e-1", "logon failed"), KNOWN_HASH);
+    assert_ne!(known("e-1", "logon failed"), known("e-1", "logon faile"));
+    assert_ne!(known("e-1", "x"), known("e-", "1:x"));
+    Ok(())
+}
+
+
+#[test]
+fn the_row_bound_fits_the_byte_cap_for_the_largest_row_count() -> TestResult {
+    assert!((MAX_RETRO_ROWS as u64) * MAX_ROW_BYTES < MAX_RETRO_BYTES);
+    let worst = row_json(
+        1,
+        &"\u{1}".repeat(ID_KEEP),
+        1,
+        &"\u{1}".repeat(ENTITY_LIMIT + 1),
+        &"\u{1}".repeat(ENTITY_LIMIT + 1),
+    );
+    assert!((worst.len() as u64) < MAX_ROW_BYTES);
+    assert!(retro_projection().contains("ret_user_chars"));
     Ok(())
 }
 
@@ -592,9 +823,9 @@ fn a_line_that_does_not_parse_is_a_run_error() -> TestResult {
         assert!(matches!(outcome, Err(RetroError::MalformedReply)), "{text}");
     }
     let found = absorb(RetroIds::default(), Err(io::Error::from(io::ErrorKind::InvalidData)), ROWS);
-    assert!(matches!(found, Err(RetroError::Body(io::ErrorKind::InvalidData))));
+    assert!(matches!(found, Err(RetroError::MalformedReply)));
     let invalid = read_ids(with_body(Box::new(Cursor::new(BAD_UTF8.to_vec()))), ROWS);
-    assert!(matches!(invalid, Err(RetroError::Body(io::ErrorKind::InvalidData))));
+    assert!(matches!(invalid, Err(RetroError::MalformedReply)));
     Ok(())
 }
 
@@ -707,13 +938,13 @@ fn the_real_sender_posts_the_statement_with_the_credentials_and_params() -> Test
     };
     let outcome = run_retro(&found, &mapping()?, &query(), &|| Duration::ZERO)?;
     let seen = server.handle.join().map_err(|_| "server thread panicked")??;
-    assert!(matches!(outcome, RetroOutcome::Complete(ids) if ids.ids == vec!["e1"]));
+    assert!(matches!(outcome, RetroOutcome::Complete(ids) if identities(&ids) == [identity(1, "e1")]));
     let read = seen.get(1).ok_or("no read")?;
     assert!(read.starts_with("POST /?readonly=2&http_write_exception_in_output_format=0&database=ostyr&param_tenant=tenant-a&"));
     assert!(read.contains(&format!("param_start={START_EPOCH}&param_end={END_EPOCH}&param_limit=4 HTTP/1.1")));
     assert!(read.to_lowercase().contains(&format!("x-clickhouse-key: {PASSWORD}").to_lowercase()));
     assert!(read.to_lowercase().contains("x-clickhouse-user: retro_reader"));
-    assert!(read.contains("SELECT `event.id` FROM `events` WHERE "));
+    assert!(read.contains("AS `ret_hash`"));
     assert!(!read.contains("tenant-a'"));
     Ok(())
 }
@@ -741,14 +972,15 @@ fn the_real_sender_maps_the_exception_header_and_a_refused_connection() -> TestR
         params: Vec::new(),
         remaining: Duration::from_secs(1),
     };
-    let held = TcpListener::bind("127.0.0.1:0")?;
+    let held = TcpSocket::new_v4()?;
+    held.bind("127.0.0.1:0".parse()?)?;
     let dead = RetroSettings {
         url: format!("http://127.0.0.1:{}", held.local_addr()?.port()),
         ..base
     };
-    drop(held);
     let agent = siem_ingest::clickhouse::new_agent(None, false)?;
     assert!(send_request(&agent, &dead, PASSWORD, &request).is_err());
+    drop(held);
     Ok(())
 }
 

@@ -113,6 +113,8 @@ pub enum RetroError {
     TooManyRows(usize),
     #[error("malformed_reply")]
     MalformedReply,
+    #[error("the event time cannot be written")]
+    EventTime(#[from] SinkError),
     #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
     ReaderProfileChanged(usize),
 }
