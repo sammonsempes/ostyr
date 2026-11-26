@@ -1,5 +1,8 @@
 //! Playbook parsing, validation and simulation (spec section 10); nothing here executes an action.
 
+pub mod api;
+pub mod api_model;
+pub mod backend;
 pub mod batch;
 pub mod bundle;
 pub mod catalogue;
@@ -12,6 +15,7 @@ pub mod params;
 pub mod render;
 pub mod run;
 pub mod runs;
+pub mod runs_read;
 pub mod serve;
 pub mod service;
 pub mod simulate;

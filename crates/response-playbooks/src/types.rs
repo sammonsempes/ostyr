@@ -44,3 +44,15 @@ pub type ControlFuture<'a> = Pin<Box<dyn Future<Output = Result<(), core_pg::err
 
 /// Crosses one transaction boundary on the round's connection.
 pub type ControlFn<'a> = &'a (dyn Fn(core_pg::transaction::Boundary) -> ControlFuture<'a> + Sync);
+
+
+pub type ReadFuture<Reply> = Pin<Box<dyn Future<Output = Result<Reply, crate::error::ReadError>> + Send>>;
+
+
+/// Reads one page of run metadata for a tenant.
+pub type RunListFn =
+    std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, crate::api_model::RunPage) -> ReadFuture<crate::api_model::RunList> + Send + Sync>;
+
+
+/// Reads one run of a tenant by id.
+pub type RunGetFn = std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, String) -> ReadFuture<Option<crate::api_model::RunDetail>> + Send + Sync>;

@@ -41,6 +41,9 @@ pub const PERMISSION_ATTACK_PATHS_READ: &str = "attack_paths.read";
 pub const PERMISSION_GRC_READ: &str = "grc.read";
 
 
+pub const PERMISSION_PLAYBOOKS_READ: &str = "playbooks.read";
+
+
 pub const PERMISSION_ONCALL_READ: &str = "oncall.read";
 
 
@@ -106,6 +109,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CMDB_READ,
         PERMISSION_ATTACK_PATHS_READ,
         PERMISSION_GRC_READ,
+        PERMISSION_PLAYBOOKS_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_ONCALL_ACKNOWLEDGE,
     ];
@@ -130,6 +134,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CMDB_READ,
         PERMISSION_ATTACK_PATHS_READ,
         PERMISSION_GRC_READ,
+        PERMISSION_PLAYBOOKS_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
@@ -145,6 +150,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CMDB_READ,
         PERMISSION_ATTACK_PATHS_READ,
         PERMISSION_GRC_READ,
+        PERMISSION_PLAYBOOKS_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_AUDIT_READ,
     ];
