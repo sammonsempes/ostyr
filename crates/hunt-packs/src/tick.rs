@@ -3,7 +3,7 @@ use crate::model::{HuntPack, Source};
 use crate::run::HuntOutcome;
 use crate::schedule::{RunWindow, ScheduleError};
 use crate::stat_model::finding_of;
-use crate::store::{is_permanent, last_done, record_done, record_finding, Param, StateError};
+use crate::store::{is_permanent, last_done, record_done, record_finding, refusal_reason, Param, StateError};
 use crate::types::{DueFn, RunFn};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -173,9 +173,10 @@ fn finding_failure(tenant: &str, pack_id: &str, error: &StateError) -> PackStatu
 }
 
 
-fn finding_refusal(tenant: &str, pack_id: &str) {
-    let id = shown_id(pack_id);
-    warn!("hunt finding refused for good, window recorded without it: tenant {tenant} pack {id}");
+fn finding_refusal(tenant: &str, finding_id: &str, error: &StateError) {
+    let id = shown_id(finding_id);
+    let reason = refusal_reason(error);
+    warn!("hunt finding refused for good, window recorded without it: tenant {tenant} finding {id}: {reason}");
 }
 
 
@@ -203,7 +204,7 @@ where
         match record_finding(exec, tenant, &finding_id, window, matches, baseline).await {
             Ok(_) => false,
             Err(error) if is_permanent(&error) => {
-                finding_refusal(tenant, &pack.id);
+                finding_refusal(tenant, &finding_id, &error);
                 true
             }
             Err(error) => Err(finding_failure(tenant, &pack.id, &error))?,
@@ -338,7 +339,7 @@ where
     }
     let (packs_seen, deferred, skipped) = (report.packs.len(), report.deferred, report.skipped_osquery);
     let runs: usize = report.packs.iter().map(|entry| entry.runs.len()).sum();
-    let failed = report.findings_failed;
-    info!("hunt tick: {packs_seen} packs, {runs} runs, {deferred} deferred, {skipped} osquery skipped, {failed} finding stores failed");
+    let (failed, refused_findings) = (report.findings_failed, report.findings_refused);
+    info!("hunt tick: {packs_seen} packs, {runs} runs, {deferred} deferred, {skipped} osquery skipped, {failed} store failed, {refused_findings} refused");
     Ok(report)
 }

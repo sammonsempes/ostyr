@@ -667,3 +667,28 @@ async fn statistical_hunts_are_scheduled_beside_the_packs_and_a_clash_is_dropped
     assert_eq!((report.refused_stat_hunts, report.ticks), (1, 1));
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_finding_refused_for_good_is_counted_in_the_service_report() -> TestResult {
+    let rig = rig()?;
+    let mut settings = (*current_config(&rig.engine)).clone();
+    settings.tenants = vec!["a".to_owned()];
+    let store: Store = RefCell::new(HashMap::new());
+    let mut exec = exec_over(&store);
+    let mut runner = |_pack: &HuntPack, _tenant: &str, _end: i64| -> Result<HuntOutcome, RunError> {
+        Ok(HuntOutcome {
+            matches: u64::MAX,
+            finding: true,
+            bound: None,
+        })
+    };
+    let mut hooks = Hooks {
+        run: &mut runner,
+        due: due_runs,
+    };
+    let mut report = ServiceReport::default();
+    tick_round(&settings, START, &mut exec, &mut hooks, &mut report).await;
+    assert_eq!((report.findings_refused, report.ticks), (1, 1));
+    Ok(())
+}

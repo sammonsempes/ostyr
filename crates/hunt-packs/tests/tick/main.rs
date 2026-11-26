@@ -6,7 +6,7 @@ use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::{due_runs, RunWindow, ScheduleError};
-use hunt_packs::store::{last_done, record_done, Param, FINDING_CONFLICT, FINDING_INSERTED, FINDING_SQL, GET_SQL, SET_SQL};
+use hunt_packs::store::{last_done, record_done, Param, FINDING_CONFLICT, FINDING_INSERTED, FINDING_REPLAY, FINDING_SQL, GET_SQL, SET_SQL};
 use hunt_packs::tick::{
     check_limits, tick, Hooks, PackStatus, RunRecord, TickError, TickLimits, DEFAULT_MAX_RUNS_PER_TICK, MAX_CLOCK_SKEW, MAX_RUNS_PER_TICK_CEILING,
     MAX_TENANTS_CEILING,
@@ -145,7 +145,7 @@ fn answer(store: &Store, scope: &TenantScope, sql: &'static str, params: &[Param
             let held = *map.entry(key).or_insert(*matches);
             Ok(match (fresh, held == *matches) {
                 (true, _) => vec![FINDING_INSERTED],
-                (false, true) => Vec::new(),
+                (false, true) => vec![FINDING_REPLAY],
                 (false, false) => vec![FINDING_CONFLICT],
             })
         }
@@ -773,7 +773,16 @@ async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it(
     let text = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
     let refusals = text.lines().filter(|line| line.contains("hunt finding refused for good")).count();
     assert_eq!(refusals, 1);
-    assert!(text.contains("tenant a pack p"));
+    assert!(text.contains("tenant a finding p: count out of range"), "{text}");
+    let summaries: Vec<&str> = text.lines().filter(|line| line.contains("hunt tick:")).collect();
+    assert!(
+        summaries.first().is_some_and(|line| line.contains("0 store failed, 1 refused")),
+        "{summaries:?}"
+    );
+    assert!(
+        summaries.get(1).is_some_and(|line| line.contains("0 store failed, 0 refused")),
+        "{summaries:?}"
+    );
     Ok(())
 }
 
@@ -836,5 +845,45 @@ async fn a_finding_that_collides_with_another_hunts_is_refused_counted_and_named
     );
     assert_eq!(stored(&store, "a", &format!("rarity.x.bound@{H4}")), Some(BOUND_MATCHES as i64));
     assert_eq!(stored(&store, "a", "rarity.x.bound"), Some(H4));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_conflict_refusal_line_names_the_finding_id_not_the_scheduler_id() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&captured);
+    let dispatch = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Sink(Arc::clone(&writer)))
+            .finish(),
+    );
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let (store, calls, _log) = fresh();
+    store.borrow_mut().insert(("a".to_owned(), format!("rarity.x.bound@{H4}")), 1);
+    let mut exec = fake(&store, &calls);
+    let mut run = |pack: &HuntPack, _tenant: &str, _end: i64| -> Result<HuntOutcome, RunError> {
+        Ok(HuntOutcome {
+            matches: if pack.id == "rarity.x" { BOUND_MATCHES } else { 1 },
+            finding: true,
+            bound: (pack.id == "rarity.x").then_some(BOUND_MATCHES - 1),
+        })
+    };
+    let packs = [pack("rarity.x", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(report.findings_refused, 1);
+    let text = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert!(text.contains("finding rarity.x.bound: conflict"), "{text}");
+    assert!(!text.contains("finding rarity.x: conflict"), "{text}");
     Ok(())
 }
