@@ -1,7 +1,7 @@
 use crate::config::{FeedConfig, FeedFormat, Mapping};
 use crate::entry::build_ioc;
 use crate::error::{reason_key, EntryError, FeedError};
-use crate::limits::{MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS};
+use crate::limits::{MAX_DOCUMENT_BYTES, MAX_FEED_IOCS, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS};
 use crate::lines::numbered_lines;
 use crate::misp::parse_misp;
 use crate::model::{Collector, FeedSummary, Ioc, RawEntry, SkipSample};
@@ -137,6 +137,20 @@ pub fn record(collector: &mut Collector, line: u64, outcome: Result<Vec<Ioc>, En
 }
 
 
+/// `record` after the count: an outcome that would take the feed over `MAX_FEED_IOCS` fails the feed before its IOCs are kept.
+pub fn record_bounded(collector: &mut Collector, line: u64, outcome: Result<Vec<Ioc>, EntryError>) -> Result<(), FeedError> {
+    let over = outcome
+        .as_ref()
+        .is_ok_and(|iocs| collector.iocs.len().saturating_add(iocs.len()) > MAX_FEED_IOCS);
+    if over {
+        Err(FeedError::TooManyIocs)
+    } else {
+        record(collector, line, outcome);
+        Ok(())
+    }
+}
+
+
 pub fn ignorable(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.is_empty() || trimmed.starts_with(COMMENT_PREFIX)
@@ -159,10 +173,9 @@ pub fn line_outcome(feed: &FeedConfig, now: OffsetDateTime, handler: &mut LineHa
 pub fn parse_lines(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime, handler: &mut LineHandler) -> Result<Collector, FeedError> {
     let mut collector = new_collector(feed);
     numbered_lines(reader).try_for_each(|line| {
-        line.map(|numbered| {
-            let outcome = numbered.text.and_then(|text| line_outcome(feed, now, handler, &text));
-            record(&mut collector, numbered.number, outcome);
-        })
+        let numbered = line?;
+        let outcome = numbered.text.and_then(|text| line_outcome(feed, now, handler, &text));
+        record_bounded(&mut collector, numbered.number, outcome)
     })?;
     Ok(collector)
 }
@@ -250,15 +263,14 @@ pub fn read_document(reader: &mut dyn BufRead) -> Result<Value, FeedError> {
 
 
 /// Items are numbered from 1 in the skip reports; an item over `MAX_OBJECT_BYTES` is skipped unread.
-pub fn parse_items(feed: &FeedConfig, items: &[Value], handler: &ItemHandler) -> Collector {
-    items.iter().zip(1..).fold(new_collector(feed), |mut collector, (item, number)| {
+pub fn parse_items(feed: &FeedConfig, items: &[Value], handler: &ItemHandler) -> Result<Collector, FeedError> {
+    items.iter().zip(1..).try_fold(new_collector(feed), |mut collector, (item, number)| {
         let outcome = if item.to_string().len() > MAX_OBJECT_BYTES {
             Err(EntryError::ObjectTooLarge)
         } else {
             handler(item)
         };
-        record(&mut collector, number, outcome);
-        collector
+        record_bounded(&mut collector, number, outcome).map(|()| collector)
     })
 }
 
@@ -304,14 +316,14 @@ pub fn indicator_iocs(feed: &FeedConfig, now: OffsetDateTime, object: &Value) ->
 pub fn parse_json_list(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime) -> Result<Collector, FeedError> {
     let document = read_document(reader)?;
     let items = document.as_array().ok_or(FeedError::NotAnArray)?;
-    Ok(parse_items(feed, items, &|item| json_item(feed, now, item)))
+    parse_items(feed, items, &|item| json_item(feed, now, item))
 }
 
 
 pub fn parse_stix(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime) -> Result<Collector, FeedError> {
     let bundle = read_document(reader)?;
     let objects = bundle.get("objects").and_then(Value::as_array).ok_or(FeedError::NotABundle)?;
-    Ok(parse_items(feed, objects, &|object| indicator_iocs(feed, now, object)))
+    parse_items(feed, objects, &|object| indicator_iocs(feed, now, object))
 }
 
 

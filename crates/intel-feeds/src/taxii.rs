@@ -1,5 +1,6 @@
 use crate::config::{validate_taxii, FeedConfig, TaxiiConfig};
 use crate::error::{EntryError, TaxiiError};
+use crate::files::read_trusted;
 use crate::formats::{indicator_iocs, new_collector, record};
 use crate::limits::{
     CURSOR_SKEW_SECONDS, MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_TAXII_HEADER_BYTES, MAX_TAXII_IOCS, MAX_TAXII_NEXT_BYTES,
@@ -8,7 +9,7 @@ use crate::limits::{
 use crate::model::{Collector, FeedSummary, Ioc};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use core_pg::password::{read_limited, read_password};
+use core_pg::password::read_password;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -420,7 +421,7 @@ pub fn taxii_agent(config: &TaxiiConfig) -> Result<Agent, TaxiiError> {
     let pem = config
         .ca_file
         .as_deref()
-        .map(|path| read_limited(path, MAX_CA_BYTES).map_err(TaxiiError::CaFile))
+        .map(|path| read_trusted(path, MAX_CA_BYTES).map_err(TaxiiError::CaFile))
         .transpose()?;
     new_agent(pem.as_deref().map(Vec::as_slice), !is_loopback_http(&config.api_root)).map_err(TaxiiError::Agent)
 }

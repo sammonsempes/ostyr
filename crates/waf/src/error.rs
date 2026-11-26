@@ -38,6 +38,12 @@ pub enum DeliverError {
     ProgramChanged { step: &'static str },
     #[error("the rendered file name is taken by something that is not a regular file")]
     BadTarget,
+    #[error("the audit sink cannot be inspected")]
+    AuditSink(#[source] std::io::Error),
+    #[error("the audit file has more than one link")]
+    AuditSinkLinked,
+    #[error("the audit file is a file this delivery creates or replaces")]
+    AuditSinkClash,
     #[error("cannot write the rendered file")]
     Write(#[source] std::io::Error),
     #[error("cannot publish the rendered file after caddy loaded it, the running configuration may differ")]
@@ -85,4 +91,28 @@ impl From<rustix::io::Errno> for DeliverError {
     fn from(errno: rustix::io::Errno) -> Self {
         Self::Write(errno.into())
     }
+}
+
+
+/// Why `ostyr-waf` stopped; every text is fixed.
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("usage: ostyr-waf <settings.yaml>")]
+    Usage,
+    #[error("cannot install the log subscriber")]
+    Logging(#[from] tracing::subscriber::SetGlobalDefaultError),
+    #[error("the settings file was refused")]
+    Settings(#[from] core_config::error::ConfigError),
+    #[error("the settings file names no audit_file")]
+    NoAuditFile,
+    #[error("audit_file changed between two reads of the settings file")]
+    AuditPathChanged,
+    #[error("audit_file names the settings file, the routes file or the published caddy.json")]
+    AuditPathClash,
+    #[error("the start was refused")]
+    Open(#[from] OpenError),
+    #[error("cannot watch the settings and routes files")]
+    Watch(#[from] core_config::error::WatchError),
+    #[error("cannot wait for signals")]
+    Signal(#[from] std::io::Error),
 }

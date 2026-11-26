@@ -119,6 +119,7 @@ fn evaluate(record: &OsvRecord, package: &Package, family: Family, installed: &P
 fn finding(record: &OsvRecord, package: &Package, fixed: Option<String>) -> Finding {
     let cve_aliases: BTreeSet<String> = std::iter::once(&record.id)
         .chain(&record.aliases)
+        .chain(&record.upstream)
         .filter(|name| name.starts_with(CVE_PREFIX))
         .cloned()
         .collect();
@@ -128,6 +129,7 @@ fn finding(record: &OsvRecord, package: &Package, fixed: Option<String>) -> Find
         ecosystem: package.ecosystem.clone(),
         record_id: record.id.clone(),
         cve_aliases: cve_aliases.into_iter().collect(),
+        aliases_omitted: 0,
         fixed_version: fixed,
     }
 }

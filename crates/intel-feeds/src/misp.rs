@@ -238,7 +238,7 @@ pub fn parse_misp(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTi
     let attributes = event_attributes(event)?;
     let reading = tags_tlp(event.get("Tag"));
     let unknown = Cell::new(0);
-    let mut collector = parse_items(feed, &attributes, &|attribute| misp_item(feed, now, reading, &unknown, attribute));
+    let mut collector = parse_items(feed, &attributes, &|attribute| misp_item(feed, now, reading, &unknown, attribute))?;
     collector.summary.unknown_tlp = unknown.get();
     Ok(collector)
 }

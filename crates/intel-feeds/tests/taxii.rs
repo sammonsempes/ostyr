@@ -830,7 +830,7 @@ fn a_missing_password_file_is_refused_before_any_request() -> TestResult {
     fs::write(dir.path().join("ca.pem"), &standin.ca_pem)?;
     let error = poll_feed(&feed_in(dir.path(), standin.port), None, NOW, &idle).err().ok_or("no error")?;
     assert!(matches!(error, TaxiiError::Password(_)));
-    assert_eq!(error.to_string(), "the TAXII password file could not be used");
+    assert_eq!(error.to_string(), "the TAXII password file could not be used: unreadable");
     assert!(requests(&standin).is_empty());
     Ok(())
 }

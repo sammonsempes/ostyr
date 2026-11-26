@@ -12,6 +12,7 @@ core-api = { version = "0.0.0", path = "../core-api" }
 core-auth = { version = "0.0.0", path = "../core-auth" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-audit = { version = "0.0.0", path = "../core-audit" }
 debversion = { version = "0.5", default-features = false }
 rpm-version = "0.5"
 semver = "1"
@@ -21,21 +22,23 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["serde-human-readable", "formatting"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "signal"] }
 tracing = "0.1"
+tracing-subscriber = "0.3"
 utoipa = { version = "5", features = ["axum_extras"] }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-signal-hook = "0.4.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "test-util", "io-util"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-log = "0.2"
-tracing-subscriber = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
+socket2 = "0.6"
 time = { version = "0.3", features = ["macros"] }
 
 [lints]

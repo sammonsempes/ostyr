@@ -22,3 +22,27 @@ pub type ListFn = Arc<dyn Fn(TenantScope, Option<Vec<String>>, usize) -> ReadFut
 
 
 pub type AssetFn = Arc<dyn Fn(TenantScope, String) -> ReadFuture + Send + Sync>;
+
+
+/// Resolves when the process is told to stop; production waits for `SIGTERM` or `SIGINT`.
+pub type InterruptWait = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+
+/// The sleep between two rounds.
+pub type WaitFn<'a> = dyn Fn(std::time::Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + 'a;
+
+
+/// The wall clock in microseconds since the Unix epoch, one reading per round.
+pub type NowFn<'a> = dyn Fn() -> u64 + 'a;
+
+
+/// The one start read of the settings file; production passes `load_settings`.
+pub type StartRead = fn(&std::path::Path) -> Result<crate::service::ServiceSettings, core_config::error::ConfigError>;
+
+
+/// Ecosystem, package and record id: the key of a stored finding within one asset.
+pub type FindingKey = (String, String, String);
+
+
+/// What the signal thread runs for each received signal.
+pub type SignalHandler = Box<dyn Fn(std::os::raw::c_int) + Send>;
