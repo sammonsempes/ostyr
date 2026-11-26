@@ -56,6 +56,8 @@ pub struct OsvRecord {
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
+    pub upstream: Vec<String>,
+    #[serde(default)]
     pub affected: Vec<Affected>,
 }
 
@@ -75,6 +77,7 @@ pub struct Finding {
     pub ecosystem: String,
     pub record_id: String,
     pub cve_aliases: Vec<String>,
+    pub aliases_omitted: u64,
     pub fixed_version: Option<String>,
 }
 
