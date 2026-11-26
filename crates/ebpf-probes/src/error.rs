@@ -3,7 +3,7 @@
 
 use crate::btf::Unsupported;
 use crate::object::ObjectError;
-use crate::shape::ShapeError;
+use crate::shape::{ProbeSpec, RecordKind, ShapeError};
 use aya::maps::MapError;
 use aya::EbpfError;
 use std::fmt;
@@ -17,8 +17,8 @@ pub enum LoadError {
     Btf(Unsupported),
     Parse,
     MapCreate { errno: Option<i32> },
-    ProgramLoad { errno: Option<i32> },
-    Attach { errno: Option<i32> },
+    ProgramLoad { probe: &'static str, errno: Option<i32> },
+    Attach { probe: &'static str, errno: Option<i32> },
     MissingProgram(&'static str),
     WrongProgramType(&'static str),
     TakeMap(&'static str),
@@ -34,8 +34,8 @@ impl fmt::Display for LoadError {
             LoadError::Btf(error) => write!(formatter, "kernel BTF refused: {error}"),
             LoadError::Parse => write!(formatter, "exec object cannot be loaded"),
             LoadError::MapCreate { errno } => write!(formatter, "exec map cannot be created (errno {errno:?})"),
-            LoadError::ProgramLoad { errno } => write!(formatter, "exec program cannot be loaded (errno {errno:?})"),
-            LoadError::Attach { errno } => write!(formatter, "exec program cannot be attached (errno {errno:?})"),
+            LoadError::ProgramLoad { probe, errno } => write!(formatter, "{probe} program cannot be loaded (errno {errno:?})"),
+            LoadError::Attach { probe, errno } => write!(formatter, "{probe} program cannot be attached (errno {errno:?})"),
             LoadError::MissingProgram(name) => write!(formatter, "program {name} is missing"),
             LoadError::WrongProgramType(name) => write!(formatter, "program {name} has the wrong attach type"),
             LoadError::TakeMap(name) => write!(formatter, "map {name} is missing or has the wrong type"),
@@ -94,21 +94,79 @@ pub fn map_error(error: &MapError) -> LoadError {
 pub fn ebpf_error(error: &EbpfError) -> LoadError {
     match error {
         EbpfError::MapError(inner) => map_error(inner),
-        EbpfError::ProgramError(inner) => LoadError::ProgramLoad { errno: errno_of(inner) },
+        EbpfError::ProgramError(inner) => LoadError::ProgramLoad {
+            probe: OBJECT_PROBE,
+            errno: errno_of(inner),
+        },
         _ => LoadError::Parse,
     }
 }
 
 
-/// A program load failure keeps its errno.
-pub fn program_load_error(error: &(dyn std::error::Error + 'static)) -> LoadError {
-    LoadError::ProgramLoad { errno: errno_of(error) }
+/// A program load failure names the probe and keeps its errno.
+pub fn program_load_error(probe: &'static str, error: &(dyn std::error::Error + 'static)) -> LoadError {
+    LoadError::ProgramLoad {
+        probe,
+        errno: errno_of(error),
+    }
 }
 
 
-/// An attach failure keeps its errno.
-pub fn attach_error(error: &(dyn std::error::Error + 'static)) -> LoadError {
-    LoadError::Attach { errno: errno_of(error) }
+/// An attach failure names the probe and keeps its errno.
+pub fn attach_error(probe: &'static str, error: &(dyn std::error::Error + 'static)) -> LoadError {
+    LoadError::Attach {
+        probe,
+        errno: errno_of(error),
+    }
+}
+
+
+/// The probe name of an error raised by the object as a whole, before any one probe is loaded.
+pub const OBJECT_PROBE: &str = "object";
+
+
+/// An optional probe that could not be loaded or attached: exec keeps running, the caller logs this at error level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileProbeUnavailable {
+    pub probe: &'static str,
+    pub reason: LoadError,
+}
+
+
+impl fmt::Display for FileProbeUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "probe {} is unavailable: {}", self.probe, self.reason)
+    }
+}
+
+
+/// One step of one probe: it worked, or it was optional and failed.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Settled<State> {
+    Ready(State),
+    Unavailable(FileProbeUnavailable),
+}
+
+
+/// A required probe (the exec probe) keeps its failure as the whole failure; any other probe turns it into a named `FileProbeUnavailable`.
+pub fn settle_probe<State>(spec: &ProbeSpec, result: Result<State, LoadError>) -> Result<Settled<State>, LoadError> {
+    match result {
+        Ok(state) => Ok(Settled::Ready(state)),
+        Err(reason) if spec.kind == RecordKind::Exec => Err(reason),
+        Err(reason) => Ok(Settled::Unavailable(FileProbeUnavailable { probe: spec.name, reason })),
+    }
+}
+
+
+/// Splits settled steps into the ready states and the unavailable probes, each in order.
+pub fn split_settled<State>(settled: Vec<Settled<State>>) -> (Vec<State>, Vec<FileProbeUnavailable>) {
+    settled.into_iter().fold((Vec::new(), Vec::new()), |(mut ready, mut lost), step| {
+        match step {
+            Settled::Ready(state) => ready.push(state),
+            Settled::Unavailable(unavailable) => lost.push(unavailable),
+        }
+        (ready, lost)
+    })
 }
 
 
