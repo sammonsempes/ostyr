@@ -19,7 +19,7 @@ use std::time::Duration;
 pub const MIGRATION_NAMESPACE: &str = "vuln";
 
 
-pub const MIGRATIONS: [Migration; 6] = [
+pub const MIGRATIONS: [Migration; 7] = [
     Migration {
         version: "vuln_0001",
         sql: include_str!("../migrations/vuln_0001.sql"),
@@ -43,6 +43,10 @@ pub const MIGRATIONS: [Migration; 6] = [
     Migration {
         version: "vuln_0006",
         sql: include_str!("../migrations/vuln_0006.sql"),
+    },
+    Migration {
+        version: "vuln_0007",
+        sql: include_str!("../migrations/vuln_0007.sql"),
     },
 ];
 
@@ -156,6 +160,7 @@ pub fn finding_doc(asset: &str, item: &AssetFinding) -> Option<Value> {
             "epss": scored.epss,
             "kev": scored.kev,
             "priority": priority_of(scored),
+            "aliases_omitted": finding.aliases_omitted,
         })
     })
 }

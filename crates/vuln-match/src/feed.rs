@@ -112,7 +112,7 @@ pub fn retained_items(record: &OsvRecord) -> u64 {
         .iter()
         .map(|entry| 1 + entry.versions.len() + entry.ranges.iter().map(|range| 1 + range.events.len()).sum::<usize>())
         .sum();
-    (record.aliases.len() + affected) as u64
+    (record.aliases.len() + record.upstream.len() + affected) as u64
 }
 
 

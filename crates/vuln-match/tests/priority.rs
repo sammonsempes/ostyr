@@ -62,6 +62,7 @@ fn scored(record: &str, aliases: &[&str], cvss: f64, epss: f64, kev: bool, criti
             ecosystem: "Debian".into(),
             record_id: record.into(),
             cve_aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+            aliases_omitted: 0,
             fixed_version: None,
         },
         cvss,

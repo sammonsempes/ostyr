@@ -64,6 +64,7 @@ pub fn finding(asset: &str, package: &str, record: &str, aliases: &[&str]) -> As
                 ecosystem: "Debian:12".to_owned(),
                 record_id: record.to_owned(),
                 cve_aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
+                aliases_omitted: 0,
                 fixed_version: Some("1.2".to_owned()),
             },
             cvss: CVSS,

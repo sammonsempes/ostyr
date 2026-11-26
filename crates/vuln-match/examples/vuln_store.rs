@@ -53,6 +53,7 @@ fn finding_of(asset: &str, package: &str, record: &str, spread: usize) -> AssetF
                 ecosystem: "Debian:12".to_owned(),
                 record_id: record.to_owned(),
                 cve_aliases: vec!["CVE-2024-1234".to_owned()],
+                aliases_omitted: 0,
                 fixed_version: Some("1.2".to_owned()),
             },
             cvss: BULK_CVSS - (spread % BULK_SPREAD) as f64 / BULK_SPREAD as f64,
