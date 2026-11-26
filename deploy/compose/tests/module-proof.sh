@@ -64,6 +64,7 @@ proof posture GET '/posture/accounts/{account}/findings' /posture/accounts/lab/f
 proof status POST /status/incidents /status/incidents "$RESPONDER"
 proof grc GET /grc/reports /grc/reports "$ANALYST"
 proof attack_paths GET /attack-paths/reports /attack-paths/reports "$ANALYST"
+proof playbooks GET /playbooks/runs /playbooks/runs "$ANALYST"
 pace 2
 printf 'analyst_on_audit_route %s\n' "$(http_code GET /remote-shell/sessions "$ANALYST")"
 printf 'analyst_on_status_write %s\n' "$(http_code POST /status/incidents "$ANALYST")"

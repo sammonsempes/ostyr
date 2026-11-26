@@ -3,7 +3,7 @@ version: 0.0.0
 tenant: default
 listen: 0.0.0.0:8443
 settings:
-  modules: alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths
+  modules: alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths, playbooks
   pg_settings: /etc/ostyr/pg.yaml
   risk.weights_file: /etc/ostyr/risk-weights.yaml
   status.page_file: /etc/ostyr/status-page.yaml
