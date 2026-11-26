@@ -18,8 +18,11 @@ pub mod retro;
 pub mod retro_alerts;
 pub mod retro_schedule;
 pub mod retro_state;
+pub mod round;
 pub mod run;
 pub mod sample;
+#[cfg(unix)]
+pub mod serve;
 pub mod stix;
 pub mod store;
 pub mod taxii;

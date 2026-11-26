@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: crates/intel-feeds/tests/retro-alerts-live.sh <lab-state-dir>
-# Live check of the retro alerts and schedule on a datastore-pair lab (LAB_PROFILE=datastore-pair lab/up.sh <task>): the musl release examples
-# intel_load, retro_run and retro_schedule run on the client VM against the datastore VM (ClickHouse events and IOCs, PostgreSQL alerts); psql and
+# Live check of the retro alerts and schedule on a datastore-pair lab (LAB_PROFILE=datastore-pair lab/up.sh <task>): the musl release binary and examples
+# ostyr-intel (one round per load), retro_run and retro_schedule run on the client VM against the datastore VM (ClickHouse events and IOCs, PostgreSQL alerts); psql and
 # curl read the real state back.
 set -euo pipefail
 
@@ -11,7 +11,9 @@ read -r _ client_user client_address < <(awk '$1 == "client"' "$lab_state/vms.tx
 [[ -n "$client_address" ]] || { echo "a client VM is required in $lab_state/vms.txt" >&2; exit 2; }
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 release="$here/target/x86_64-unknown-linux-musl/release/examples"
-for example in intel_load retro_run retro_schedule; do
+[[ -x "$here/target/x86_64-unknown-linux-musl/release/ostyr-intel" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p intel-feeds --bins" >&2; exit 2; }
+scp "${ssh_options[@]}" "$here/target/x86_64-unknown-linux-musl/release/ostyr-intel" "$client_user@$client_address:/tmp/ostyr-intel" >/dev/null
+for example in retro_run retro_schedule; do
     [[ -x "$release/$example" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p intel-feeds --examples" >&2; exit 2; }
     scp "${ssh_options[@]}" "$release/$example" "$client_user@$client_address:/tmp/$example" >/dev/null
 done
@@ -75,6 +77,26 @@ reader_file() {
     clickhouse_block retro_reader reader.pw tenant-a >>"$1"
 }
 
+load_iocs() {
+    local feeds=$1 iocs=$2 dir pid
+    dir="$(mktemp -d -p "$work")"
+    { grep '"tlp":"red"' "$iocs" || true; } | sed 's/.*"value":"\([^"]*\)".*/\1/' | sed '1i value' >"$dir/red.csv"
+    { grep '"tlp":"amber"' "$iocs" || true; } | sed 's/.*"value":"\([^"]*\)".*/\1/' | sed '1i value' >"$dir/amber.csv"
+    {
+        printf 'feeds:\n'
+        printf '  - name: lab-red\n    format: csv\n    path: red.csv\n    tlp: red\n    ttl_seconds: 4000000000\n    mapping:\n      value: value\n'
+        printf '  - name: lab-amber\n    format: csv\n    path: amber.csv\n    tlp: amber\n    ttl_seconds: 4000000000\n    mapping:\n      value: value\n'
+        awk '/^clickhouse:/{on=1;print;next} /^[a-z]/{on=0} on' "$feeds"
+    } >"$dir/feeds.yaml"
+    printf 'feeds_file: %s/feeds.yaml\naudit_file: %s/audit.jsonl\ninterval_seconds: 60\n' "$dir" "$dir" >"$dir/service.yaml"
+    timeout 300 /tmp/ostyr-intel "$dir/service.yaml" 2>"$dir/run.log" &
+    pid=$!
+    for _ in $(seq 1 120); do grep -q 'intel round' "$dir/run.log" && break; sleep 1; done
+    kill -TERM "$pid"
+    wait "$pid"
+    cat "$dir/run.log"
+}
+
 echo "--- setup: reader user, events, IOCs"
 ch "CREATE DATABASE IF NOT EXISTS ostyr" >/dev/null
 ch "CREATE USER IF NOT EXISTS retro_reader IDENTIFIED BY 'reader-password-lab'" >/dev/null
@@ -109,7 +131,7 @@ feeds_file full.yaml 499 60 360
 reader_file reader.yaml
 sql "DELETE FROM alert_outbox WHERE tenant = 'tenant-a'" >/dev/null 2>&1 || true
 sql "DELETE FROM alerts WHERE tenant = 'tenant-a'" >/dev/null 2>&1 || true
-/tmp/intel_load full.yaml iocs.jsonl
+load_iocs full.yaml iocs.jsonl
 sleep 3
 echo "dictionary status: $(ch "SELECT status FROM system.dictionaries WHERE name = 'ioc_trie'")"
 
@@ -200,7 +222,7 @@ echo "--- foreign dictionary: a second tenant in the shared table"
 printf 'feeds: []\n' >other-tenant.yaml
 { printf 'feeds:\n  - name: lab\n    format: crowdsec\n    path: unused.txt\nclickhouse:\n'; clickhouse_block "$CLICKHOUSE_USER" ch.pw tenant-b; } >other-tenant.yaml
 head -1 iocs.jsonl >iocs-b.jsonl
-/tmp/intel_load other-tenant.yaml iocs-b.jsonl
+load_iocs other-tenant.yaml iocs-b.jsonl
 if /tmp/retro_run reader.yaml ostyr events "$(date -u -d '-10 minutes' +%FT%TZ)" "$(date -u +%FT%TZ)" >foreign.out 2>foreign.err; then
     echo "FAIL foreign dictionary accepted"; failures=$((failures + 1))
 else
@@ -221,7 +243,7 @@ curl -sS -D - -o /dev/null --cacert /etc/ostyr-lab/ca.pem -u "$CLICKHOUSE_USER:$
 
 echo "--- a reload that changes the tenant saves under the new tenant (the table then holds tenant-b only)"
 ch "ALTER TABLE ostyr.iocs DELETE WHERE 1 SETTINGS mutations_sync = 2" >/dev/null
-/tmp/intel_load other-tenant.yaml iocs-b.jsonl
+load_iocs other-tenant.yaml iocs-b.jsonl
 sleep 3
 cp full.yaml tenant-reload.yaml
 rm -f tenant-reload.state
