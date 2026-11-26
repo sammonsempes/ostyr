@@ -156,6 +156,14 @@ pub struct ScoredFinding {
 }
 
 
+/// Aliases a scan's findings left out of their lists, and how many of them were catalogue (KEV) ids.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Omitted {
+    pub aliases: u64,
+    pub kev: u64,
+}
+
+
 /// A scored finding on a named inventory asset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssetFinding {
@@ -199,6 +207,8 @@ pub struct FeedSettings {
     pub prefix_licences: BTreeMap<String, String>,
     #[serde(default)]
     pub allowed_licences: Vec<String>,
+    #[serde(default)]
+    pub ecosystems: Vec<String>,
 }
 
 
@@ -236,6 +246,7 @@ pub struct FeedReport {
     pub records: Vec<LoadedRecord>,
     pub bad_entries: usize,
     pub dropped_by_licence: usize,
+    pub dropped_by_ecosystem: usize,
     pub retained_items: u64,
 }
 

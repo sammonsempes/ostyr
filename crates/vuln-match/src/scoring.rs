@@ -27,17 +27,26 @@ pub fn score_findings(findings: &[ScoredFinding], epss: &EpssScores, kev: &KevCa
 
 /// Keeps at most `max` valid CVE aliases, the catalogue's ids first then ascending; every alias left out, invalid ones included, is counted.
 pub fn cap_aliases(scored: ScoredFinding, kev: &KevCatalogue, max: usize) -> ScoredFinding {
+    cap_aliases_counted(scored, kev, max).0
+}
+
+
+/// `cap_aliases` and how many catalogue ids the cap left out (the KEV ids are kept first, so this is above 0 only past `max` of them).
+pub fn cap_aliases_counted(scored: ScoredFinding, kev: &KevCatalogue, max: usize) -> (ScoredFinding, u64) {
     let total = scored.finding.cve_aliases.len();
     let mut valid: Vec<String> = scored.finding.cve_aliases.iter().filter(|alias| is_cve_id(alias)).cloned().collect();
     valid.sort_by_key(|alias| (!kev.ids.contains(alias), alias.clone()));
+    let kev_total = valid.iter().filter(|alias| kev.ids.contains(*alias)).count();
     valid.truncate(max);
-    let omitted = u64::try_from(total - valid.len()).unwrap_or(u64::MAX);
-    ScoredFinding {
+    let kev_kept = valid.iter().filter(|alias| kev.ids.contains(*alias)).count();
+    let omitted = (total - valid.len()) as u64;
+    let capped = ScoredFinding {
         finding: Finding {
             cve_aliases: valid,
             aliases_omitted: scored.finding.aliases_omitted.saturating_add(omitted),
             ..scored.finding
         },
         ..scored
-    }
+    };
+    (capped, (kev_total - kev_kept) as u64)
 }

@@ -45,7 +45,14 @@ pub const RATIO_FLOOR_BYTES: u64 = 65_536;
 pub const MAX_LOGGED_NAME_CHARS: usize = 128;
 
 
-pub const MAX_RETAINED_ITEMS: u64 = 2_000_000;
+pub const MAX_RETAINED_ITEMS: u64 = 6_000_000;
+
+
+/// Ecosystems one feed setting may name.
+pub const MAX_FEED_ECOSYSTEMS: usize = 16;
+
+
+pub const MAX_ECOSYSTEM_CHARS: usize = 64;
 
 
 pub const MAGIC_BYTES: usize = 4;

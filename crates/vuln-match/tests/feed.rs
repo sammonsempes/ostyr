@@ -10,7 +10,9 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use types::TestResult;
 use vuln_match::error::FeedError;
-use vuln_match::feed::{default_limits, is_safe_name, licence_of, load_feed, load_feed_reader, parse_local, retained_items, take_bytes};
+use vuln_match::feed::{
+    default_limits, ecosystem_selected, is_safe_name, licence_of, load_feed, load_feed_reader, parse_local, retained_items, take_bytes,
+};
 use vuln_match::limits::{
     DESCRIPTOR_FLAG, DESCRIPTOR_SIGNATURE, ENCRYPTED_FLAG, EOCD_SIGNATURE, LOCAL_SIGNATURE, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_ENTRIES,
     MAX_COMPRESSION_RATIO, MAX_ENTRY_BYTES, MAX_RETAINED_ITEMS, MAX_TOTAL_BYTES, METHOD_DEFLATED, METHOD_STORED, RATIO_FLOOR_BYTES,
@@ -90,6 +92,7 @@ fn settings_for(bytes: &[u8]) -> FeedSettings {
         sha256: format!("{:x}", Sha256::digest(bytes)),
         prefix_licences: BTreeMap::from([(String::new(), OPEN.to_string())]),
         allowed_licences: vec![OPEN.to_string()],
+        ecosystems: Vec::new(),
     }
 }
 
@@ -833,3 +836,121 @@ const ALIAS_ITEMS: u64 = 3;
 
 
 const EMPTY_ITEMS: u64 = 3;
+
+
+const OTHER_RELEASE_VERSIONS: usize = 50;
+
+
+const ECOSYSTEM_CAP: u64 = 10;
+
+
+const SELECTED_ITEMS: u64 = 8;
+
+
+const SMALL_ITEMS: u64 = 2;
+
+
+const FOUR_RECORDS: usize = 4;
+
+
+const TWO_VERSIONS: usize = 2;
+
+
+const THREE_VERSIONS: usize = 3;
+
+
+const REAL_DEBIAN_11_AND_12_ITEMS: u64 = 4_011_996;
+
+
+fn affected_json(ecosystem: &str, versions: usize) -> String {
+    let listed: Vec<String> = (0..versions).map(|index| format!("\"1.{index}\"")).collect();
+    format!(
+        r#"{{"package":{{"ecosystem":"{ecosystem}","name":"p"}},"versions":[{}]}}"#,
+        listed.join(",")
+    )
+}
+
+
+fn ecosystem_record(id: &str, entries: &[(&str, usize)]) -> String {
+    let affected: Vec<String> = entries.iter().map(|(ecosystem, versions)| affected_json(ecosystem, *versions)).collect();
+    format!(r#"{{"id":"{id}","affected":[{}]}}"#, affected.join(","))
+}
+
+
+fn selecting(bytes: &[u8], ecosystems: &[&str]) -> FeedSettings {
+    FeedSettings {
+        ecosystems: ecosystems.iter().map(|name| (*name).to_owned()).collect(),
+        ..settings_for(bytes)
+    }
+}
+
+
+#[test]
+fn only_the_selected_ecosystems_are_kept_and_the_rest_is_counted() -> TestResult {
+    let twelve = ecosystem_record("DSA-12", &[("Debian:12", 1)]);
+    let eleven = ecosystem_record("DSA-11", &[("Debian:11", 1)]);
+    let both = ecosystem_record("DSA-BOTH", &[("Debian:11", TWO_VERSIONS), ("Debian:12", THREE_VERSIONS)]);
+    let bare = ecosystem_record("DSA-BARE", &[("Debian", 1)]);
+    let bytes = build_zip(
+        &[
+            ("a.json", twelve.as_bytes()),
+            ("b.json", eleven.as_bytes()),
+            ("c.json", both.as_bytes()),
+            ("d.json", bare.as_bytes()),
+        ],
+        CompressionMethod::Deflated,
+    )?;
+    let report = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12"]), &default_limits())?;
+    let ids: Vec<&str> = report.records.iter().map(|loaded| loaded.record.id.as_str()).collect();
+    assert_eq!(ids, vec!["DSA-12", "DSA-BOTH", "DSA-BARE"]);
+    assert_eq!(report.dropped_by_ecosystem, 1);
+    let mixed = &report.records.get(1).ok_or("no mixed record")?.record;
+    assert_eq!(mixed.affected.len(), 1);
+    assert_eq!(mixed.affected.first().ok_or("no entry")?.package.ecosystem, "Debian:12");
+    assert_eq!(report.retained_items, SELECTED_ITEMS);
+    let all = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &default_limits())?;
+    assert_eq!((all.records.len(), all.dropped_by_ecosystem), (FOUR_RECORDS, 0));
+    Ok(())
+}
+
+
+#[test]
+fn the_ecosystem_selection_applies_before_the_retained_cap() -> TestResult {
+    let small = ecosystem_record("DSA-12", &[("Debian:12", 1)]);
+    let big = ecosystem_record("DSA-11", &[("Debian:11", OTHER_RELEASE_VERSIONS)]);
+    let bytes = build_zip(&[("a.json", small.as_bytes()), ("b.json", big.as_bytes())], CompressionMethod::Deflated)?;
+    let limits = FeedLimits {
+        max_retained_items: ECOSYSTEM_CAP,
+        ..default_limits()
+    };
+    let report = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12"]), &limits)?;
+    assert_eq!(
+        (report.records.len(), report.dropped_by_ecosystem, report.retained_items),
+        (1, 1, SMALL_ITEMS)
+    );
+    let unselected = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &limits);
+    assert!(matches!(unselected, Err(FeedError::TooManyRetained { .. })), "{unselected:?}");
+    let both = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12", "Debian:11"]), &limits);
+    assert!(matches!(both, Err(FeedError::TooManyRetained { .. })), "{both:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_release_names_itself_and_the_bare_family_only() -> TestResult {
+    let selected = vec!["Debian:12".to_owned()];
+    assert!(ecosystem_selected(&selected, "Debian:12"));
+    assert!(ecosystem_selected(&selected, "Debian"));
+    assert!(!ecosystem_selected(&selected, "Debian:11"));
+    assert!(!ecosystem_selected(&selected, "Debian:123"));
+    assert!(!ecosystem_selected(&selected, "Ubuntu:12"));
+    assert!(!ecosystem_selected(&[], "Debian:12"));
+    Ok(())
+}
+
+
+#[test]
+fn the_default_retained_cap_admits_two_real_debian_releases() -> TestResult {
+    assert!(default_limits().max_retained_items >= REAL_DEBIAN_11_AND_12_ITEMS);
+    Ok(())
+}

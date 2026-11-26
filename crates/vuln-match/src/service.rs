@@ -7,11 +7,12 @@ use crate::feed::{default_limits, load_feed_reader};
 use crate::inventory::{list_inventory, read_inventory};
 use crate::kev::{parse_kev, KevCatalogue, KevLimits};
 use crate::limits::{
-    MAX_ALIASES_PER_FINDING, MAX_FINDINGS_PER_SCAN, MAX_OPEN_FINDINGS_PER_TENANT, MAX_RESOLVED_FINDINGS_PER_ASSET, MAX_RESOLVED_FINDINGS_PER_TENANT,
+    MAX_ALIASES_PER_FINDING, MAX_ECOSYSTEM_CHARS, MAX_FEED_ECOSYSTEMS, MAX_FINDINGS_PER_SCAN, MAX_OPEN_FINDINGS_PER_TENANT,
+    MAX_RESOLVED_FINDINGS_PER_ASSET, MAX_RESOLVED_FINDINGS_PER_TENANT,
 };
 use crate::matcher::match_inventory;
-use crate::model::{AssetFinding, Criticality, FeedSettings, OsvRecord, Package, ScanCaps, ScanOutcome, ScoredFinding};
-use crate::scoring::{cap_aliases, score_findings};
+use crate::model::{AssetFinding, Criticality, FeedSettings, Omitted, OsvRecord, Package, ScanCaps, ScanOutcome, ScoredFinding};
+use crate::scoring::{cap_aliases_counted, score_findings};
 use crate::store::{finding_doc, open_findings_of_asset, rebuild_counters, record_scan_capped};
 use crate::types::FindingKey;
 use alerts::types::Executor;
@@ -89,6 +90,8 @@ pub struct RoundReport {
     pub alerts_failed: usize,
     pub refused_findings: u64,
     pub no_room: u64,
+    pub aliases_omitted: u64,
+    pub kev_omitted: u64,
     pub skipped: bool,
     pub left_out: usize,
     pub first_left_out: Option<String>,
@@ -130,6 +133,27 @@ pub fn setting_error(field: &str, reason: &str) -> ConfigError {
 }
 
 
+/// ASCII, alphanumeric first, then alphanumerics, space and `.:_+-`, at most `MAX_ECOSYSTEM_CHARS` characters.
+pub fn is_ecosystem_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    name.chars().take(MAX_ECOSYSTEM_CHARS + 1).count() <= MAX_ECOSYSTEM_CHARS
+        && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && characters.all(|next| next.is_ascii_alphanumeric() || " .:_+-".contains(next))
+}
+
+
+pub fn validate_ecosystems(ecosystems: &[String]) -> Result<(), ConfigError> {
+    if ecosystems.len() <= MAX_FEED_ECOSYSTEMS && ecosystems.iter().all(|name| is_ecosystem_name(name)) {
+        Ok(())
+    } else {
+        Err(setting_error(
+            "feed.ecosystems",
+            "at most 16 ASCII names of at most 64 characters, alphanumeric first",
+        ))
+    }
+}
+
+
 pub fn validate_settings(settings: &ServiceSettings) -> Result<(), ConfigError> {
     let paths = [
         ("pg_settings", &settings.pg_settings),
@@ -146,6 +170,7 @@ pub fn validate_settings(settings: &ServiceSettings) -> Result<(), ConfigError> 
             Err(setting_error(field, "must be an absolute path"))
         }
     })?;
+    validate_ecosystems(&settings.feed.ecosystems)?;
     tenant_scope(&settings.tenant).map_err(|_bad| setting_error("tenant", "not a valid tenant name"))?;
     if (MIN_ROUND_SECONDS..=MAX_ROUND_SECONDS).contains(&settings.round_seconds) {
         Ok(())
@@ -182,6 +207,7 @@ pub fn settings_state(settings: &ServiceSettings) -> ConfigState {
         ("epss_file", settings.epss_file.display().to_string()),
         ("osv_sha256", settings.feed.sha256.clone()),
         ("allowed_licences", format!("{:?}", settings.feed.allowed_licences)),
+        ("ecosystems", format!("{:?}", settings.feed.ecosystems)),
         ("prefix_licences", format!("{:?}", settings.feed.prefix_licences)),
         ("round_seconds", settings.round_seconds.to_string()),
     ]
@@ -241,7 +267,9 @@ pub fn open_feed(path: &Path) -> Result<std::fs::File, LoadError> {
 pub fn load_osv(settings: &ServiceSettings) -> Result<Vec<OsvRecord>, LoadError> {
     let report = load_feed_reader(open_feed(&settings.osv_archive)?, &settings.feed, &default_limits())?;
     let (kept, bad_entries, dropped_by_licence) = (report.records.len(), report.bad_entries, report.dropped_by_licence);
+    let (dropped_by_ecosystem, retained_items) = (report.dropped_by_ecosystem, report.retained_items);
     info!(kept, bad_entries, dropped_by_licence, "OSV archive read");
+    info!(dropped_by_ecosystem, retained_items, "OSV archive selection");
     if kept == 0 {
         Err(LoadError::Empty { feed: "osv" })
     } else {
@@ -331,6 +359,18 @@ pub async fn scan_rebuilding(
 
 /// The findings of one inventory, scored on EPSS and KEV (every alias counts), then each one's alias list cut to the store's cap.
 pub fn findings_of(asset: &str, packages: &[Package], records: &[OsvRecord], epss: &EpssScores, kev: &KevCatalogue) -> Vec<AssetFinding> {
+    findings_with_omissions(asset, packages, records, epss, kev).0
+}
+
+
+/// `findings_of` and the aliases (and KEV ids among them) the cap left out.
+pub fn findings_with_omissions(
+    asset: &str,
+    packages: &[Package],
+    records: &[OsvRecord],
+    epss: &EpssScores,
+    kev: &KevCatalogue,
+) -> (Vec<AssetFinding>, Omitted) {
     let matched = match_inventory(packages, records);
     let unmatched = matched.unmatched.len();
     if unmatched > 0 {
@@ -348,32 +388,47 @@ pub fn findings_of(asset: &str, packages: &[Package], records: &[OsvRecord], eps
         })
         .collect();
     let scored = score_findings(&unscored, epss, kev);
-    scored
+    let capped: Vec<(ScoredFinding, u64)> = scored
         .into_iter()
-        .map(|item| AssetFinding {
+        .map(|item| cap_aliases_counted(item, kev, MAX_ALIASES_PER_FINDING))
+        .collect();
+    let omitted = Omitted {
+        aliases: capped.iter().map(|(item, _kev)| item.finding.aliases_omitted).sum(),
+        kev: capped.iter().map(|(_item, kev_omitted)| kev_omitted).sum(),
+    };
+    let findings = capped
+        .into_iter()
+        .map(|(item, _kev)| AssetFinding {
             asset: asset.to_owned(),
-            scored: cap_aliases(item, kev, MAX_ALIASES_PER_FINDING),
+            scored: item,
         })
-        .collect()
+        .collect();
+    (findings, omitted)
 }
 
 
 pub fn key_of(item: &AssetFinding) -> FindingKey {
     let finding = &item.scored.finding;
-    (finding.ecosystem.clone(), finding.package.clone(), finding.record_id.clone())
+    (
+        finding.ecosystem.clone(),
+        finding.package.clone(),
+        finding.record_id.clone(),
+        finding.installed_version.clone(),
+    )
 }
 
 
-/// The findings the store holds after a scan: those it accepted by grammar, and when it refused some for room, only those it still lists as open.
+/// The findings the store holds: grammar-valid ones, and after a room refusal or merged duplicates only those it lists with the same key and version.
 pub async fn accepted_findings(
     exec: Executor<'_, '_>,
     scope: &TenantScope,
     asset: &str,
     findings: &[AssetFinding],
     no_room: u64,
+    duplicates: u64,
 ) -> Vec<AssetFinding> {
     let admitted: Vec<AssetFinding> = findings.iter().filter(|item| finding_doc(asset, item).is_some()).cloned().collect();
-    if no_room == 0 {
+    if no_room == 0 && duplicates == 0 {
         admitted
     } else {
         match open_findings_of_asset(exec, scope, asset, MAX_FINDINGS_PER_SCAN).await {
@@ -381,7 +436,7 @@ pub async fn accepted_findings(
                 let held: BTreeSet<FindingKey> = page
                     .findings
                     .into_iter()
-                    .map(|stored| (stored.ecosystem, stored.package, stored.record_id))
+                    .map(|stored| (stored.ecosystem, stored.package, stored.record_id, stored.installed_version))
                     .collect();
                 admitted.into_iter().filter(|item| held.contains(&key_of(item))).collect()
             }
@@ -405,7 +460,7 @@ pub async fn scan_asset(
     now_micros: u64,
 ) -> Result<AssetScan, StoreError> {
     let outcome = scan_rebuilding(exec, rebuild_exec, scope, asset, findings, now_micros).await?;
-    let accepted = accepted_findings(exec, scope, asset, findings, outcome.refused_no_room).await;
+    let accepted = accepted_findings(exec, scope, asset, findings, outcome.refused_no_room, outcome.duplicates).await;
     let alerts = kev_alerts(scope, &accepted, &kev.ids, now_micros);
     let (stored_alerts, alerts_failed) = match store_kev_alerts(exec, scope, &alerts).await {
         Ok(stored) => (stored, false),
@@ -448,7 +503,9 @@ pub async fn scan_round(
                     reached += 1;
                     match read_inventory(path) {
                         Ok(packages) => {
-                            let findings = findings_of(asset, &packages, records, epss, kev);
+                            let (findings, omitted) = findings_with_omissions(asset, &packages, records, epss, kev);
+                            report.aliases_omitted += omitted.aliases;
+                            report.kev_omitted += omitted.kev;
                             match scan_asset(exec, rebuild_exec, scope, asset, &findings, kev, now_micros).await {
                                 Ok(scan) => {
                                     report.scanned += 1;
@@ -499,8 +556,11 @@ pub fn log_round(report: &RoundReport, degraded: usize) {
     let first_left_out = report.first_left_out.as_deref().unwrap_or("none");
     let (refused_findings, no_room, alerts_failed) = (report.refused_findings, report.no_room, report.alerts_failed);
     let limits = format!("left_out={left_out} first_left_out={first_left_out:?} stopped={stopped} skipped={skipped}");
-    let refusals = format!("refused_findings={refused_findings} no_room={no_room} alerts_failed={alerts_failed}");
-    if left_out > 0 || stopped || skipped || refused_findings > 0 || no_room > 0 || alerts_failed > 0 {
+    let (aliases_omitted, kev_omitted) = (report.aliases_omitted, report.kev_omitted);
+    let refusals = format!(
+        "refused_findings={refused_findings} no_room={no_room} alerts_failed={alerts_failed} aliases_omitted={aliases_omitted} kev_omitted={kev_omitted}"
+    );
+    if left_out > 0 || stopped || skipped || refused_findings > 0 || no_room > 0 || alerts_failed > 0 || kev_omitted > 0 {
         warn!("round incomplete {limits} {refusals}");
     } else {
         info!("round complete {limits} {refusals}");
