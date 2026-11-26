@@ -126,12 +126,43 @@ pub fn record_scan(outcome: &mut TickOutcome, scanned: Result<Scanned, NdrError>
             tracing::warn!("yr gave an unexpected result");
             outcome.counts.failed += 1;
         }
+        Err(error @ (NdrError::Program { .. } | NdrError::Spawn(_) | NdrError::Workspace(_))) => {
+            let cause = describe(&error);
+            tracing::warn!(cause = %cause, "scan refused by the environment");
+            outcome.counts.run_refused += 1;
+        }
         Err(error) => {
             let cause = describe(&error);
             tracing::warn!(cause = %cause, "scan failed");
             outcome.counts.failed += 1;
         }
     }
+}
+
+
+/// Refuses limits under which a tick could defer a file: every line names at most one hash, so lines must not exceed files.
+pub fn validate_limits(limits: &Limits) -> Result<(), NdrError> {
+    match limits.max_lines_per_tick > limits.max_files_per_tick {
+        true => Err(NdrError::Limits {
+            reason: "max_lines_per_tick exceeds max_files_per_tick",
+        }),
+        false => Ok(()),
+    }
+}
+
+
+/// A tick that deferred a file is a named error: the caller must not advance its cursor.
+pub fn check_tick(outcome: &TickOutcome) -> Result<(), NdrError> {
+    match outcome.counts.deferred {
+        0 => Ok(()),
+        count => Err(NdrError::Deferred { count }),
+    }
+}
+
+
+/// The caller keeps its cursor when the environment refused a scan or a file was deferred.
+pub fn holds_cursor(outcome: &TickOutcome) -> bool {
+    outcome.counts.run_refused > 0 || outcome.counts.deferred > 0
 }
 
 
@@ -201,7 +232,7 @@ pub fn defer(outcome: &mut TickOutcome, sha256: &str) {
 /// Files that have taken a slot of the tick so far.
 pub fn file_total(outcome: &TickOutcome) -> u64 {
     let counts = &outcome.counts;
-    counts.scanned + counts.too_large + counts.refused + counts.timed_out + counts.output_cut + counts.missing + counts.failed
+    counts.scanned + counts.too_large + counts.refused + counts.timed_out + counts.output_cut + counts.missing + counts.failed + counts.run_refused
 }
 
 

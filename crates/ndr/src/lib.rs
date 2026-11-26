@@ -5,6 +5,8 @@ pub mod error;
 pub mod event;
 #[cfg(unix)]
 pub mod exec;
+#[cfg(unix)]
+pub mod follow;
 pub mod model;
 pub mod reader;
 #[cfg(unix)]

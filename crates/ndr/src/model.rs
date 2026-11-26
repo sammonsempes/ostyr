@@ -1,6 +1,9 @@
 use core_export::ecs::EcsEvent;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 
@@ -13,7 +16,7 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 32 * MIB;
 const DEFAULT_MAX_FILES_PER_TICK: usize = 1_000;
 
 
-const DEFAULT_MAX_LINES_PER_TICK: usize = 100_000;
+const DEFAULT_MAX_LINES_PER_TICK: usize = 1_000;
 
 
 const DEFAULT_MAX_LINE_BYTES: usize = 65_536;
@@ -121,6 +124,7 @@ pub struct TickCounts {
     pub output_cut: u64,
     pub missing: u64,
     pub failed: u64,
+    pub run_refused: u64,
     pub deferred: u64,
     pub sightings_omitted: u64,
 }
@@ -131,4 +135,50 @@ pub struct TickOutcome {
     pub events: Vec<EcsEvent>,
     pub counts: TickCounts,
     pub deferred_hashes: Vec<String>,
+}
+
+
+/// What the follower persists: the file identity, the offset after the last consumed line and two SHA-256 fingerprints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cursor {
+    pub inode: u64,
+    pub device: u64,
+    pub head_len: usize,
+    pub head_sha256: String,
+    pub offset: u64,
+    pub tail_len: usize,
+    pub tail_sha256: String,
+}
+
+
+/// An open `eve.json` handle read by position; cloning shares the handle, so a held cursor can retry a tick.
+#[derive(Debug, Clone)]
+pub struct Follower {
+    pub file: Arc<File>,
+    pub inode: u64,
+    pub device: u64,
+    pub offset: u64,
+    pub tail_len: usize,
+    pub tail_sha256: String,
+}
+
+
+/// What the follower saw besides lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FollowCounts {
+    pub malformed: u64,
+    pub eve_truncated: u64,
+    pub rotated_while_down: u64,
+    pub device_changed: u64,
+    pub rotations: u64,
+}
+
+
+/// The complete lines of one follow tick and the follower to use next; the caller persists `cursor_of(&follower)` only after the lines are scanned.
+#[derive(Debug, Clone)]
+pub struct Ticked {
+    pub lines: Vec<String>,
+    pub follower: Follower,
+    pub counts: FollowCounts,
 }
