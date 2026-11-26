@@ -194,3 +194,9 @@ pub fn watch_checked<Config: Send + Sync + 'static>(
         .try_for_each(|file| debouncer.watch(parent_of(file), RecursiveMode::NonRecursive))?;
     Ok(debouncer)
 }
+
+
+/// Stops the watcher and waits for its event thread, so no reload starts after it returns (dropping it only sets a flag).
+pub fn stop_watcher(debouncer: Debouncer<RecommendedWatcher, RecommendedCache>) {
+    debouncer.stop();
+}
