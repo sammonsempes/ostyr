@@ -22,7 +22,7 @@ pub const SMALL_CAP: usize = 4;
 pub const HUNTS_LATE_CLOSE: usize = 2;
 
 
-pub const PLATFORM_PG_BUDGET: usize = 74;
+pub const PLATFORM_PG_BUDGET: usize = 78;
 
 
 /// The module's connection cap: an exhaustive match, so a new module without a cap does not compile.
@@ -41,7 +41,8 @@ pub fn module_cap(module: Module) -> usize {
         | Module::Posture
         | Module::Status
         | Module::Grc
-        | Module::AttackPaths => SMALL_CAP,
+        | Module::AttackPaths
+        | Module::Playbooks => SMALL_CAP,
     }
 }
 
@@ -69,6 +70,7 @@ pub fn module_name(module: Module) -> &'static str {
         Module::Status => "status",
         Module::Grc => "grc",
         Module::AttackPaths => "attack_paths",
+        Module::Playbooks => "playbooks",
     }
 }
 

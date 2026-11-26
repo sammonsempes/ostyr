@@ -23,7 +23,7 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const ALL_MODULES: &str =
-    "alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths";
+    "alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths, playbooks";
 
 
 const FLOODED_PATH: &str = "/grc/reports";

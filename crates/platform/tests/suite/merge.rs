@@ -8,7 +8,7 @@ use platform::merge::{merge_access, migration_plan, module_access};
 use platform::model::Module;
 
 
-const ALL: [Module; 15] = [
+const ALL: [Module; 16] = [
     Module::Alerts,
     Module::Cases,
     Module::Cmdb,
@@ -24,6 +24,7 @@ const ALL: [Module; 15] = [
     Module::Status,
     Module::Grc,
     Module::AttackPaths,
+    Module::Playbooks,
 ];
 
 
@@ -96,6 +97,7 @@ fn every_module_has_a_disjoint_table() -> TestResult {
         Module::Status,
         Module::Grc,
         Module::AttackPaths,
+        Module::Playbooks,
     ] {
         let key = module_access(module).into_keys().min().ok_or("no route")?;
         assert_eq!(
@@ -134,6 +136,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
     assert_eq!(names(&[Module::Status]), ["status_page"]);
     assert_eq!(names(&[Module::Status, Module::Alerts]), ["alerts", "status_page"]);
     assert_eq!(names(&[Module::Grc]), ["grc"]);
+    assert_eq!(names(&[Module::Playbooks]), ["playbooks"]);
+    assert_eq!(names(&[Module::Playbooks, Module::Alerts]), ["alerts", "playbooks"]);
     assert_eq!(
         names(&[Module::AttackPaths, Module::Grc, Module::Alerts]),
         ["alerts", "grc", "attack_paths"]
@@ -163,7 +167,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
             "posture",
             "status_page",
             "grc",
-            "attack_paths"
+            "attack_paths",
+            "playbooks"
         ]
     );
     assert!(ALL.iter().all(|module| !migration_plan(&[*module]).is_empty()));
@@ -176,8 +181,9 @@ fn migrations_run_in_dependency_order() -> TestResult {
 
 #[test]
 fn module_parts_access_is_the_union_of_each_selected_module_table() -> TestResult {
-    let (_dir, (_router, access, _documents)) =
-        parts_of("alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths")?;
+    let (_dir, (_router, access, _documents)) = parts_of(
+        "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths,playbooks",
+    )?;
     let expected: Vec<String> = ALL.iter().flat_map(|module| module_access(*module).into_keys()).collect();
     assert_eq!(access.len(), expected.len());
     assert!(expected.iter().all(|key| access.contains_key(key)));

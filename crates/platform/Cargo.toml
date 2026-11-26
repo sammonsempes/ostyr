@@ -23,6 +23,7 @@ grc = { version = "0.0.0", path = "../grc" }
 hunt-packs = { version = "0.0.0", path = "../hunt-packs" }
 oncall = { version = "0.0.0", path = "../oncall" }
 remote-shell = { version = "0.0.0", path = "../remote-shell" }
+response-playbooks = { version = "0.0.0", path = "../response-playbooks" }
 risk-score = { version = "0.0.0", path = "../risk-score" }
 status-page = { version = "0.0.0", path = "../status-page" }
 strum = { version = "0.27", features = ["derive"] }
