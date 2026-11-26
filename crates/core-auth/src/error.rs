@@ -50,6 +50,8 @@ pub enum OidcDenial {
     UntrustedAudience,
     #[error("the ID token authorized party is missing or foreign")]
     BadAzp,
+    #[error("a mapped role is not in the role catalog in use")]
+    UnknownRole,
 }
 
 

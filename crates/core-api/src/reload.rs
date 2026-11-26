@@ -1,17 +1,18 @@
-use crate::config::{api_config, forwarders};
+use crate::config::{api_config, forwarders, roles_file};
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
 use crate::oidc::{fingerprint_salt, load_oidc};
 use crate::previous::{record_entry, record_previous, retire_previous, write_previous_key, PREVIOUS_KEY_SAVED};
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
-use crate::state::{check_store_key, clear_store_cache, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
+use crate::state::{
+    check_store_key, clear_store_cache, lock_auth, previous_key_path, read_catalog_digested, read_compromised_digested, unopened_secrets,
+};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::{append_declared, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
-use core_auth::rbac::builtin_catalog;
 use core_auth::secretbox::{open_secret, seal_secret};
 use core_auth::store::{load_store, load_store_file, read_store_locked, update_store_file};
 use core_auth::types::{AccountMap, CredentialMap, RandomFn, StoreKey};
@@ -55,6 +56,9 @@ pub const FINGERPRINT_COMPROMISED: &str = "file.compromised_list";
 pub const FINGERPRINT_OIDC: &str = "file.oidc";
 
 
+pub const FINGERPRINT_ROLES: &str = "file.roles_file";
+
+
 pub const FINGERPRINT_KEY: &str = "file.key_file";
 
 
@@ -80,11 +84,8 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
     let trusted = forwarders(&module)?;
     check_transport(config.address, config.tls.as_ref())?;
     let loaded_tls = config.tls.as_ref().map(load_tls).transpose()?;
-    let oidc = config
-        .oidc
-        .as_ref()
-        .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
-        .transpose()?;
+    let (catalog, roles_digest) = read_catalog_digested(roles_file(&module).as_deref())?;
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog).map(Arc::new)).transpose()?;
     let (list, list_digest) = read_compromised_digested(&config.compromised_list)?;
     let key = Arc::new(read_key_file(&config.key_file)?);
     let key_digest = key_fingerprint(&key)?;
@@ -95,8 +96,10 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         ]
     });
     let oidc_digest = oidc.iter().map(|runtime| (FINGERPRINT_OIDC.to_owned(), runtime.fingerprint.clone()));
+    let roles_fingerprint = roles_digest.into_iter().map(|digest| (FINGERPRINT_ROLES.to_owned(), digest));
     let fingerprints = tls_digests
         .chain(oidc_digest)
+        .chain(roles_fingerprint)
         .chain([
             (FINGERPRINT_COMPROMISED.to_owned(), list_digest),
             (FINGERPRINT_KEY.to_owned(), key_digest),
@@ -108,6 +111,7 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         tls: loaded_tls.map(|loaded| Arc::new(loaded.config)),
         oidc,
         compromised: Arc::new(list),
+        catalog: Arc::new(catalog),
         key,
         fingerprints,
         forwarders: Arc::new(trusted),
@@ -147,7 +151,7 @@ pub fn settings_state(settings: &ApiSettings) -> ConfigState {
 
 
 /// The module file and every file it points at: a change to any of them reloads.
-pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
+pub fn watched_files(module_file: &Path, config: &ApiConfig, roles: Option<PathBuf>) -> Vec<PathBuf> {
     let tls = config.tls.iter().flat_map(|files| [files.certificate.clone(), files.key.clone()]);
     let oidc = config
         .oidc
@@ -160,6 +164,7 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
         PathBuf::from(&config.key_file),
     ]
     .into_iter()
+    .chain(roles)
     .chain(tls)
     .chain(oidc)
     .collect()
@@ -611,7 +616,8 @@ pub fn rewatch(rewatch: &Rewatch, files: Vec<PathBuf>) -> Result<(), StartupErro
 
 /// Watches the files of the new configuration; a failure is logged and the old watch stays.
 pub fn follow_files(slot: &Rewatch, module_file: &Path, settings: &ApiSettings) {
-    rewatch(slot, watched_files(module_file, &settings.config)).unwrap_or_else(|error| tracing::error!(%error, "cannot follow the watched files"));
+    rewatch(slot, watched_files(module_file, &settings.config, roles_file(&settings.module)))
+        .unwrap_or_else(|error| tracing::error!(%error, "cannot follow the watched files"));
 }
 
 
@@ -626,6 +632,7 @@ pub fn subscribers(
     start_only: BTreeMap<&'static str, Option<String>>,
 ) -> Vec<Subscriber<ApiSettings>> {
     let (for_limits, for_oidc, for_list, for_forwarders) = (state.clone(), state.clone(), state.clone(), state.clone());
+    let for_roles = state.clone();
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (store_context, identity_context, key_context) = (context.clone(), context.clone(), context.clone());
     let (key_state, key_apply_state, identity_state) = (state.clone(), state.clone(), state.clone());
@@ -665,6 +672,7 @@ pub fn subscribers(
             for_forwarders.forwarders.store(Arc::clone(&settings.forwarders))
         }),
         section("oidc", move |settings| apply_oidc(&for_oidc, settings)),
+        section("roles", move |settings| for_roles.catalog.store(Arc::clone(&settings.catalog))),
         section("compromised", move |settings| {
             for_list.compromised.store(Arc::clone(&settings.compromised))
         }),

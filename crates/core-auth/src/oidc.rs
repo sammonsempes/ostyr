@@ -331,6 +331,7 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::InsecureEndpoint => "insecure_endpoint",
         OidcDenial::UntrustedAudience => "untrusted_audience",
         OidcDenial::BadAzp => "bad_azp",
+        OidcDenial::UnknownRole => "unknown_role",
     }
 }
 
@@ -480,7 +481,7 @@ pub fn audit_denial<Output: Write>(
     denial: OidcDenial,
     source: &str,
 ) -> Result<(), AuthError> {
-    let outcome = if matches!(denial, OidcDenial::Unmapped | OidcDenial::MfaMissing) {
+    let outcome = if matches!(denial, OidcDenial::Unmapped | OidcDenial::MfaMissing | OidcDenial::UnknownRole) {
         Outcome::Denied
     } else {
         Outcome::Failure
@@ -578,6 +579,16 @@ pub fn settle_identity<Output: Write>(
         let mapping = [("roles", join_roles(&roles)), ("groups", identity.groups.len().to_string())];
         if roles.is_empty() {
             Err(deny_external(state, context, now, &username, OidcDenial::Unmapped, &mapping, callback)?)
+        } else if check_roles(context.catalog, &roles).is_err() {
+            Err(deny_external(
+                state,
+                context,
+                now,
+                &username,
+                OidcDenial::UnknownRole,
+                &mapping,
+                callback,
+            )?)
         } else if requires_mfa(context.catalog, &roles) && !mfa_satisfied(oidc.config, identity) {
             Err(deny_external(state, context, now, &username, OidcDenial::MfaMissing, &mapping, callback)?)
         } else {

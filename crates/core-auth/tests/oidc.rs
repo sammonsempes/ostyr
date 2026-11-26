@@ -72,7 +72,7 @@ const NON_UTF8_BYTE: u8 = 255;
 const INSECURE_CASES: usize = 2;
 
 
-const REASON_COUNT: usize = 16;
+const REASON_COUNT: usize = 17;
 
 
 const GROUP_COUNT: usize = 2;
@@ -637,6 +637,26 @@ fn unmapped_user_gets_no_role_and_no_session() -> TestResult {
 
 
 #[test]
+fn a_mapped_role_absent_from_the_catalog_in_use_is_refused_and_strips_the_account() -> TestResult {
+    let mut fixture = fixture_over(Vec::new())?;
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let prepared = prepare(&fixture, &mut pending)?;
+    complete(&fixture, &mut state, &mut pending, &prepared, &spec())??;
+    assert_eq!(state.sessions.len(), 1);
+    fixture.catalog = RoleCatalog::new();
+    let prepared_again = prepare(&fixture, &mut pending)?;
+    let result = complete(&fixture, &mut state, &mut pending, &prepared_again, &spec())?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(state.sessions.is_empty());
+    assert!(state.accounts.values().all(|account| account.roles.is_empty()));
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("\"reason\":\"unknown_role\"") && text.contains("\"outcome\":\"denied\""));
+    Ok(())
+}
+
+
+#[test]
 fn user_without_groups_claim_is_unmapped() -> TestResult {
     let fixture = fixture_over(Vec::new())?;
     let mut state = State::default();
@@ -1004,6 +1024,7 @@ fn claims_and_groups_helpers() -> TestResult {
         OidcDenial::InsecureEndpoint,
         OidcDenial::UntrustedAudience,
         OidcDenial::BadAzp,
+        OidcDenial::UnknownRole,
     ]
     .into_iter()
     .map(denial_reason)

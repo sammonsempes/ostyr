@@ -929,6 +929,7 @@ fn the_state_keeps_the_key_list_and_runtime_it_is_handed() -> TestResult {
     let inputs = StateInputs {
         key: Arc::new(read_key_file(&config.key_file)?),
         compromised: Arc::new(Default::default()),
+        catalog: Arc::new(builtin_catalog()),
         oidc: Some(runtime.clone()),
     };
     let state = build_state(&config, &inputs, Default::default(), Vec::new())?;
