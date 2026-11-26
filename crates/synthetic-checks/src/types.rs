@@ -1,7 +1,10 @@
 use crate::model::Check;
 use crate::probe::{FetchCaps, HttpRequest, HttpResponse};
+use crate::samples::SendFailure;
 use alerts::error::StoreError;
 use alerts::model::Alert;
+use metrics_ingest::insert::Batch;
+use metrics_ingest::settings::MetricsSettings;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -43,6 +46,14 @@ pub type WallClock<'a> = dyn Fn() -> u64 + 'a;
 
 /// Stores the alerts and answers how many were new.
 pub type Store<'a> = dyn Fn(&[Alert]) -> Result<usize, StoreError> + 'a;
+
+
+/// Nanoseconds since the epoch on the wall clock; `None` when the clock reads before the epoch.
+pub type WallNanos<'a> = dyn Fn() -> Option<u64> + 'a;
+
+
+/// Sends the batches under the settings snapshot and the elapsed time of the round's send; a failure carries the batches sent and a fixed category.
+pub type SendBatches<'a> = dyn Fn(&MetricsSettings, &Clock, &[Batch]) -> Result<usize, SendFailure> + 'a;
 
 
 pub type Stopped<'a> = dyn Fn() -> bool + 'a;
