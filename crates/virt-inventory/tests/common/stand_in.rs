@@ -5,6 +5,7 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 
@@ -21,11 +22,19 @@ const MAX_BLOCKS: usize = 4096;
 const FILLER: u8 = b'7';
 
 
+/// The stand-in announces the request on `arrived`, then holds the answer until `release` receives.
+pub struct Hold {
+    pub arrived: Sender<()>,
+    pub release: Receiver<()>,
+}
+
+
 pub struct Reply {
     pub status: u16,
     pub extra: &'static str,
     pub body: Vec<u8>,
     pub endless: bool,
+    pub hold: Option<Hold>,
 }
 
 
@@ -48,6 +57,7 @@ pub fn reply(status: u16, body: &[u8]) -> Reply {
         extra: "",
         body: body.to_vec(),
         endless: false,
+        hold: None,
     }
 }
 
@@ -84,6 +94,10 @@ fn write_reply<Stream: Write>(stream: &mut Stream, reply: &Reply) -> io::Result<
 fn serve_one<Stream: Read + Write>(stream: Stream, reply: &Reply) -> io::Result<Seen> {
     let mut reader = BufReader::new(stream);
     let headers = headers_of(&mut reader)?;
+    if let Some(hold) = &reply.hold {
+        hold.arrived.send(()).map_err(io::Error::other)?;
+        hold.release.recv().map_err(io::Error::other)?;
+    }
     write_reply(reader.get_mut(), reply)?;
     Ok(Seen {
         request_line: headers.first().cloned().ok_or_else(|| io::Error::other("no request line"))?,
