@@ -24,6 +24,9 @@ tokio-postgres = "0.7"
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 tracing-subscriber = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

@@ -52,7 +52,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stream_correlation::engine::{process_event, snapshot};
 use stream_correlation::level::Level;
 use tempfile::{tempdir, TempDir};
@@ -2133,6 +2133,51 @@ fn the_service_runs_with_the_postgres_sink() -> TestResult {
         Some("whoami-twice")
     );
     assert!(!dir.path().join("alerts.jsonl").exists() || fs::read_to_string(dir.path().join("alerts.jsonl"))?.is_empty());
+    Ok(())
+}
+
+
+const SWAP_HANG_GUARD: Duration = Duration::from_secs(180);
+
+
+const ENGINE_REQUEST_IDS: [&str; 3] = ["detection-ingest-reload", "detection-postgres-reload", "detection-rules-reload"];
+
+
+#[test]
+fn a_start_only_swap_is_denied_and_audited_under_all_by_each_of_the_three_engines() -> TestResult {
+    let database = database()?;
+    let (dir, stub, path) = service_files(&format!("sink: postgres\n{}", database.section))?;
+    let audit_path = dir.path().join("audit.log");
+    let swapped = fs::read_to_string(&path)?.replace("audit.log", "swapped.log");
+    let edited = AtomicBool::new(false);
+    let started = Instant::now();
+    let guard_fired = Arc::new(AtomicBool::new(false));
+    let fired = Arc::clone(&guard_fired);
+    let hub = Arc::clone(&stub.hub);
+    let (watched_path, watched_audit) = (path.clone(), audit_path.clone());
+    let stop = Box::new(move || {
+        let running = !lock(&hub).pulls.is_empty();
+        if running && !edited.swap(true, Ordering::SeqCst) {
+            fs::write(&watched_path, &swapped).is_err()
+        } else {
+            let denied = fs::read_to_string(&watched_audit).map_or(0, |text| text.lines().filter(|line| line.contains("\"denied\"")).count());
+            let expired = started.elapsed() > SWAP_HANG_GUARD;
+            fired.store(expired, Ordering::SeqCst);
+            denied >= THREE || expired
+        }
+    });
+    run_service(&path, stop, commit_alerts)?;
+    assert!(!guard_fired.load(Ordering::SeqCst), "hang guard fired before the three denied records");
+    let records: Vec<Value> = fs::read_to_string(&audit_path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let text_of = |record: &Value, name: &str| record.get(name).and_then(Value::as_str).unwrap_or("").to_owned();
+    let mut found: Vec<String> = records.iter().map(|record| text_of(record, "request_id")).collect();
+    found.sort();
+    assert_eq!(found, ENGINE_REQUEST_IDS.to_vec(), "{records:?}");
+    assert!(records.iter().all(|record| text_of(record, "tenant") == "all"), "{records:?}");
+    assert!(records.iter().all(|record| text_of(record, "outcome") == "denied"), "{records:?}");
     Ok(())
 }
 
