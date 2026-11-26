@@ -282,7 +282,7 @@ query_migrations() {
     remote_stdin "cd compose && sudo docker compose exec -T postgres bash -s" <<<"$script"
 }
 
-readonly MODULE_COUNT=15
+readonly MODULE_COUNT=16
 module_tokens=""
 for role in analyst auditor responder reader; do
     expect "the next TOTP step began for the $role login" wait_after_step "$(totp_step)"
@@ -294,7 +294,7 @@ expect "the proof printed one line per mounted module" test "$(grep -c -E '^[a-z
 module_field() {
     awk -v module="$1" -v field="$2" '$1 == module { print $field }' <<<"$module_lines"
 }
-for module in alerts cases cmdb risk hunts certificates oncall dhcp compliance vulnerabilities remote_shell posture status grc attack_paths; do
+for module in alerts cases cmdb risk hunts certificates oncall dhcp compliance vulnerabilities remote_shell posture status grc attack_paths playbooks; do
     expect "$module: its path is in the OpenAPI document" test "$(module_field "$module" 2)" = 1
     expect "$module: no token is 401" test "$(module_field "$module" 3)" = 401
     expected_ok=200
@@ -308,8 +308,8 @@ expect "the analyst has no audit.read: the remote shell list is 403" test "$(sed
 expect "the analyst has no status.write: opening an incident is 403" test "$(sed -n 's/^analyst_on_status_write //p' <<<"$module_lines")" = 403
 migrations="$(query_migrations 'select namespace || chr(32) || count(*) from public.schema_migrations group by namespace order by namespace')"
 printf 'migrations applied:\n%s\n' "$migrations"
-readonly MIGRATION_NAMESPACES=14
-expect "the 14 modules with a store (risk reads alerts) applied their migrations, each in its own namespace, the playbooks service one more or not yet" test "$(grep -v '^playbooks ' <<<"$migrations" | grep -c -E '^[a-z_]+ [0-9]+$')" -eq "$MIGRATION_NAMESPACES"
+readonly MIGRATION_NAMESPACES=15
+expect "the 15 modules with a store (risk reads alerts) applied their migrations, each in its own namespace" test "$(grep -c -E '^[a-z_]+ [0-9]+$' <<<"$migrations")" -eq "$MIGRATION_NAMESPACES"
 migrations_before="$(query_migrations 'select count(*) from public.schema_migrations')"
 compose "restart"
 expect "the API answers after a restart on the same pgdata" wait_ready
