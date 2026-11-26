@@ -56,18 +56,16 @@ pub fn one_line(text: &str, max: usize) -> String {
 
 
 pub fn section(title: &str, entries: &BTreeMap<String, String>) -> String {
-    entries
-        .iter()
-        .take(MAX_RENDER_ENTRIES)
-        .map(|(key, value)| {
-            format!(
-                "{title} {}: {}",
-                one_line(key, MAX_VALUE_LEN as usize),
-                one_line(value, MAX_VALUE_LEN as usize)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let omitted = entries.len().saturating_sub(MAX_RENDER_ENTRIES);
+    let marker = (omitted > 0).then(|| format!("{title} ({omitted} not shown)"));
+    let shown = entries.iter().take(MAX_RENDER_ENTRIES).map(|(key, value)| {
+        format!(
+            "{title} {}: {}",
+            one_line(key, MAX_VALUE_LEN as usize),
+            one_line(value, MAX_VALUE_LEN as usize)
+        )
+    });
+    marker.into_iter().chain(shown).collect::<Vec<_>>().join("\n")
 }
 
 
