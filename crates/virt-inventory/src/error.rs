@@ -61,8 +61,8 @@ pub enum FetchError {
     MaxBytes,
     #[error(transparent)]
     Scope(#[from] InventoryError),
-    #[error("the CA file could not be used")]
-    CaFile(#[source] PgError),
+    #[error("the CA file could not be used: {0}")]
+    CaFile(#[source] ConfigError),
     #[error("the token file could not be used")]
     TokenFile(#[source] PgError),
     #[error("the token must be user@realm!tokenid=secret in ASCII letters, digits and @!=._-")]
@@ -71,15 +71,17 @@ pub enum FetchError {
     Agent(#[from] InsertError),
     #[error("the request failed: {0:?}")]
     Transport(InsertClass),
+    #[error("the server certificate or the TLS handshake was refused")]
+    Certificate,
     #[error("the server answered status {0}")]
     Status(u16),
     #[error("the answer body could not be read")]
     Body(#[source] std::io::Error),
     #[error("the answer is above the {max} byte limit")]
     TooLarge { max: u64 },
-    #[error("the permissions answer is refused")]
+    #[error("the permissions answer is refused: {0}")]
     Permissions(#[source] ParseError),
-    #[error("the resources answer is refused")]
+    #[error("the resources answer is refused: {0}")]
     Resources(#[source] ParseError),
     #[error("the token is not read-only: {0}")]
     WritableCredential(#[source] ReadOnlyError),
@@ -96,4 +98,28 @@ pub enum SyncError {
     BadIdentity { field: &'static str },
     #[error("cmdb store: {0}")]
     Store(#[from] cmdb::error::StoreError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("proxmox fetch refused: {0}")]
+    Fetch(#[from] FetchError),
+    #[error("the cmdb store is unreachable: {0}")]
+    Pg(#[from] PgError),
+    #[error("cmdb sync failed: {0}")]
+    Sync(#[from] SyncError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("usage: ostyr-virt-inventory <settings.yaml>")]
+    Usage,
+    #[error("interval_seconds must be within {min}..={max}")]
+    Interval { min: u64, max: u64 },
+    #[error("max_assets must be within 1..={max}")]
+    MaxAssets { max: usize },
+    #[error("max_child_rows must be within 1..={max}")]
+    MaxChildRows { max: usize },
 }

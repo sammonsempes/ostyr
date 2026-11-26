@@ -3,10 +3,14 @@ use crate::inventory::{build_inventory, inventory_degraded_nodes, Inventory};
 use crate::proxmox::{parse_permissions, parse_resources};
 use crate::readonly::check_read_only;
 use crate::settings::{validate_settings, FetchSettings};
-use core_pg::password::{read_limited, read_password};
+#[cfg(unix)]
+use crate::trusted::read_trusted_text;
+use core_config::error::ConfigError;
+use core_pg::password::read_password;
 use siem_ingest::clickhouse::{classify_transport, new_agent};
 use siem_ingest::error::InsertClass;
 use std::io::Read;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::warn;
 use ureq::Agent;
@@ -78,7 +82,7 @@ pub fn get_body(agent: &Agent, url: &str, header: &str, max: u64, remaining: Dur
             .http_status_as_error(false)
             .build()
             .call()
-            .map_err(|error| FetchError::Transport(classify_transport(&error)))?;
+            .map_err(|error| transport_error(&error))?;
         if response.status().as_u16() == STATUS_OK {
             read_body(&mut response.into_body().into_reader(), max)
         } else {
@@ -88,9 +92,40 @@ pub fn get_body(agent: &Agent, url: &str, header: &str, max: u64, remaining: Dur
 }
 
 
-/// The CA is read through a checked handle at every run; only that CA is trusted, https only, no redirect, no proxy.
+#[cfg(unix)]
+pub fn read_ca(path: &Path) -> Result<Vec<u8>, ConfigError> {
+    read_trusted_text(path, MAX_CA_BYTES).map(String::into_bytes)
+}
+
+
+#[cfg(not(unix))]
+pub fn read_ca(path: &Path) -> Result<Vec<u8>, ConfigError> {
+    core_config::parse::read_bytes_capped(path, MAX_CA_BYTES)
+}
+
+
+/// A handshake or certificate failure (rustls reports it as an `InvalidData` I/O error that wraps its own error) is told apart from a host that is down.
+pub fn is_handshake_failure(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Rustls(_) | ureq::Error::Tls(_) => true,
+        ureq::Error::Io(source) => source.kind() == std::io::ErrorKind::InvalidData && source.get_ref().is_some(),
+        _ => false,
+    }
+}
+
+
+pub fn transport_error(error: &ureq::Error) -> FetchError {
+    if is_handshake_failure(error) {
+        FetchError::Certificate
+    } else {
+        FetchError::Transport(classify_transport(error))
+    }
+}
+
+
+/// The CA is read through a judged handle at every run; only that CA is trusted, https only, no redirect, no proxy.
 pub fn build_agent(settings: &FetchSettings) -> Result<Agent, FetchError> {
-    let pem = read_limited(&settings.ca_file, MAX_CA_BYTES).map_err(FetchError::CaFile)?;
+    let pem = read_ca(&settings.ca_file).map_err(FetchError::CaFile)?;
     Ok(new_agent(Some(pem.as_slice()), true)?)
 }
 
