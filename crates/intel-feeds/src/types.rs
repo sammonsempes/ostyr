@@ -1,9 +1,10 @@
 use crate::config::{ClickhouseConfig, FeedConfig, FeedsFile};
-use crate::error::EntryError;
+use crate::error::{EntryError, TaxiiError};
 use crate::export::ExportSummary;
 use crate::load::{LoadError, LoadOutcome};
 use crate::model::{FeedSummary, Ioc, IocType, RawEntry};
 use crate::retro::{RetroError, RetroReply, RetroRequest, RetroRun, RetroSettings};
+use crate::taxii::PollOutcome;
 use alerts::error::StoreError;
 use alerts::model::Alert;
 use core_pg::scope::TenantScope;
@@ -72,3 +73,18 @@ pub type SnapshotFn<'a> = dyn Fn() -> Option<Arc<FeedsFile>> + 'a;
 
 /// Saves the tenant and the end of a successful window; a failure is logged by the schedule and never stops it.
 pub type SaveEndFn<'a> = dyn Fn(&str, OffsetDateTime) -> io::Result<()> + 'a;
+
+
+pub type PollFn<'a> = dyn Fn(&FeedConfig, Option<OffsetDateTime>, OffsetDateTime) -> Result<PollOutcome, TaxiiError> + 'a;
+
+
+/// A TAXII feed's name and the rendering of its whole parsed configuration.
+pub type CursorKey = (String, String);
+
+
+/// The `added_after` cursor of each TAXII source by its whole configuration, in memory only.
+pub type Cursors = BTreeMap<CursorKey, OffsetDateTime>;
+
+
+/// Waits at most the duration and answers true when a stop was requested.
+pub type StopWaitFn<'a> = dyn Fn(Duration) -> bool + 'a;
