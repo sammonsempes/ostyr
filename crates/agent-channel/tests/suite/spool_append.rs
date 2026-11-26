@@ -248,7 +248,8 @@ fn a_lock_released_during_the_wait_lets_the_append_through() -> TestResult {
     let spool = dir.path().join("spool");
     let mut held = Some(holder(&spool)?);
     assert!(append_locked(std::iter::once(Ok("late".to_owned())), &spool, WAIT_ATTEMPTS, &mut || {
-        drop(held.take())
+        drop(held.take());
+        pause_between_lock_attempts();
     })?);
     assert_eq!(fs::read_to_string(&spool)?, "late\n");
     Ok(())
@@ -401,6 +402,7 @@ fn an_append_that_waited_while_the_agent_delivered_the_claim_never_loses_its_lin
                 finished = finish_spool(&claim, &[1]).is_ok();
             }
         });
+        pause_between_lock_attempts();
     })?;
     assert!(appended && finished);
     assert!(!claimed.exists());
@@ -421,6 +423,7 @@ fn a_spool_replaced_by_another_producer_while_waiting_gets_the_line() -> TestRes
             logged(fs::write(&spool, "other\n"));
             drop(lock);
         });
+        pause_between_lock_attempts();
     })?;
     assert!(appended);
     assert_eq!(fs::read_to_string(&spool)?, "other\nwaiter\n");
@@ -847,6 +850,7 @@ fn stale_claim(delivered: bool) -> TestResult {
     claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || {
         pauses += 1;
         drop(held.take());
+        pause_between_lock_attempts();
         if pauses == 1 {
             logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts));
             logged(fs::write(&file.spool_file, "7\n"));
@@ -947,6 +951,7 @@ fn a_second_claimer_that_waited_while_the_first_claimed_a_new_file_defers_and_lo
             logged(fs::write(&file.spool_file, "two\n"));
             logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts));
         });
+        pause_between_lock_attempts();
     })?;
     assert!(pauses >= 1);
     assert!(deferred.batches.is_empty());
