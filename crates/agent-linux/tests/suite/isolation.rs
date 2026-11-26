@@ -355,6 +355,11 @@ fn rule_texts_and_helpers() -> TestResult {
 fn the_listings_nft_printed_match_the_rendered_rules() -> TestResult {
     check_listing(V4, &v4_settings()?)?;
     check_listing(DUAL, &dual_settings()?)?;
+    let spelled = DUAL.replace("\"fd00::2\"", "\"fd00:0:0:0:0:0:0:2\"");
+    assert_ne!(spelled, DUAL);
+    check_listing(&spelled, &dual_settings()?)?;
+    let other = DUAL.replace("\"fd00::2\"", "\"fd00:0:0:0:0:0:0:3\"");
+    assert!(matches!(check_listing(&other, &dual_settings()?), Err(IsolationError::Mismatch(_))));
     Ok(())
 }
 
@@ -797,19 +802,7 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
     assert!(matches!(validate_file(&file), Err(SourceError::Settings(names)) if names.contains("isolation.dns")));
     let zero = write_files(dir.path(), "isolation:\n  endpoints:\n    - address: 10.0.0.1\n      port: 0\n", "")?;
     assert_eq!(invalid_isolation_settings(&load_file::<LinuxFile>(&zero)?), ["isolation.ports"]);
-    for address in [
-        "0.0.0.0",
-        "::",
-        "127.0.0.1",
-        "::1",
-        "224.0.0.1",
-        "ff02::1",
-        "255.255.255.255",
-        "::ffff:127.0.0.1",
-        "::ffff:0.0.0.0",
-        "::ffff:224.0.0.1",
-        "::ffff:255.255.255.255",
-    ] {
+    for address in ["0.0.0.0", "::", "127.0.0.1", "::1", "224.0.0.1", "ff02::1", "255.255.255.255"] {
         let text = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n  dns:\n    - \"{address}\"\n");
         let hostile = load_file::<LinuxFile>(&write_files(dir.path(), &text, "")?)?;
         assert_eq!(
@@ -817,6 +810,47 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
             ["isolation.endpoints.address", "isolation.dns.address"],
             "{address}"
         );
+    }
+    for address in ["::ffff:127.0.0.1", "::ffff:0.0.0.0", "::ffff:224.0.0.1", "::ffff:255.255.255.255"] {
+        let text = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n  dns:\n    - \"{address}\"\n");
+        let hostile = load_file::<LinuxFile>(&write_files(dir.path(), &text, "")?)?;
+        assert_eq!(
+            invalid_isolation_settings(&hostile),
+            [
+                "isolation.endpoints.address",
+                "isolation.dns.address",
+                "isolation.endpoints.embedded",
+                "isolation.dns.embedded"
+            ],
+            "{address}"
+        );
+    }
+    let ranges = [
+        "::10.0.0.9",
+        "::192.168.101.86",
+        "::ffff:10.0.0.9",
+        "::ffff:0:10.0.0.9",
+        "64:ff9b::10.0.0.9",
+        "64:ff9b:1::10.0.0.9",
+        "2002:a00:9::1",
+        "2001::1",
+    ];
+    for address in ranges {
+        let endpoint = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n");
+        let embedded_endpoint = load_file::<LinuxFile>(&write_files(dir.path(), &endpoint, "")?)?;
+        assert_eq!(
+            invalid_isolation_settings(&embedded_endpoint),
+            ["isolation.endpoints.embedded"],
+            "{address}"
+        );
+        let resolver = format!("isolation:\n  endpoints:\n    - address: 10.0.0.9\n      port: 80\n  dns:\n    - \"{address}\"\n");
+        let embedded_dns = load_file::<LinuxFile>(&write_files(dir.path(), &resolver, "")?)?;
+        assert_eq!(invalid_isolation_settings(&embedded_dns), ["isolation.dns.embedded"], "{address}");
+    }
+    for address in ["2001:db8::1", "2001:1::1", "64:ff9b:2::1", "2003::1", "::1:0:0", "fd00::1"] {
+        let endpoint = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n");
+        let plain = load_file::<LinuxFile>(&write_files(dir.path(), &endpoint, "")?)?;
+        assert!(invalid_isolation_settings(&plain).is_empty(), "{address}");
     }
     let good = write_files(dir.path(), GOOD, "")?;
     let valid = load_file::<LinuxFile>(&good)?;

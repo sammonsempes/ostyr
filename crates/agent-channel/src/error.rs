@@ -231,6 +231,7 @@ pub enum EndpointFault {
     ServerName,
     LinkLocal,
     Scoped,
+    Embedded,
 }
 
 
@@ -244,6 +245,7 @@ impl std::fmt::Display for EndpointFault {
             Self::ServerName => "the server name is empty or not a valid name",
             Self::LinkLocal => "a link-local IPv6 address needs a scope the agent does not keep",
             Self::Scoped => "an IPv6 scope id or flow label is not accepted",
+            Self::Embedded => "an IPv6 address that embeds or translates an IPv4 address is not accepted",
         })
     }
 }

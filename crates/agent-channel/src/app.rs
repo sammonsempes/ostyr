@@ -22,9 +22,18 @@ pub fn debounce() -> Duration {
 pub const PRESENCE_DECLARED_KEY: &str = "silent_seconds";
 
 
-/// The parameter keys this crate's records may keep: the reload keys and the presence key; any other value is stored as `[REDACTED]`.
-pub static AGENT_CHANNEL_DECLARED_KEYS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| RELOAD_DECLARED_KEYS.iter().copied().chain([PRESENCE_DECLARED_KEY]).collect());
+/// The command record key naming the real table state after a failed isolate.
+pub const TABLE_DECLARED_KEY: &str = "table";
+
+
+/// The parameter keys this crate's records may keep: the reload keys, the presence key and the table state; any other value is stored as `[REDACTED]`.
+pub static AGENT_CHANNEL_DECLARED_KEYS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    RELOAD_DECLARED_KEYS
+        .iter()
+        .copied()
+        .chain([PRESENCE_DECLARED_KEY, TABLE_DECLARED_KEY])
+        .collect()
+});
 
 
 /// Appends with declared keys, every value first cut with a visible marker naming the characters omitted.

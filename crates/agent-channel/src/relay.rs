@@ -87,7 +87,7 @@ fn check_usable(index: usize, address: SocketAddr) -> Result<SocketAddr, AppErro
 }
 
 
-/// An IPv6 endpoint carries no scope id and no flow label (checked before the IPv4-mapped fold drops them).
+/// An IPv6 endpoint carries no scope id and no flow label.
 pub fn check_scope(index: usize, parsed: SocketAddr) -> Result<SocketAddr, AppError> {
     match parsed {
         SocketAddr::V6(v6) if v6.scope_id() != 0 || v6.flowinfo() != 0 => Err(refused(index, EndpointFault::Scoped)),
@@ -96,11 +96,55 @@ pub fn check_scope(index: usize, parsed: SocketAddr) -> Result<SocketAddr, AppEr
 }
 
 
-/// Parses one endpoint; an IPv4-mapped IPv6 address is folded to IPv4 so duplicates compare on the real value.
+/// Every IPv6 prefix that embeds or translates an IPv4 address: IPv4-compatible, mapped, translated, both NAT64 ranges, 6to4 and Teredo.
+pub const EMBEDDING_PREFIXES: [&[u16]; 7] = [
+    &[0, 0, 0, 0, 0, 0],
+    &[0, 0, 0, 0, 0, MAPPED_SEGMENT],
+    &[0, 0, 0, 0, MAPPED_SEGMENT, 0],
+    &[NAT64_FIRST, NAT64_SECOND, 0, 0, 0, 0],
+    &[NAT64_FIRST, NAT64_SECOND, 1],
+    &[SIX_TO_FOUR],
+    &[TEREDO_FIRST, 0],
+];
+
+
+pub const MAPPED_SEGMENT: u16 = 0xffff;
+
+
+pub const NAT64_FIRST: u16 = 0x64;
+
+
+pub const NAT64_SECOND: u16 = 0xff9b;
+
+
+pub const SIX_TO_FOUR: u16 = 0x2002;
+
+
+pub const TEREDO_FIRST: u16 = 0x2001;
+
+
+/// True for an IPv6 address in an IPv4-embedding or translation range (`::` and `::1` excepted): a rule on it matches no IPv4 packet, so it is refused, never folded.
+pub fn ipv4_embedding(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let special = v6.is_unspecified() || v6.is_loopback();
+            !special && EMBEDDING_PREFIXES.iter().any(|prefix| segments.starts_with(prefix))
+        }
+    }
+}
+
+
+/// Parses one endpoint; an address in an IPv4-embedding range is refused, never folded.
 pub fn parse_endpoint(index: usize, text: &str) -> Result<SocketAddr, AppError> {
     let parsed: SocketAddr = text.parse().map_err(|_error| refused(index, EndpointFault::Unparsable))?;
     let unscoped = check_scope(index, parsed)?;
-    check_usable(index, SocketAddr::new(unscoped.ip().to_canonical(), unscoped.port()))
+    if ipv4_embedding(&unscoped.ip()) {
+        Err(refused(index, EndpointFault::Embedded))
+    } else {
+        check_usable(index, unscoped)
+    }
 }
 
 
