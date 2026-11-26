@@ -276,11 +276,22 @@ SCOPE_JQ='
       | $pkgs[] | select(.id as $id | $closed | index($id)) | "PKG " + .name + " " + .dir
     end'
 
+read_across_packages() {
+  local package_dir rest needle
+  package_dir=$(cut -d/ -f1-2 <<<"$1")
+  rest=${1#"$package_dir"/}
+  needle="${package_dir#*/}/$rest"
+  if [[ "$rest" == */* ]]; then needle="${package_dir#*/}/${rest%/*}"; fi
+  local status=0
+  git grep -q -F -e "$needle" -- . ":(exclude)$package_dir" ':(exclude)*CL''AUDE.md' ':(exclude)backlog' ':(exclude).cache' || status=$?
+  [ "$status" -ne 1 ]
+}
+
 forced_full_path() {
   case "$1" in
     Cargo.toml | */Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | clippy.toml | .githooks/* | tools/custom_lint/* | tools/coverage_gate/*) return 0 ;;
     */CL''AUDE.md | *.rs) return 1 ;;
-    crates/* | tools/*) return 0 ;;
+    crates/* | tools/*) read_across_packages "$1" ;;
     *) return 1 ;;
   esac
 }

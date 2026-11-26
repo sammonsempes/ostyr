@@ -114,7 +114,12 @@ if ! grep -qE '^cargo clippy --offline -p leaf --all-targets' "$STUB_LOG"; then 
 diff_case "base dependents" "scope (diff @BASE@) 2 packages: base user" crates/base/src/lib.rs
 diff_case "lock" "scope full workspace (Cargo.lock changes the whole workspace)" Cargo.lock
 diff_case "githooks" "scope full workspace (.githooks/x changes the whole workspace)" .githooks/x
-diff_case "fixture" "scope full workspace (crates/leaf/tests/snap.json changes the whole workspace)" crates/leaf/tests/snap.json
+diff_case "fixture" "scope (diff @BASE@) 1 packages: leaf" crates/leaf/tests/snap.json
+diff_case "readme" "scope (diff @BASE@) 1 packages: leaf" crates/leaf/README.md
+mkdir -p crates/user/tests
+echo 'const F: &str = include_str!("../../leaf/shared/x.yaml");' >crates/user/tests/read.rs
+commit_change "reader"
+diff_case "cross-read fixture" "scope full workspace (crates/leaf/shared/x.yaml changes the whole workspace)" crates/leaf/shared/x.yaml
 diff_case "docs only" "documentation-only commit" crates/leaf/CL''AUDE.md
 if grep -q '^cargo' "$STUB_LOG"; then fail "docs only runs no cargo"; fi
 diff_case "kernel only" "kernel-only commit" crates/ebpf-probes/ebpf/src/lib.rs
