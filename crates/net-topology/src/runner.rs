@@ -296,7 +296,8 @@ pub fn run_command_with_input(
 }
 
 
-fn run_with_stdin(
+/// The shared runner with any `Stdio` as standard input (a sealed memfd for the posture runner).
+pub fn run_with_stdin(
     program: &Path,
     arguments: &[&str],
     environment: &[(&str, &str)],

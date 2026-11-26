@@ -1,18 +1,19 @@
 use crate::error::ScanError;
+use crate::kubeconfig::{check_content, read_checked, seal_bytes};
 use crate::limits::Limits;
 use crate::model::{Cluster, Findings, KubeconfigFault};
 use crate::prowler::parse_prowler_ocsf;
 use core_config::secret_file::{judge_secret, SecretFileError};
 use core_config::trusted_dir::open_trusted_dir;
 use net_topology::model::RunFailure;
-use net_topology::runner::run_command_with_env;
+use net_topology::runner::run_with_stdin;
 use rustix::fs::{fstat, openat2, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 use tempfile::TempDir;
 use tracing::{debug, info, warn};
@@ -151,10 +152,8 @@ pub fn open_output(directory: &Path) -> Result<File, ScanError> {
 }
 
 
-/// The kubeconfig as the child sees the checked handle: the parent's descriptor, so a swap of the path after the check is never read.
-pub fn kubeconfig_argument(handle: &File) -> String {
-    format!("/proc/{}/fd/{}", std::process::id(), handle.as_raw_fd())
-}
+/// The kubeconfig as the child sees it: its own standard input, a sealed memfd of the checked bytes, so no parent pid appears and no rewrite is read.
+pub const KUBECONFIG_ARGUMENT: &str = "/proc/self/fd/0";
 
 
 /// A failed removal of the work directory is logged with the directory name, never silent.
@@ -183,13 +182,16 @@ pub fn cluster_scan(
     deadline: Duration,
 ) -> Result<Findings, ScanError> {
     open_trusted_dir(workdir, rustix::process::geteuid().as_raw()).map_err(ScanError::UntrustedWorkdir)?;
-    let kubeconfig = open_kubeconfig(cluster).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let opened = open_kubeconfig(cluster).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let bytes = read_checked(&mut &opened).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    check_content(&bytes).map_err(|fault| ScanError::Kubeconfig { fault })?;
+    let kubeconfig = seal_bytes(&bytes).map_err(ScanError::Seal)?;
     let directory = tempfile::Builder::new()
         .prefix(WORKDIR_PREFIX)
         .permissions(Permissions::from_mode(WORKDIR_MODE))
         .tempdir_in(workdir)
         .map_err(ScanError::Workdir)?;
-    let result = scan_directory(program, tenant, cluster, &kubeconfig, directory.path(), limits, deadline);
+    let result = scan_directory(program, tenant, cluster, kubeconfig, directory.path(), limits, deadline);
     remove_directory(directory);
     result
 }
@@ -200,19 +202,18 @@ pub fn scan_directory(
     program: &Path,
     tenant: &str,
     cluster: &Cluster,
-    kubeconfig: &File,
+    kubeconfig: File,
     directory: &Path,
     limits: &Limits,
     deadline: Duration,
 ) -> Result<Findings, ScanError> {
-    let config_path = kubeconfig_argument(kubeconfig);
     let output_directory = directory.to_string_lossy().into_owned();
     let arguments = FIXED_ARGUMENTS
         .iter()
         .copied()
         .chain([
             "--kubeconfig-file",
-            &config_path,
+            KUBECONFIG_ARGUMENT,
             "--context",
             &cluster.context,
             "--output-formats",
@@ -224,8 +225,12 @@ pub fn scan_directory(
             "--ignore-exit-code-3",
         ])
         .collect::<Vec<_>>();
-    let environment = [("HOME", output_directory.as_str()), ("PATH", SEARCH_PATH)];
-    run_command_with_env(program, &arguments, &environment, STDOUT_CAP_BYTES, deadline).map_err(scan_error_of)?;
+    let environment = [
+        ("HOME", output_directory.as_str()),
+        ("TMPDIR", output_directory.as_str()),
+        ("PATH", SEARCH_PATH),
+    ];
+    run_with_stdin(program, &arguments, &environment, Stdio::from(kubeconfig), STDOUT_CAP_BYTES, deadline).map_err(scan_error_of)?;
     let output = open_output(directory)?;
     let findings = parse_prowler_ocsf(output, tenant, &cluster.context, limits)?;
     let kept = findings.items.len();

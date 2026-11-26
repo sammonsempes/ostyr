@@ -6,6 +6,7 @@ mod types;
 
 
 use cloud_posture::error::{ParseError, ScanError};
+use cloud_posture::kubeconfig::MAX_KUBECONFIG_BYTES;
 use cloud_posture::limits::Limits;
 use cloud_posture::model::{Cluster, KubeconfigFault};
 use cloud_posture::run::{
@@ -28,7 +29,9 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/prowl
 const TENANT: &str = "lab";
 
 
-const KUBE_BODY: &str = "apiVersion: v1\nTOKEN-IN-KUBECONFIG\n";
+const KUBE_BODY: &str = "apiVersion: v1\nkind: Config\nclusters:\n- name: default\n  cluster:\n    server: https://127.0.0.1:6443\n    certificate-authority-data: AAAA\n\
+users:\n- name: default\n  user:\n    token: TOKEN-IN-KUBECONFIG\n\
+contexts:\n- name: default\n  context:\n    cluster: default\n    user: default\ncurrent-context: default\n";
 
 
 const PATIENT: Duration = Duration::from_secs(120);
@@ -58,7 +61,7 @@ const DIRECTORY_LINE: usize = 8;
 const KUBECONFIG_LINE: usize = 2;
 
 
-const NAMED_VARIABLES: usize = 2;
+const NAMED_VARIABLES: usize = 3;
 
 
 const EXIT_THREE: i32 = 3;
@@ -132,7 +135,7 @@ fn work_is_empty(setup: &Setup) -> Result<bool, Box<dyn Error>> {
 fn recording_prowler(setup: &Setup, record: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let copy = find_directory(&format!("cp {FIXTURE} \"$dir/posture.ocsf.json\""));
     let body = format!(
-        "printf '%s\\n' \"$@\" > {record}\nprintenv | cut -d= -f1 | sort > {record}.env\nprintenv HOME > {record}.home\n\
+        "printf '%s\\n' \"$@\" > {record}\nprintenv | cut -d= -f1 | sort > {record}.env\nprintenv HOME > {record}.home\nprintenv TMPDIR > {record}.tmp\n\
          for arg in \"$@\"; do case \"$arg\" in /proc/*) cat \"$arg\" > {record}.kube;; esac; done\n{copy}",
         record = record.display()
     );
@@ -154,7 +157,7 @@ fn a_good_run_passes_the_fixed_arguments_and_cleans_up() -> TestResult {
     let directory = lines.get(DIRECTORY_LINE).ok_or("no directory")?;
     assert!(directory.starts_with(setup.work.to_str().ok_or("path")?));
     let kubeconfig = lines.get(KUBECONFIG_LINE).ok_or("no kubeconfig")?;
-    assert!(kubeconfig.starts_with("/proc/"));
+    assert_eq!(*kubeconfig, "/proc/self/fd/0");
     assert_eq!(
         lines,
         vec![
@@ -176,15 +179,21 @@ fn a_good_run_passes_the_fixed_arguments_and_cleans_up() -> TestResult {
     assert_eq!(
         std::fs::read_to_string(format!("{}.env", record.display()))?
             .lines()
-            .filter(|name| ["HOME", "PATH"].contains(name))
+            .filter(|name| ["HOME", "TMPDIR", "PATH"].contains(name))
             .count(),
         NAMED_VARIABLES
     );
     let names = std::fs::read_to_string(format!("{}.env", record.display()))?;
-    assert!(names.lines().all(|name| ["HOME", "PATH", "PWD", "SHLVL", "_", "OLDPWD"].contains(&name)));
+    assert!(names
+        .lines()
+        .all(|name| ["HOME", "TMPDIR", "PATH", "PWD", "SHLVL", "_", "OLDPWD"].contains(&name)));
     assert!(std::fs::read_to_string(format!("{}.home", record.display()))?
         .trim()
         .starts_with(setup.work.to_str().ok_or("path")?));
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.tmp", record.display()))?,
+        std::fs::read_to_string(format!("{}.home", record.display()))?
+    );
     assert!(work_is_empty(&setup)?);
     Ok(())
 }
@@ -548,5 +557,98 @@ fn a_failed_removal_is_logged_and_a_removal_leaves_nothing() -> TestResult {
     let directory = tempfile::Builder::new().tempdir_in(&setup.work)?;
     remove_directory(directory);
     assert!(work_is_empty(&setup)?);
+    Ok(())
+}
+
+
+#[test]
+fn a_kubeconfig_that_runs_a_command_is_refused_before_any_spawn() -> TestResult {
+    let setup = setup("default")?;
+    let counter = setup.root.path().join("runs");
+    let marker = setup.root.path().join("marker");
+    let plugin = install_script(setup.root.path(), "plugin", &format!("echo ran > {}", marker.display()))?;
+    let program = install_script(setup.root.path(), "prowler", &format!("echo run >> {}", counter.display()))?;
+    let hostile = [
+        format!("users:\n- name: a\n  user:\n    exec:\n      command: {}\n", plugin.display()),
+        format!(
+            "users:\n- name: a\n  user:\n    auth-provider:\n      config:\n        cmd-path: {}\n",
+            plugin.display()
+        ),
+        "users:\n- name: a\n  user:\n    tokenFile: /etc/shadow\n".to_owned(),
+        "clusters:\n- name: a\n  cluster:\n    proxy-url: http://127.0.0.1:1\n".to_owned(),
+    ];
+    hostile.iter().try_for_each(|body| -> TestResult {
+        std::fs::write(&setup.kubeconfig, body)?;
+        let refused = scan(&setup, &program, PATIENT).err();
+        assert!(matches!(refused, Some(ScanError::Kubeconfig { .. })));
+        let text = format!("{refused:?}");
+        assert!(!text.contains("shadow") && !text.contains("127.0.0.1"));
+        Ok(())
+    })?;
+    assert!(!counter.exists());
+    assert!(!marker.exists());
+    assert!(work_is_empty(&setup)?);
+    Ok(())
+}
+
+
+#[test]
+fn an_oversized_kubeconfig_is_refused_before_any_spawn() -> TestResult {
+    let setup = setup("default")?;
+    let counter = setup.root.path().join("runs");
+    let program = install_script(setup.root.path(), "prowler", &format!("echo run >> {}", counter.display()))?;
+    std::fs::write(&setup.kubeconfig, "a".repeat(usize::try_from(MAX_KUBECONFIG_BYTES)? + 1))?;
+    let refused = scan(&setup, &program, PATIENT).err();
+    assert!(matches!(
+        refused,
+        Some(ScanError::Kubeconfig {
+            fault: KubeconfigFault::TooLarge
+        })
+    ));
+    assert!(!counter.exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_rewrite_of_the_file_after_the_check_is_never_read_and_the_copy_is_sealed() -> TestResult {
+    let setup = setup("default")?;
+    let record = setup.root.path().join("record");
+    let copy = find_directory(&format!("cp {FIXTURE} \"$dir/posture.ocsf.json\""));
+    let body = format!(
+        "for arg in \"$@\"; do case \"$arg\" in /proc/*) kube=\"$arg\";; esac; done\n\
+         echo 'users: [evil]' > {kubeconfig}\n\
+         cat \"$kube\" > {record}.kube\nreadlink \"$kube\" > {record}.link\n\
+         if echo x >> \"$kube\" 2>/dev/null; then echo writable > {record}.write; fi\n{copy}",
+        kubeconfig = setup.kubeconfig.display(),
+        record = record.display()
+    );
+    let program = install_script(setup.root.path(), "prowler", &body)?;
+    scan(&setup, &program, PATIENT)?;
+    assert_eq!(std::fs::read_to_string(format!("{}.kube", record.display()))?, KUBE_BODY);
+    assert!(std::fs::read_to_string(format!("{}.link", record.display()))?.contains("memfd:"));
+    assert!(!Path::new(&format!("{}.write", record.display())).exists());
+    assert_eq!(std::fs::read_to_string(&setup.kubeconfig)?, "users: [evil]\n");
+    Ok(())
+}
+
+
+#[test]
+fn the_child_cannot_write_its_standard_input_and_reads_the_bytes_at_the_start() -> TestResult {
+    let setup = setup("default")?;
+    let record = setup.root.path().join("record");
+    let copy = find_directory(&format!("cp {FIXTURE} \"$dir/posture.ocsf.json\""));
+    let body = format!(
+        "if printf Z 1<> /proc/self/fd/0 2>/dev/null; then echo writable > {record}.write; fi\n\
+         if truncate -s 0 /proc/self/fd/0 2>/dev/null; then echo truncated > {record}.shrink; fi\n\
+         cat /proc/self/fd/0 > {record}.first\ncat /proc/self/fd/0 > {record}.second\n{copy}",
+        record = record.display()
+    );
+    let program = install_script(setup.root.path(), "prowler", &body)?;
+    scan(&setup, &program, PATIENT)?;
+    assert!(!Path::new(&format!("{}.write", record.display())).exists());
+    assert!(!Path::new(&format!("{}.shrink", record.display())).exists());
+    assert_eq!(std::fs::read_to_string(format!("{}.first", record.display()))?, KUBE_BODY);
+    assert_eq!(std::fs::read_to_string(format!("{}.second", record.display()))?, KUBE_BODY);
     Ok(())
 }

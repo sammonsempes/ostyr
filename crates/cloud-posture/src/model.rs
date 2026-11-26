@@ -103,6 +103,14 @@ pub enum KubeconfigFault {
     Linked,
     Mode,
     Owner,
+    TooLarge,
+    Bytes,
+    Shape,
+    TooMany,
+    Exec,
+    AuthProvider,
+    FilePath,
+    ProxyUrl,
 }
 
 
