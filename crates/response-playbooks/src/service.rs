@@ -2,7 +2,7 @@ use crate::batch::{dry_run_batch, AlertRun, DryRunLimits, DryRunReport, Line};
 use crate::bundle::{Bundle, MODULE};
 use crate::error::RoundError;
 use crate::feed::alert_json;
-use crate::render::write_dry_run;
+use crate::render::write_dry_run_redacted;
 use crate::runs::{run_rows, store_runs, RunRow, BOUND_NAME, MAX_PLAYBOOK_RUNS};
 use crate::types::{ControlFn, LiveFn, NowFn, WaitFn};
 use alerts::id::is_alert_id;
@@ -414,13 +414,16 @@ pub async fn simulate_page(live: &Live, lines: Vec<Line>) -> Result<Option<DryRu
     } else {
         let bundle = Arc::clone(&live.bundle);
         let settings = Arc::clone(&live.settings);
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let report = spawn_blocking(move || {
-            let limits = DryRunLimits {
-                max_alerts: settings.page_size,
-                max_matches_per_alert: settings.max_matches_per_alert,
-                max_trace_events: settings.max_trace_events,
-            };
-            dry_run_batch(&bundle, &settings.limits_file, &settings.scratch_dir, &settings.tenant, &lines, limits)
+            tracing::dispatcher::with_default(&dispatch, || {
+                let limits = DryRunLimits {
+                    max_alerts: settings.page_size,
+                    max_matches_per_alert: settings.max_matches_per_alert,
+                    max_trace_events: settings.max_trace_events,
+                };
+                dry_run_batch(&bundle, &settings.limits_file, &settings.scratch_dir, &settings.tenant, &lines, limits)
+            })
         })
         .await??;
         Ok(Some(report))
@@ -588,7 +591,7 @@ pub async fn run_round<Out: Write>(
             .collect();
         let report = simulate_page(live, lines).await?;
         if let Some(found) = &report {
-            write_dry_run(trace_out, found).map_err(RoundError::Trace)?;
+            write_dry_run_redacted(trace_out, found, &live.bundle.catalogue).map_err(RoundError::Trace)?;
         }
         let outcome = outcome_of(&items, &sorted, report.as_ref(), live.settings.page_size);
         let rows = run_rows(tenant_of(scope), &sorted.runnable, report.as_ref(), &live.bundle.catalogue);

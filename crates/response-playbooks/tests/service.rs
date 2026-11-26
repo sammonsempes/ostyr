@@ -20,16 +20,17 @@ use response_playbooks::bundle::{load_bundle, validate_bundle};
 use response_playbooks::error::RoundError;
 use response_playbooks::feed::{alert_json, summary_value};
 use response_playbooks::model::{ConditionOutcome, Mode, Trace, TraceEvent};
+use response_playbooks::render::{render_trace_redacted, write_dry_run_redacted};
 use response_playbooks::runs::{
     bounded_trace, cut_text, playbook_run_id, row_of as run_row_of, run_rows, RunRow, COUNT_SQL, CUT_MARKER, INSERT_SQL, LOCK_SQL, MAX_PLAYBOOK_RUNS,
     MAX_TRACE_BYTES, MIGRATIONS, MIGRATION_NAMESPACE, PRUNE_SQL,
 };
-use response_playbooks::service::log_pruned;
 use response_playbooks::service::{
     backoff, bounded_name, is_loud, is_replay, list, load_settings, log_partial_ack, next_failures, next_replays, open_service_settings, outcome_of,
     round_entry, run_id, run_round, serve, shown_id, sort_page, start_only_changed, validate_settings, Db, Live, Outcome, Replays, ServiceSettings,
     Sorted, INVALID_ID, MAX_BACKOFF_SHIFT, MAX_FEED_AGE_SECONDS, MAX_NAME_BYTES, MAX_RECORD_NAMES, MAX_REPLAYED_ROUNDS, NO_RANGE_REQUEST, ROUND_KEYS,
 };
+use response_playbooks::service::{log_pruned, log_round};
 use response_playbooks::types::ControlFuture;
 use response_playbooks::types::ParamMap;
 use serde_json::{json, Value};
@@ -38,10 +39,13 @@ use std::fs;
 use std::future::ready;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
+use tracing::dispatcher::set_default;
+use tracing::Dispatch;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::TestResult;
 
 
@@ -1630,5 +1634,144 @@ async fn a_refused_begin_runs_no_statement_and_a_failed_rollback_keeps_the_first
     *lock(&env.fake.fail_rollback) = true;
     assert!(matches!(round(&env, &mut Vec::new()).await, Err(RoundError::Audit(_))));
     assert_eq!(left(&env), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_redacted_trace_holds_no_marker_and_names_parameters_and_kinds() -> TestResult {
+    let env = env()?;
+    let trace = trace_of("pb", marker_events());
+    let text = render_trace_redacted(&env.live.bundle.catalogue, &trace);
+    assert!(!text.contains(MARKER), "{text}");
+    assert!(
+        text.starts_with("playbook pb v1 mode=simulate\n") && text.contains("\"kind\":\"action\""),
+        "{text}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_round_writes_no_alert_value_to_its_trace_output() -> TestResult {
+    let env = env()?;
+    let mut marked = whoami("e1");
+    marked.rule_title = format!("title {MARKER}");
+    marked.host_name = Some(format!("host-{MARKER}"));
+    put(&env, vec![row_of(&marked, FIRST_SEQ, 0)]);
+    let mut trace = Vec::new();
+    round(&env, &mut trace).await?;
+    let text = String::from_utf8(trace)?;
+    assert!(text.contains("\"kind\":\"action\"") && text.contains("\"channel\":"), "{text}");
+    assert!(!text.contains(MARKER), "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn the_redacted_writer_reports_a_failing_output() -> TestResult {
+    let env = env()?;
+    let report = DryRunReport {
+        tenant_refused: false,
+        alerts_not_run: 0,
+        trace_events: 0,
+        alerts: Vec::new(),
+    };
+    assert!(write_dry_run_redacted(&mut FailingWriter, &report, &env.live.bundle.catalogue).is_err());
+    Ok(())
+}
+
+
+pub static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
+
+
+const MARKED_PLAYBOOKS: [&str; 5] = [
+    "  - if: \"{{ true }}\"\n    then:\n      - action: isolate_endpoint\n        params: { host: \"{{ alert.host }}\" }\n",
+    "  - if: \"{{ alert.host.value / 2 > 1 }}\"\n    then:\n      - connector: slack\n        action: notify\n        params: { channel: c, message: \"{{ alert.rule_title }}\" }\n  - connector: slack\n    action: notify\n    params: { channel: c, message: \"{{ alert.host }}\" }\n",
+    "  - action: isolate_endpoint\n    params: { host: \"{{ alert.nosuch }}\" }\n",
+    "  - connector: slack\n    action: notify\n    params: { channel: \"{{ alert.user }}\", message: \"{{ alert.rule_title }} {{ alert.summary }}\" }\n",
+    "  - action: request_approval\n    params: { role: soc_lead, timeout: 15m, action: isolate_endpoint }\n",
+];
+
+
+pub fn marked_env(steps: &str) -> Result<Env, Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let mut current = settings_in(dir.path());
+    let file = dir.path().join("marked.yaml");
+    fs::write(
+        &file,
+        format!("name: Marked\nversion: 1\nmode: simulate\ntrigger:\n  alert.severity: high\nsteps:\n{steps}on_error:\n  - connector: pagerduty\n    action: page\n    params: {{ severity: high, summary: failed }}\n"),
+    )?;
+    current.playbooks = vec![file];
+    build_env(dir, current)
+}
+
+
+pub fn marked_alert() -> Alert {
+    let mut marked = alert("rule", "e1", Severity::High, &json!({"process": {"name": "whoami"}, "note": MARKER}));
+    marked.rule_title = format!("title {MARKER}");
+    marked.host_name = Some(format!("host-{MARKER}"));
+    marked.user_name = Some(format!("user-{MARKER}"));
+    marked
+}
+
+
+pub fn error_text(failed: &RoundError) -> String {
+    let chain = std::iter::successors(Some(failed as &dyn std::error::Error), |inner| inner.source());
+    chain.map(|inner| format!("{inner} {inner:?}")).collect::<Vec<_>>().join(" ")
+}
+
+
+#[tokio::test]
+async fn a_marked_alert_never_reaches_a_log_line_or_an_error_text_on_any_run_path() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&bytes);
+    let dispatch = core_api::logging::json_dispatch(BoxMakeWriter::new(move || Buffer { bytes: Arc::clone(&sink) }));
+    let guard = set_default(&dispatch);
+    let mut texts = Vec::new();
+    let mut failures: u32 = 0;
+    for steps in MARKED_PLAYBOOKS {
+        let env = marked_env(steps)?;
+        put(&env, vec![row_of(&marked_alert(), FIRST_SEQ, 0)]);
+        let outcome = round(&env, &mut Vec::new()).await;
+        assert!(outcome.is_ok());
+        log_round(&outcome, 0);
+    }
+    let breakers: &[fn(&Fake)] = &[
+        |fake| *lock(&fake.fail_feed) = true,
+        |fake| *lock(&fake.fail_ack) = true,
+        |fake| *lock(&fake.fail_audit) = true,
+        |fake| *lock(&fake.fail_insert) = true,
+        |fake| *lock(&fake.fail_commit) = true,
+        |fake| *lock(&fake.short_ack) = true,
+        |fake| *lock(&fake.bad_count) = true,
+    ];
+    for breaker in breakers {
+        let env = marked_env(MARKED_PLAYBOOKS[0])?;
+        put(&env, vec![row_of(&marked_alert(), FIRST_SEQ, 0)]);
+        breaker(&env.fake);
+        let outcome = round(&env, &mut Vec::new()).await;
+        failures += 1;
+        log_round(&outcome, failures);
+        texts.extend(outcome.err().map(|failed| error_text(&failed)));
+    }
+    let env = marked_env(MARKED_PLAYBOOKS[0])?;
+    put(&env, vec![row_of(&marked_alert(), FIRST_SEQ, 0)]);
+    let refused = round(&env, &mut FailingWriter).await;
+    texts.extend(refused.err().map(|failed| error_text(&failed)));
+    let panicked = tokio::task::spawn_blocking(|| std::panic::resume_unwind(Box::new(format!("panic {MARKER}"))))
+        .await
+        .err();
+    let joined = RoundError::from(panicked.ok_or("the task must fail")?);
+    texts.push(error_text(&joined));
+    log_round(&Err(joined), failures);
+    drop(guard);
+    let logged = String::from_utf8(lock(&bytes).clone())?;
+    assert!(logged.contains("playbooks round"), "{logged}");
+    assert!(!logged.contains(MARKER), "{logged}");
+    assert!(texts.len() > breakers.len());
+    assert!(texts.iter().all(|text| !text.contains(MARKER)), "{texts:?}");
+    assert!(texts.iter().any(|text| text.contains("dry run task failed")));
     Ok(())
 }

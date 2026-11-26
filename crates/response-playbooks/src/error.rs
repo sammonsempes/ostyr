@@ -132,8 +132,8 @@ pub enum RoundError {
     Store(#[from] alerts::error::StoreError),
     #[error("dry run: {0}")]
     DryRun(#[from] DryRunError),
-    #[error("the dry run task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
+    #[error("dry run task failed")]
+    Join,
     #[error("cannot write the trace: {0}")]
     Trace(#[source] io::Error),
     #[error("cannot append the round record: {0}")]
@@ -144,6 +144,14 @@ pub enum RoundError {
     Answer { statement: &'static str },
     #[error("the feed answered {deleted} rows deleted for a page of {expected}")]
     AckCount { deleted: usize, expected: usize },
+}
+
+
+/// A panic message of the dry run task can hold alert text: only the fixed variant is kept.
+impl From<tokio::task::JoinError> for RoundError {
+    fn from(_failure: tokio::task::JoinError) -> Self {
+        Self::Join
+    }
 }
 
 
