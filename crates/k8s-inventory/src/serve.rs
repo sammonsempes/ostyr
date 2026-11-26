@@ -3,10 +3,13 @@
 use crate::round::{log_round, one_round};
 use crate::service::{load_service_settings, open_service_settings_from, LiveSettings};
 use crate::settings::load_settings as load_fetch_settings;
-use crate::types::{InterruptWait, StartRead, WaitFn};
+use crate::signals::{reload_on_signals, stop_reloaders, Reloaders};
+use crate::types::{InterruptWait, ReloadSignals, StartRead, WaitFn};
 use cmdb::store::{MIGRATIONS, MIGRATION_NAMESPACE};
+use core_audit::error::AuditError;
 use core_audit::log::{append_declared, open_file_log, AuditLog};
-use core_config::reload::{current_config, ReloadEngine, RELOAD_DECLARED_KEYS};
+use core_audit::model::Outcome;
+use core_config::reload::{current_config, reload_entry, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use core_config::watch::watch_files;
 use core_pg::connect::connect;
@@ -22,7 +25,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{error, info};
+use tokio::sync::oneshot;
+use tracing::{error, info, warn};
 
 
 pub const USAGE: &str = "usage: ostyr-k8s-inventory <service.yaml>";
@@ -69,34 +73,48 @@ pub fn exit_code(result: &Result<(), ServeError>) -> ExitCode {
 }
 
 
+pub const MAX_INTERRUPTS_LOGGED: u64 = 1_000;
+
+
+/// Says what an interrupt does: the first stops the service after the round in flight, any later one changes nothing.
+pub fn announce(name: &'static str, first: Option<oneshot::Sender<()>>) {
+    match first {
+        Some(sender) => {
+            let sent = sender.send(()).is_ok();
+            info!(name, sent, "interrupt received, the round in flight finishes first");
+        }
+        None => warn!(name, "second interrupt ignored, the round in flight finishes first"),
+    }
+}
+
+
+/// Hears `limit` interrupts: the first one releases `first`, every later one is logged and ignored.
 #[cfg(unix)]
-pub fn keep_signals<Config: Send + Sync + 'static>(engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<impl Sized> {
-    core_config::signal::reload_on_signals(Arc::clone(engine), &[signal_hook::consts::SIGHUP])
+pub async fn announce_interrupts(
+    mut terminate: tokio::signal::unix::Signal,
+    mut interrupt: tokio::signal::unix::Signal,
+    first: oneshot::Sender<()>,
+    limit: u64,
+) {
+    let mut pending = Some(first);
+    for _ in 0..limit {
+        let name = tokio::select! {
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        announce(name, pending.take());
+    }
 }
 
 
-#[cfg(not(unix))]
-pub struct NoSignals;
-
-
-#[cfg(not(unix))]
-pub fn keep_signals<Config>(_engine: &Arc<ReloadEngine<Config>>) -> std::io::Result<NoSignals> {
-    Ok(NoSignals)
-}
-
-
-/// Completes on `SIGTERM` or `SIGINT`; both handlers are installed when this returns.
+/// Completes on the first `SIGTERM` or `SIGINT`; both handlers are installed when this returns, and a task logs every later one by name.
 #[cfg(unix)]
 pub fn stop_signals() -> std::io::Result<InterruptWait> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    Ok(Box::pin(async move {
-        tokio::select! {
-            _ = terminate.recv() => (),
-            _ = interrupt.recv() => (),
-        }
-        Ok(())
-    }))
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let (first_sender, first_receiver) = oneshot::channel();
+    tokio::spawn(announce_interrupts(terminate, interrupt, first_sender, MAX_INTERRUPTS_LOGGED));
+    Ok(Box::pin(async move { first_receiver.await.map_err(std::io::Error::other) }))
 }
 
 
@@ -135,13 +153,29 @@ pub async fn stop_asked(interrupt: &mut InterruptWait) -> Result<bool, Box<dyn E
 }
 
 
-/// A round runs to its end: the interrupt is only looked at between rounds, so a stop never cuts a fetch or a sync.
+/// The first configuration, audited at start: every setting name and value (paths, tenant, cluster, URL; never a secret), bounded by the audit.
+pub fn audit_start(engine: &ReloadEngine<LiveSettings>) -> Result<(), AuditError> {
+    let listing: String = (engine.to_state)(&current_config(engine))
+        .iter()
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect();
+    (engine.audit)(reload_entry(
+        &engine.context,
+        Outcome::Success,
+        [("result", "started".to_owned()), ("diff", listing)],
+    ))
+    .map(|_record| ())
+}
+
+
+/// Rounds run to their end (the interrupt is looked at between rounds only); then the reload sources are joined and the gate taken.
 pub async fn serve(
     engine: &ReloadEngine<LiveSettings>,
     pg: &PgSettings,
     max_rounds: u64,
     wait: WaitFn,
     interrupt: &mut InterruptWait,
+    reloaders: Reloaders,
 ) -> Result<Stop, Box<dyn Error>> {
     let mut rounds = 0;
     let mut stopped = false;
@@ -159,18 +193,34 @@ pub async fn serve(
             }?;
         }
     }
+    stop_reloaders(reloaders);
     drain_reloads(engine);
     Ok(if stopped { Stop::Interrupted } else { Stop::Capped(rounds) })
 }
 
 
-/// `first_read` is the one start read of the service file; the fetch file is read once beside it, and both are the baseline.
+/// The migrations of the CMDB store, from the start snapshot of the service settings.
+pub async fn prepare_store(engine: &ReloadEngine<LiveSettings>) -> Result<PgSettings, Box<dyn Error>> {
+    let pg = load_pg_settings(&current_config(engine).service.pg_settings)?;
+    migrate(
+        &connect(&pg).await?,
+        MIGRATION_NAMESPACE,
+        &MIGRATIONS,
+        Duration::from_secs(pg.statement_timeout_secs),
+    )
+    .await?;
+    Ok(pg)
+}
+
+
+/// `first_read` is the one start read of the service file; the fetch file is read once beside it, and the engine takes both as its baseline.
 pub async fn serving_with(
     first_read: StartRead,
     settings_file: &Path,
     max_rounds: u64,
     wait: WaitFn,
     mut interrupt: InterruptWait,
+    reload_signals: ReloadSignals,
 ) -> Result<Stop, Box<dyn Error>> {
     let start_service = first_read(settings_file)?;
     let service_file = absolute(settings_file)?;
@@ -187,24 +237,33 @@ pub async fn serving_with(
         baseline,
         boxed_reload_audit(&log),
     )?);
-    let _watch = watch_files(Arc::clone(&engine), &[service_file, fetch_file], DEBOUNCE)?;
-    let _signals = keep_signals(&engine)?;
-    let pg = load_pg_settings(&current_config(&engine).service.pg_settings)?;
-    migrate(
-        &connect(&pg).await?,
-        MIGRATION_NAMESPACE,
-        &MIGRATIONS,
-        Duration::from_secs(pg.statement_timeout_secs),
-    )
-    .await?;
-    info!("serving");
-    serve(&engine, &pg, max_rounds, wait, &mut interrupt).await
+    audit_start(&engine)?;
+    let watch = watch_files(Arc::clone(&engine), &[service_file, fetch_file], DEBOUNCE)?;
+    let reloaders = Reloaders {
+        stoppers: vec![reload_on_signals(reload_signals, Arc::clone(&engine)), Box::new(move || watch.stop())],
+    };
+    match prepare_store(&engine).await {
+        Ok(pg) => {
+            info!("serving");
+            serve(&engine, &pg, max_rounds, wait, &mut interrupt, reloaders).await
+        }
+        Err(error) => {
+            stop_reloaders(reloaders);
+            Err(error)
+        }
+    }
 }
 
 
 /// Answers `Ok` on an interrupt, `RoundCap` when `max_rounds` rounds ran, `Failed` for anything that stopped the start.
-pub async fn start(settings_file: &Path, max_rounds: u64, wait: WaitFn, interrupt: InterruptWait) -> Result<(), ServeError> {
-    let stop = serving_with(load_service_settings, settings_file, max_rounds, wait, interrupt)
+pub async fn start(
+    settings_file: &Path,
+    max_rounds: u64,
+    wait: WaitFn,
+    interrupt: InterruptWait,
+    reload_signals: ReloadSignals,
+) -> Result<(), ServeError> {
+    let stop = serving_with(load_service_settings, settings_file, max_rounds, wait, interrupt, reload_signals)
         .await
         .map_err(ServeError::Failed)?;
     match stop {
@@ -217,11 +276,11 @@ pub async fn start(settings_file: &Path, max_rounds: u64, wait: WaitFn, interrup
 }
 
 
-pub async fn run(arguments: &[String], interrupt: InterruptWait) -> Result<(), ServeError> {
+pub async fn run(arguments: &[String], interrupt: InterruptWait, reload_signals: ReloadSignals) -> Result<(), ServeError> {
     let settings_file = match arguments {
         [file] => Ok(file),
         _ => Err(ServeError::Usage),
     }?;
     install_logging().map_err(ServeError::Failed)?;
-    start(Path::new(settings_file), MAX_ROUNDS, pause, interrupt).await
+    start(Path::new(settings_file), MAX_ROUNDS, pause, interrupt, reload_signals).await
 }

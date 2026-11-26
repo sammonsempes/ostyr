@@ -406,6 +406,21 @@ pub fn add_page(report: &mut SyncReport, done: &PageResult) {
 }
 
 
+/// A failure after at least one committed page keeps the counts of those pages; one on the first page is a plain store error.
+pub fn failed_page(pages: usize, report: &SyncReport, source: StoreError) -> SyncError {
+    if pages == 0 {
+        SyncError::Store(source)
+    } else {
+        SyncError::Partial {
+            pages,
+            created: report.created,
+            updated: report.updated,
+            source,
+        }
+    }
+}
+
+
 /// The scope comes from `settings.tenant` once per run and must be the inventory's own; nothing in the API answer selects a tenant. Assets are reloaded for each page.
 pub async fn sync(
     exec: Executor<'_, '_>,
@@ -425,12 +440,16 @@ pub async fn sync(
         ..SyncReport::default()
     };
     let mut refused_by_reconcile = 0;
+    let mut committed_pages = 0;
     for page in found.chunks(PAGE_OBSERVATIONS) {
         let before = report.skipped;
         match apply_page(exec, &scope, page, truth, limits).await {
-            Ok(done) => add_page(&mut report, &done),
+            Ok(done) => {
+                add_page(&mut report, &done);
+                committed_pages += 1;
+            }
             Err(StoreError::RetriesExhausted { .. }) => report.unapplied += page.len(),
-            Err(other) => Err(other)?,
+            Err(other) => Err(failed_page(committed_pages, &report, other))?,
         }
         refused_by_reconcile += report.skipped - before;
     }

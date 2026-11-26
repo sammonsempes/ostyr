@@ -27,6 +27,9 @@ pub enum RoundFault {
 }
 
 
+pub const PARTIAL_CLASS: &str = "cmdb_partial";
+
+
 pub fn fault_class(fault: &RoundFault) -> &'static str {
     match fault {
         RoundFault::Fetch(FetchError::WritableCredential { .. } | FetchError::RulesUnverifiable { .. } | FetchError::MissingRead { .. }) => {
@@ -34,6 +37,7 @@ pub fn fault_class(fault: &RoundFault) -> &'static str {
         }
         RoundFault::Fetch(_) => "fetch",
         RoundFault::Pg(_) => "cmdb_store",
+        RoundFault::Sync(SyncError::Partial { .. }) => PARTIAL_CLASS,
         RoundFault::Sync(_) => "cmdb_sync",
     }
 }
@@ -72,7 +76,11 @@ pub fn log_round(result: &Result<SyncReport, RoundFault>) {
         Err(fault) => {
             let class = fault_class(fault);
             let reason = fault.to_string();
-            warn!(class, reason, "k8s round failed, the CMDB keeps the last sync");
+            if class == PARTIAL_CLASS {
+                warn!(class, reason, "k8s round failed, the CMDB holds a partial sync");
+            } else {
+                warn!(class, reason, "k8s round failed, the CMDB keeps the last sync");
+            }
         }
     }
 }

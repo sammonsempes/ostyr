@@ -10,12 +10,16 @@ use core_config::reload::{open_engine, ReloadContext, ReloadEngine};
 use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 
 pub const MIN_INTERVAL_SECONDS: u64 = 60;
 
 
 pub const MAX_INTERVAL_SECONDS: u64 = 86_400;
+
+
+pub const FETCH_KEY_PREFIX: &str = "fetch::";
 
 
 pub const MODULE: &str = "k8s-inventory";
@@ -86,18 +90,6 @@ pub struct LiveSettings {
 }
 
 
-/// Everything except the live values must equal the start-up snapshot.
-pub fn start_only_changed(baseline: &ServiceSettings, current: &ServiceSettings) -> bool {
-    let same_live = ServiceSettings {
-        interval_seconds: baseline.interval_seconds,
-        max_assets: baseline.max_assets,
-        max_child_rows: baseline.max_child_rows,
-        ..current.clone()
-    };
-    same_live != *baseline
-}
-
-
 pub fn load_service_settings(file: &Path) -> Result<ServiceSettings, ConfigError> {
     let settings: ServiceSettings = load_file(file)?;
     validate_settings(&settings)?;
@@ -105,19 +97,45 @@ pub fn load_service_settings(file: &Path) -> Result<ServiceSettings, ConfigError
 }
 
 
-/// Only the timeout and the limits are live: the tenant, the cluster, the API URL and the two credential paths pin what one process may reach.
-pub fn fetch_start_only_changed(baseline: &FetchSettings, current: &FetchSettings) -> bool {
-    let same_live = FetchSettings {
-        timeout_ms: baseline.timeout_ms,
-        page_size: baseline.page_size,
-        max_bytes: baseline.max_bytes,
-        max_run_bytes: baseline.max_run_bytes,
-        max_pages: baseline.max_pages,
-        max_total_items: baseline.max_total_items,
-        max_namespaces: baseline.max_namespaces,
-        ..current.clone()
-    };
-    same_live != *baseline
+/// The keys of `settings_state` a running process may change: everything else (tenant, cluster, API URL, credential paths) is start-only.
+pub const LIVE_KEYS: &[&str] = &[
+    "interval_seconds",
+    "max_assets",
+    "max_child_rows",
+    "fetch::timeout_ms",
+    "fetch::page_size",
+    "fetch::max_bytes",
+    "fetch::max_run_bytes",
+    "fetch::max_pages",
+    "fetch::max_total_items",
+    "fetch::max_namespaces",
+];
+
+
+/// The start-only keys whose value differs from the start-up snapshot: key names only, never a value.
+pub fn start_only_changes(baseline: &LiveSettings, current: &LiveSettings) -> Vec<String> {
+    let before = settings_state(baseline);
+    settings_state(current)
+        .into_iter()
+        .filter(|(key, value)| !LIVE_KEYS.contains(&key.as_str()) && before.get(key) != Some(value))
+        .map(|(key, _)| key)
+        .collect()
+}
+
+
+/// Names each changed key with the file it belongs to.
+pub fn start_only_refusal(changed: &[String]) -> ConfigError {
+    let named: Vec<String> = changed
+        .iter()
+        .map(|key| {
+            key.strip_prefix(FETCH_KEY_PREFIX)
+                .map_or_else(|| format!("service file: {key}"), |name| format!("fetch file: {name}"))
+        })
+        .collect();
+    setting_error(
+        "start-only",
+        &format!("{} read at start only, restart the service to change them", named.join(", ")),
+    )
 }
 
 
@@ -159,26 +177,26 @@ pub fn fetch_refusal(error: FetchError) -> ConfigError {
 }
 
 
-/// One read of each file per load: a start-only change in either is refused, so the old snapshot stays.
+/// One read of each file; a start-only change in either is refused, so the old snapshot stays.
+pub fn reread(file: &Path, fetch_file: &Path, baseline: &LiveSettings) -> Result<LiveSettings, ConfigError> {
+    let service = load_service_settings(file)?;
+    let fetch = load_settings(fetch_file).map_err(fetch_refusal)?;
+    let current = LiveSettings { service, fetch };
+    let changed = start_only_changes(baseline, &current);
+    if changed.is_empty() {
+        Ok(current)
+    } else {
+        Err(start_only_refusal(&changed))
+    }
+}
+
+
+/// The engine's first load returns the start read as it is (each file is read once at start); every later load re-reads both.
 pub fn settings_loader(file: PathBuf, fetch_file: PathBuf, baseline: LiveSettings) -> Box<LoaderFn<LiveSettings>> {
+    let first = Mutex::new(Some(baseline.clone()));
     Box::new(move || {
-        let service = load_service_settings(&file)?;
-        if start_only_changed(&baseline.service, &service) {
-            Err(setting_error(
-                "start-only",
-                "fetch_settings, pg_settings and audit_file are read at start only, restart the service to change them",
-            ))
-        } else {
-            let fetch = load_settings(&fetch_file).map_err(fetch_refusal)?;
-            if fetch_start_only_changed(&baseline.fetch, &fetch) {
-                Err(setting_error(
-                    "start-only",
-                    "tenant, cluster, api_url, ca_file and token_file are read at start only, restart the service to change them",
-                ))
-            } else {
-                Ok(LiveSettings { service, fetch })
-            }
-        }
+        let seed = first.lock().unwrap_or_else(PoisonError::into_inner).take();
+        seed.map_or_else(|| reread(&file, &fetch_file, &baseline), Ok)
     })
 }
 

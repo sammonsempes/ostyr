@@ -19,6 +19,7 @@ use k8s_inventory::round::{fault_class, one_round, RoundFault};
 use k8s_inventory::serve::{exit_code, pause, run, serving_with, start, ServeError, Stop};
 use k8s_inventory::service::{load_service_settings, LiveSettings};
 use k8s_inventory::settings::load_settings;
+use k8s_inventory::signals::quiet_reload_signals;
 use k8s_inventory::types::InterruptWait;
 use pg_fake::certs::{loopback, make_pki};
 use pg_fake::fake::{self, Fake, Mode, Reply};
@@ -36,10 +37,10 @@ use std::pin::Pin;
 use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::thread::spawn;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::debug;
 use types::TestResult;
 
@@ -299,8 +300,9 @@ fn spawn_service(settings_file: &Path) -> Result<Running, Box<dyn std::error::Er
 
 fn wait_for_line(running: &Running, marker: &str) -> Result<String, Box<dyn std::error::Error>> {
     let mut seen = Vec::new();
+    let deadline = Instant::now() + HANG_GUARD;
     let found = (0..usize::MAX)
-        .map(|_| running.lines.recv_timeout(HANG_GUARD))
+        .map(|_| running.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())))
         .find_map(|received| match received {
             Ok(line) => {
                 seen.push(line.clone());
@@ -350,7 +352,11 @@ async fn serve_one_round_then(name: &str) -> TestResult {
     assert_eq!(state.pod_lists.load(Ordering::SeqCst), 1);
     let seen = seen_of(&rig.stub)?;
     assert!(seen.iter().all(|request| request.authorization == format!("Bearer {TOKEN}")));
-    assert!(site.dir.join("audit.log").exists());
+    let audit = fs::read_to_string(site.dir.join("audit.log"))?;
+    assert!(audit.contains("\"result\":\"started\""), "{audit}");
+    assert!(audit.contains("\"tenant\":\"all\""), "{audit}");
+    assert!(audit.contains(&format!("fetch::tenant={}", rig.settings.tenant)), "{audit}");
+    assert!(!audit.contains(TOKEN), "{audit}");
     Ok(())
 }
 
@@ -473,10 +479,10 @@ async fn a_stop_asked_during_the_start_skips_the_first_round() -> TestResult {
     let rig = rig(handler_of(&state))?;
     let (fake, ca_pem) = fake_with(accepting()).await?;
     let site = write_site(&rig, fake.port, &ca_pem)?;
-    start(&site.settings_file, u64::MAX, pause, Box::pin(ready(Ok(())))).await?;
+    start(&site.settings_file, u64::MAX, pause, Box::pin(ready(Ok(()))), quiet_reload_signals()?).await?;
     assert_eq!(state.pod_lists.load(Ordering::SeqCst), 0);
     let failing: InterruptWait = Box::pin(ready(Err(io::Error::other("no signal"))));
-    let error = start(&site.settings_file, u64::MAX, pause, failing)
+    let error = start(&site.settings_file, u64::MAX, pause, failing, quiet_reload_signals()?)
         .await
         .err()
         .ok_or("expected an error")?;
@@ -491,7 +497,7 @@ async fn the_round_cap_is_the_named_error_after_every_round_ran() -> TestResult 
     let rig = rig(handler_of(&state))?;
     let (fake, ca_pem) = fake_with(accepting()).await?;
     let site = write_site(&rig, fake.port, &ca_pem)?;
-    let error = start(&site.settings_file, TWO_ROUNDS, at_once, never())
+    let error = start(&site.settings_file, TWO_ROUNDS, at_once, never(), quiet_reload_signals()?)
         .await
         .err()
         .ok_or("expected the cap")?;
@@ -512,12 +518,28 @@ async fn a_token_that_gains_a_write_verb_is_refused_before_any_list() -> TestRes
     let statements = Arc::new(AtomicUsize::new(0));
     let (fake, ca_pem) = fake_with(counting(&statements)).await?;
     let site = write_site(&rig, fake.port, &ca_pem)?;
-    let first = serving_with(load_service_settings, &site.settings_file, ONE_ROUND, at_once, never()).await?;
+    let first = serving_with(
+        load_service_settings,
+        &site.settings_file,
+        ONE_ROUND,
+        at_once,
+        never(),
+        quiet_reload_signals()?,
+    )
+    .await?;
     assert_eq!(first, Stop::Capped(ONE_ROUND));
     assert_eq!(state.pod_lists.load(Ordering::SeqCst), 1);
     state.writable.store(true, Ordering::SeqCst);
     let before = statements.load(Ordering::SeqCst);
-    let second = serving_with(load_service_settings, &site.settings_file, ONE_ROUND, at_once, never()).await?;
+    let second = serving_with(
+        load_service_settings,
+        &site.settings_file,
+        ONE_ROUND,
+        at_once,
+        never(),
+        quiet_reload_signals()?,
+    )
+    .await?;
     assert_eq!(second, Stop::Capped(ONE_ROUND));
     assert_eq!(state.pod_lists.load(Ordering::SeqCst), 1);
     let migration_only = statements.load(Ordering::SeqCst) - before;
@@ -556,15 +578,15 @@ async fn each_failing_store_is_its_own_named_round_fault() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_refuses_a_bad_usage_and_installs_logging_once() -> TestResult {
-    let usage = run(&[], never()).await.err().ok_or("expected the usage")?;
+    let usage = run(&[], never(), quiet_reload_signals()?).await.err().ok_or("expected the usage")?;
     assert!(matches!(usage, ServeError::Usage));
     let state = behaviour(false, false);
     let rig = rig(handler_of(&state))?;
     let (fake, ca_pem) = fake_with(accepting()).await?;
     let site = write_site(&rig, fake.port, &ca_pem)?;
     let arguments = [site.settings_file.display().to_string()];
-    run(&arguments, Box::pin(ready(Ok(())))).await?;
-    let again = run(&arguments, Box::pin(ready(Ok(()))))
+    run(&arguments, Box::pin(ready(Ok(()))), quiet_reload_signals()?).await?;
+    let again = run(&arguments, Box::pin(ready(Ok(()))), quiet_reload_signals()?)
         .await
         .err()
         .ok_or("expected a second install to fail")?;
@@ -705,7 +727,7 @@ async fn an_interrupt_that_fails_while_waiting_between_rounds_stops_the_service_
             Poll::Ready(Err(io::Error::other("signal stream closed")))
         }
     }));
-    let error = start(&site.settings_file, u64::MAX, pause, late_failure)
+    let error = start(&site.settings_file, u64::MAX, pause, late_failure, quiet_reload_signals()?)
         .await
         .err()
         .ok_or("expected the signal error")?;
@@ -729,5 +751,76 @@ async fn a_round_uses_the_snapshot_and_never_reads_the_fetch_file_again() -> Tes
     let report = one_round(&pg, &live).await?;
     assert_eq!(report.created, 0);
     assert_eq!(state.pod_lists.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+
+fn holding_first(entered: Sender<()>, release: Receiver<()>) -> PgHandler {
+    let gate = Mutex::new(Some((entered, release)));
+    Arc::new(move |_| {
+        let taken = gate.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some((entered_now, released)) = taken {
+            let sent = entered_now.send(()).is_ok();
+            let released_in_time = released.recv_timeout(HANG_GUARD).is_ok();
+            debug!(sent, released_in_time, "first statement held");
+        }
+        Reply::Done
+    })
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sighup_during_the_start_is_queued_and_the_service_survives() -> TestResult {
+    let rig = rig(handler_of(&behaviour(false, false)))?;
+    let (entered, entered_seen) = channel();
+    let (release, released) = channel();
+    let (fake, ca_pem) = fake_with(holding_first(entered, released)).await?;
+    let site = write_site(&rig, fake.port, &ca_pem)?;
+    let mut running = spawn_service(&site.settings_file)?;
+    tokio::task::block_in_place(|| entered_seen.recv_timeout(HANG_GUARD))?;
+    signal(&running, "-HUP")?;
+    release.send(())?;
+    tokio::task::block_in_place(|| wait_for_line(&running, ROUND_DONE))?;
+    signal(&running, "-TERM")?;
+    tokio::task::block_in_place(|| exits_zero(&mut running))?;
+    Ok(())
+}
+
+
+#[test]
+fn main_registers_the_reload_signals_before_it_reads_anything() -> TestResult {
+    let main = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/ostyr-k8s-inventory.rs"))?;
+    let registered = main.find("early_reload_signals()").ok_or("no early registration")?;
+    let running = main.find("run(&arguments").ok_or("no run")?;
+    assert!(registered < running);
+    let serve = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/serve.rs"))?;
+    assert!(!serve.contains("early_reload_signals"), "the signals are registered in main only");
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_interrupt_during_a_round_is_logged_by_name_and_ignored() -> TestResult {
+    let state = behaviour(false, false);
+    let (held, held_seen) = channel();
+    let (release, released) = channel();
+    *state.hold.lock().map_err(|_poisoned| "poisoned")? = Some((held, released));
+    let rig = rig(handler_of(&state))?;
+    let (fake, ca_pem) = fake_with(accepting()).await?;
+    let site = write_site(&rig, fake.port, &ca_pem)?;
+    let mut running = spawn_service(&site.settings_file)?;
+    tokio::task::block_in_place(|| held_seen.recv_timeout(HANG_GUARD))?;
+    signal(&running, "-TERM")?;
+    signal(&running, "-INT")?;
+    release.send(())?;
+    tokio::task::block_in_place(|| exits_zero(&mut running))?;
+    let lines: Vec<String> = running.lines.iter().collect();
+    let line = lines
+        .iter()
+        .find(|line| line.contains("second interrupt ignored"))
+        .ok_or("the second interrupt was not logged")?;
+    assert!(line.contains("SIGTERM") || line.contains("SIGINT"), "{line}");
+    let done = lines.iter().find(|entry| entry.contains(ROUND_DONE)).ok_or("the round did not finish")?;
+    assert!(done.contains("created=0"), "{done}");
     Ok(())
 }

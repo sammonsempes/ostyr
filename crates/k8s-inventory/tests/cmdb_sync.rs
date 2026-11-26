@@ -456,6 +456,31 @@ async fn another_store_error_stops_the_run() -> TestResult {
 
 
 #[tokio::test]
+async fn a_failure_on_a_later_page_keeps_the_counts_of_the_pages_already_committed() -> TestResult {
+    let db = Db::default();
+    lock(&db.forced).extend([Forced::Proceed, Forced::OtherError]);
+    let exec = executor(&db);
+    let failed = sync(&exec, &settings("a", "prod-1"), &many(MANY_PODS)?, &TruthMap::new(), &Limits::default()).await;
+    let error = failed.err().ok_or("the sync was accepted")?;
+    assert!(
+        matches!(
+            error,
+            SyncError::Partial {
+                pages: 1,
+                created: PAGE_OBSERVATIONS,
+                updated: 0,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().starts_with("partly synced: pages=1 created=100 updated=0"), "{error}");
+    assert_eq!(stored_ids(&db)?.len(), PAGE_OBSERVATIONS);
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_large_inventory_is_applied_in_pages() -> TestResult {
     let db = Db::default();
     let exec = executor(&db);

@@ -14,5 +14,6 @@ pub mod round;
 pub mod serve;
 pub mod service;
 pub mod settings;
+pub mod signals;
 pub mod text;
 pub mod types;

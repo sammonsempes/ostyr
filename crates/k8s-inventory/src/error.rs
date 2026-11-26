@@ -40,6 +40,14 @@ pub enum SyncError {
     ScopeMismatch,
     #[error("cmdb store: {0}")]
     Store(#[from] cmdb::error::StoreError),
+    #[error("partly synced: pages={pages} created={created} updated={updated}, then the cmdb store failed: {source}")]
+    Partial {
+        pages: usize,
+        created: usize,
+        updated: usize,
+        #[source]
+        source: cmdb::error::StoreError,
+    },
 }
 
 

@@ -30,3 +30,17 @@ pub type WaitFn = fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>;
 
 /// The one start read of the service settings file; production passes `load_service_settings`.
 pub type StartRead = fn(&Path) -> Result<ServiceSettings, ConfigError>;
+
+
+/// Stops one reload source (the file watch or the signal thread) and waits for it to end.
+pub type Stopper = Box<dyn FnOnce()>;
+
+
+/// The reload signals, registered first in `main`.
+#[cfg(unix)]
+pub type ReloadSignals = signal_hook::iterator::Signals;
+
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub struct ReloadSignals;
