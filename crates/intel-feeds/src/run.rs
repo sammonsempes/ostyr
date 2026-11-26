@@ -3,17 +3,64 @@ use crate::dedup::{insert_ioc, is_expired};
 use crate::error::FeedError;
 use crate::export::export_bundle;
 use crate::formats::parse_feed;
+use crate::limits::MAX_FEED_FILE_BYTES;
 use crate::model::{Collector, FeedSummary};
 use crate::types::{ExportRun, IocIndex, OpenFn};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::Path;
 use time::OffsetDateTime;
 use tracing::error;
 
 
+pub const NOT_REGULAR: &str = "the feed file is not a regular file";
+
+
+pub const TOO_LARGE: &str = "the feed file is larger than the byte cap";
+
+
+pub const SYMLINK: &str = "the feed file is a symlink";
+
+
+/// A feed file opened without blocking, judged on the handle: a regular file within the byte cap, read through that handle only.
 pub fn open_file(path: &Path) -> io::Result<Box<dyn BufRead>> {
-    Ok(Box::new(BufReader::new(File::open(path)?)))
+    open_file_with(path, File::metadata)
+}
+
+
+/// `inspect` is injected so that a failing inspection can be tested.
+pub fn open_file_with(path: &Path, inspect: fn(&File) -> io::Result<Metadata>) -> io::Result<Box<dyn BufRead>> {
+    let handle = open_handle(path)?;
+    let metadata = inspect(&handle)?;
+    if !metadata.is_file() {
+        Err(io::Error::new(ErrorKind::InvalidInput, NOT_REGULAR))
+    } else if metadata.len() > MAX_FEED_FILE_BYTES {
+        Err(io::Error::new(ErrorKind::InvalidInput, TOO_LARGE))
+    } else {
+        Ok(Box::new(BufReader::new(handle.take(MAX_FEED_FILE_BYTES))))
+    }
+}
+
+
+/// `O_NOFOLLOW | O_NONBLOCK`: a symlink is refused by name and a FIFO or device cannot stall the open.
+#[cfg(unix)]
+pub fn open_handle(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    options.open(path).map_err(|source| {
+        if source.raw_os_error() == Some(libc::ELOOP) {
+            io::Error::new(ErrorKind::InvalidInput, SYMLINK)
+        } else {
+            source
+        }
+    })
+}
+
+
+#[cfg(not(unix))]
+pub fn open_handle(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).open(path)
 }
 
 

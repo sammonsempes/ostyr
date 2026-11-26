@@ -1,10 +1,12 @@
 use crate::config::{validate_clickhouse, ClickhouseConfig, ClickhouseError, FeedConfig};
+use crate::error::pg_category;
+use crate::files::read_trusted;
 use crate::model::Ioc;
 use crate::store::{
     checked_column_ddl, dictionary_ddl, insert_plan, insert_statement, quote_identifier, settings_for, table_ddl, tlp_column_ddl, Batch, StoreError,
 };
 use core_pg::error::PgError;
-use core_pg::password::{read_limited, read_password};
+use core_pg::password::read_password;
 use serde::Serialize;
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, new_agent, KEY_HEADER, MAX_CA_BYTES, USER_HEADER};
 use siem_ingest::error::{InsertClass, InsertError};
@@ -20,11 +22,11 @@ use ureq::Agent;
 pub enum LoadError {
     #[error(transparent)]
     Settings(#[from] ClickhouseError),
-    #[error("the ClickHouse password file could not be used")]
+    #[error("the ClickHouse password file could not be used: {}", pg_category(.0))]
     Password(#[source] PgError),
     #[error("the ClickHouse password is not valid UTF-8")]
     PasswordEncoding(#[source] Utf8Error),
-    #[error("the ClickHouse CA file could not be used")]
+    #[error("the ClickHouse CA file could not be used: {}", pg_category(.0))]
     CaFile(#[source] PgError),
     #[error(transparent)]
     Agent(#[from] InsertError),
@@ -93,7 +95,7 @@ pub fn agent_for(config: &ClickhouseConfig) -> Result<Agent, LoadError> {
     let pem = config
         .ca_file
         .as_deref()
-        .map(|path| read_limited(path, MAX_CA_BYTES).map_err(LoadError::CaFile))
+        .map(|path| read_trusted(path, MAX_CA_BYTES).map_err(LoadError::CaFile))
         .transpose()?;
     Ok(new_agent(pem.as_deref().map(Vec::as_slice), !is_loopback_http(&config.url))?)
 }

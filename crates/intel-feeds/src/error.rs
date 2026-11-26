@@ -8,6 +8,19 @@ use std::str::Utf8Error;
 use thiserror::Error;
 
 
+/// A fixed category for a refused secret or CA file: never the path, never the cause text.
+pub fn pg_category(failure: &PgError) -> &'static str {
+    match failure {
+        PgError::Io { .. } => "unreadable",
+        PgError::NotRegular { .. } | PgError::SecretSymlink { .. } => "not a regular file",
+        PgError::SecretMode { .. } | PgError::SecretOwner { .. } => "permissions",
+        PgError::TooLarge { .. } => "too large",
+        PgError::EmptyPassword { .. } => "empty",
+        _ => "invalid",
+    }
+}
+
+
 #[derive(Debug, Error)]
 pub enum CanonError {
     #[error("invalid address: {0}")]
@@ -118,9 +131,9 @@ pub enum TaxiiError {
     Settings(#[from] TaxiiConfigError),
     #[error("the feed has no taxii section")]
     NoSection,
-    #[error("the TAXII password file could not be used")]
+    #[error("the TAXII password file could not be used: {}", pg_category(.0))]
     Password(#[source] PgError),
-    #[error("the TAXII CA file could not be used")]
+    #[error("the TAXII CA file could not be used: {}", pg_category(.0))]
     CaFile(#[source] PgError),
     #[error("the TAXII client could not be built")]
     Agent(#[source] InsertError),
