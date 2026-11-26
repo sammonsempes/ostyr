@@ -173,6 +173,7 @@ fn settings_of(fixture: &Fixture) -> ApplySettings {
         retired_caddy_program: false,
         admin_socket: fixture.admin.join("sock").to_string_lossy().into_owned(),
         deadline_seconds: SETTINGS_DEADLINE,
+        audit_file: None,
     }
 }
 
@@ -562,6 +563,7 @@ fn the_refused_list_is_cut_with_a_visible_marker() -> Result<(), Box<dyn Error>>
             retired_caddy_program: false,
             admin_socket: "/s".to_owned(),
             deadline_seconds: SETTINGS_DEADLINE,
+            audit_file: None,
         },
         json: "{}".to_owned(),
         ca_root: None,
