@@ -6,14 +6,16 @@ mod memory;
 mod types;
 
 
+use cmdb::error::StoreError;
 use cmdb::model::{AssetKind, IdentityKey, Limits};
 use cmdb::store::{ASSETS_TABLE, ATTEMPT_CEILING, ATTRIBUTES_TABLE, KEYS_TABLE};
 use cmdb::types::{RowFuture, TruthMap};
+use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use fixtures::{list, node, pod, set, uid};
 use k8s_inventory::cmdb_sync::{
-    blocked_cap, cap_label, cloud_id, node_observation, observations, pod_observation, refused_page, source_of, sync, Room, SyncReport,
-    PAGE_OBSERVATIONS,
+    blocked_cap, cap_label, cloud_id, node_observation, observations, pod_observation, refused_page, source_of, sync, unknown_cause, Room,
+    SyncReport, PAGE_OBSERVATIONS,
 };
 use k8s_inventory::error::SyncError;
 use k8s_inventory::inventory::{build_inventory, Inventory};
@@ -451,6 +453,120 @@ async fn another_store_error_stops_the_run() -> TestResult {
     let exec = executor(&db);
     let failed = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &Limits::default()).await;
     assert!(matches!(failed, Err(SyncError::Store(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failure_on_a_later_page_keeps_the_counts_of_the_pages_already_committed() -> TestResult {
+    let db = Db::default();
+    lock(&db.forced).extend([Forced::Proceed, Forced::OtherError]);
+    let exec = executor(&db);
+    let failed = sync(&exec, &settings("a", "prod-1"), &many(MANY_PODS)?, &TruthMap::new(), &Limits::default()).await;
+    let error = failed.err().ok_or("the sync was accepted")?;
+    assert!(
+        matches!(
+            error,
+            SyncError::Partial {
+                pages: 1,
+                created: PAGE_OBSERVATIONS,
+                updated: 0,
+                conflicts: 0,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().starts_with("partly synced: pages=1 created=100 updated=0"), "{error}");
+    assert_eq!(stored_ids(&db)?.len(), PAGE_OBSERVATIONS);
+    Ok(())
+}
+
+
+async fn failure_of(forced: &[Forced], pods: usize) -> Result<SyncError, Box<dyn std::error::Error>> {
+    let db = Db::default();
+    lock(&db.forced).extend(forced.iter().copied());
+    let exec = executor(&db);
+    let failed = sync(&exec, &settings("a", "prod-1"), &many(pods)?, &TruthMap::new(), &Limits::default()).await;
+    Ok(failed.err().ok_or("the sync was accepted")?)
+}
+
+
+#[tokio::test]
+async fn a_client_deadline_on_the_first_page_is_an_unknown_outcome_never_a_plain_store_error() -> TestResult {
+    let error = failure_of(&[Forced::Deadline, Forced::Proceed], MANY_PODS).await?;
+    assert!(
+        matches!(
+            error,
+            SyncError::Unknown {
+                pages: 0,
+                created: 0,
+                cause: "client_deadline",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("may hold the failed page or not"), "{error}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_client_deadline_on_a_later_page_keeps_the_counts_before_it_and_is_unknown() -> TestResult {
+    let error = failure_of(&[Forced::Proceed, Forced::Deadline], MANY_PODS).await?;
+    assert!(
+        matches!(
+            error,
+            SyncError::Unknown {
+                pages: 1,
+                created: PAGE_OBSERVATIONS,
+                cause: "client_deadline",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_answer_that_does_not_parse_after_the_statement_ran_is_unknown() -> TestResult {
+    let error = failure_of(&[Forced::BadAnswer, Forced::Proceed], MANY_PODS).await?;
+    assert!(
+        matches!(
+            error,
+            SyncError::Unknown {
+                pages: 0,
+                cause: "bad_answer",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_server_error_on_the_first_page_stays_a_plain_store_error() -> TestResult {
+    let error = failure_of(&[Forced::OtherError, Forced::Proceed], MANY_PODS).await?;
+    assert!(matches!(error, SyncError::Store(_)), "{error:?}");
+    Ok(())
+}
+
+
+#[test]
+fn the_causes_of_an_unknown_outcome_are_told_apart_from_the_known_refusals() -> TestResult {
+    let unknown = |error: StoreError| unknown_cause(&error);
+    assert_eq!(unknown(StoreError::Pg(PgError::ClientDeadline { seconds: 1 })), Some("client_deadline"));
+    assert_eq!(unknown(StoreError::Pg(PgError::DeadlineOverflow)), Some("database"));
+    assert_eq!(unknown(StoreError::BadRow { table: "t" }), Some("bad_answer"));
+    assert_eq!(unknown(StoreError::Pg(PgError::StatementTimeout { seconds: 1 })), None);
+    assert_eq!(unknown(StoreError::Pg(PgError::ConnectTimeout { seconds: 1 })), None);
+    assert_eq!(unknown(StoreError::VersionConflict), None);
+    assert_eq!(unknown(StoreError::CapReached { table: "t" }), None);
     Ok(())
 }
 

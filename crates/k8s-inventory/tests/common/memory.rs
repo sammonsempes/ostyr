@@ -43,6 +43,9 @@ pub enum Forced {
     Stale,
     UniqueViolation,
     OtherError,
+    Deadline,
+    BadAnswer,
+    Proceed,
 }
 
 
@@ -393,7 +396,9 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &str, params: &[String]) -> Res
             Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned(), String::new()]]),
             Some(Forced::UniqueViolation) => Err(unique_violation()),
             Some(Forced::OtherError) => Err(other_error()),
-            None => {
+            Some(Forced::Deadline) => Err(PgError::ClientDeadline { seconds: 1 }),
+            Some(Forced::BadAnswer) => Ok(vec![vec!["true".to_owned(), "not json".to_owned(), "[]".to_owned(), String::new()]]),
+            Some(Forced::Proceed) | None => {
                 let document: Value = serde_json::from_str(params.first().map_or("null", String::as_str)).unwrap_or(Value::Null);
                 let number = |index: usize| params.get(index).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
                 let caps = Caps {

@@ -10,6 +10,7 @@ use cmdb::model::{Asset, AssetKind, Event, IdentityKey, Limits, Observation, Out
 use cmdb::reconcile::{check_observation, reconcile};
 use cmdb::store::{apply_outcome, check_one_conflict_per_triple, load_assets, ASSETS_TABLE, ATTEMPT_CEILING, ATTRIBUTES_TABLE, KEYS_TABLE};
 use cmdb::types::{Executor, KeyMap, ObservedMap, TruthMap};
+use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
 use std::collections::BTreeSet;
 use tracing::warn;
@@ -22,6 +23,15 @@ pub const CLOUD_ID_PREFIX: &str = "k8s:";
 
 
 pub const PAGE_OBSERVATIONS: usize = 100;
+
+
+pub const CAUSE_CLIENT_DEADLINE: &str = "client_deadline";
+
+
+pub const CAUSE_DATABASE: &str = "database";
+
+
+pub const CAUSE_BAD_ANSWER: &str = "bad_answer";
 
 
 pub const NODE_KIND: &str = "node";
@@ -406,6 +416,45 @@ pub fn add_page(report: &mut SyncReport, done: &PageResult) {
 }
 
 
+/// The fixed category of an error whose outcome is unknown, `None` when the store reports that nothing was committed.
+pub fn unknown_cause(error: &StoreError) -> Option<&'static str> {
+    match error {
+        StoreError::Pg(PgError::ClientDeadline { .. }) => Some(CAUSE_CLIENT_DEADLINE),
+        StoreError::Pg(PgError::Server { .. } | PgError::StatementTimeout { .. } | PgError::ConnectTimeout { .. }) => None,
+        StoreError::Pg(_) => Some(CAUSE_DATABASE),
+        StoreError::BadRow { .. }
+        | StoreError::BadValue { .. }
+        | StoreError::BadNumber { .. }
+        | StoreError::BadVersion(_)
+        | StoreError::BadRefused(_)
+        | StoreError::BadDuplicates(_) => Some(CAUSE_BAD_ANSWER),
+        _ => None,
+    }
+}
+
+
+/// An unknown outcome is named so on any page; a known failure after a committed page keeps those counts, and one on the first page is a plain store error.
+pub fn failed_page(pages: usize, report: &SyncReport, source: StoreError) -> SyncError {
+    match (unknown_cause(&source), pages) {
+        (Some(cause), _) => SyncError::Unknown {
+            pages,
+            created: report.created,
+            updated: report.updated,
+            conflicts: report.conflicts,
+            cause,
+        },
+        (None, 0) => SyncError::Store(source),
+        (None, _) => SyncError::Partial {
+            pages,
+            created: report.created,
+            updated: report.updated,
+            conflicts: report.conflicts,
+            source,
+        },
+    }
+}
+
+
 /// The scope comes from `settings.tenant` once per run and must be the inventory's own; nothing in the API answer selects a tenant. Assets are reloaded for each page.
 pub async fn sync(
     exec: Executor<'_, '_>,
@@ -425,12 +474,16 @@ pub async fn sync(
         ..SyncReport::default()
     };
     let mut refused_by_reconcile = 0;
+    let mut committed_pages = 0;
     for page in found.chunks(PAGE_OBSERVATIONS) {
         let before = report.skipped;
         match apply_page(exec, &scope, page, truth, limits).await {
-            Ok(done) => add_page(&mut report, &done),
+            Ok(done) => {
+                add_page(&mut report, &done);
+                committed_pages += 1;
+            }
             Err(StoreError::RetriesExhausted { .. }) => report.unapplied += page.len(),
-            Err(other) => Err(other)?,
+            Err(other) => Err(failed_page(committed_pages, &report, other))?,
         }
         refused_by_reconcile += report.skipped - before;
     }

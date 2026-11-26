@@ -40,6 +40,25 @@ pub enum SyncError {
     ScopeMismatch,
     #[error("cmdb store: {0}")]
     Store(#[from] cmdb::error::StoreError),
+    #[error("partly synced: pages={pages} created={created} updated={updated} conflicts={conflicts}, then the cmdb store failed: {source}")]
+    Partial {
+        pages: usize,
+        created: usize,
+        updated: usize,
+        conflicts: usize,
+        #[source]
+        source: cmdb::error::StoreError,
+    },
+    #[error(
+        "outcome unknown ({cause}): the CMDB may hold the failed page or not; committed before it: pages={pages} created={created} updated={updated} conflicts={conflicts}"
+    )]
+    Unknown {
+        pages: usize,
+        created: usize,
+        updated: usize,
+        conflicts: usize,
+        cause: &'static str,
+    },
 }
 
 
@@ -65,11 +84,11 @@ pub enum FetchError {
     Range { field: &'static str, min: u64, max: u64 },
     #[error(transparent)]
     Scope(#[from] InventoryError),
-    #[error("the token file could not be used")]
+    #[error("the token file could not be used ({})", pg_category(.0))]
     Token(#[source] PgError),
     #[error("the token is not printable ASCII without spaces")]
     TokenEncoding,
-    #[error("the CA file could not be used")]
+    #[error("the CA file could not be used ({})", pg_category(.0))]
     CaFile(#[source] PgError),
     #[error("the CA file holds no valid certificate")]
     CaInvalid(#[source] ureq::Error),
@@ -97,6 +116,21 @@ pub enum FetchError {
     MissingRead { resource: &'static str },
     #[error(transparent)]
     Parse(#[from] ParseError),
+}
+
+
+/// The fixed category of a credential file refusal: the variant name, never the path.
+pub fn pg_category(error: &PgError) -> &'static str {
+    match error {
+        PgError::Io { .. } => "Io",
+        PgError::NotRegular { .. } => "NotRegular",
+        PgError::SecretSymlink { .. } => "SecretSymlink",
+        PgError::SecretMode { .. } => "SecretMode",
+        PgError::SecretOwner { .. } => "SecretOwner",
+        PgError::TooLarge { .. } => "TooLarge",
+        PgError::EmptyPassword { .. } => "EmptyPassword",
+        _ => "Other",
+    }
 }
 
 
