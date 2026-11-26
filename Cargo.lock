@@ -5045,6 +5045,7 @@ dependencies = [
  "pg-fake",
  "rcgen",
  "remote-shell",
+ "response-playbooks",
  "risk-score",
  "serde_json",
  "signal-hook",
@@ -5790,7 +5791,10 @@ name = "response-playbooks"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
  "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "humantime",
@@ -5807,10 +5811,12 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
  "unicode-general-category",
+ "utoipa",
 ]
 
 [[package]]

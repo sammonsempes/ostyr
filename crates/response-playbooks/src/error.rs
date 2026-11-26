@@ -154,3 +154,20 @@ pub enum DryRunError {
     #[error("cannot open the scratch breakers: {0}")]
     Breakers(#[from] response_breakers::error::BreakerError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum ReadError {
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("cursor is malformed")]
+    BadCursor,
+    #[error("page size must be between 1 and {limit}")]
+    BadLimit { limit: usize },
+    #[error("the store returned a row this version cannot read")]
+    BadRow,
+    #[error("the store task did not finish")]
+    TaskFailed,
+    #[error("too many concurrent database requests")]
+    Busy,
+}

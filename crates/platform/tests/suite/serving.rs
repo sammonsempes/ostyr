@@ -6,7 +6,7 @@ use platform::merge::MAX_MODULES_CHARS;
 
 
 const ALL_MODULES: &str =
-    "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths";
+    "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths,playbooks";
 
 
 const ROUTES: [(&str, &str); 11] = [
@@ -37,6 +37,12 @@ const COMPLIANCE_QUERIES: [&str; 2] = ["/compliance/state", "/compliance/assets/
 
 
 const GRC_PATHS: [&str; 2] = ["/grc/reports", "/grc/reports/1"];
+
+
+const PLAYBOOK_PATHS: [&str; 2] = [
+    "/playbooks/runs",
+    "/playbooks/runs/0000000000000000000000000000000000000000000000000000000000000000",
+];
 
 
 const ATTACK_PATHS: [&str; 2] = ["/attack-paths/reports", "/attack-paths/reports/1"];
@@ -418,5 +424,56 @@ async fn the_alert_groups_route_follows_the_alerts_module() -> TestResult {
     assert_eq!(status(&without.router, "GET", "/alert-groups", None).await?, StatusCode::UNAUTHORIZED);
     let absent = body_json(call(&without.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
     assert!(absent.get("paths").and_then(|paths| paths.get("/alert-groups")).is_none());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_playbook_run_routes_need_their_permission_and_reach_their_backend() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    let reader = login(&fx.router, READER).await?;
+    let analyst = login(&fx.router, ANALYST).await?;
+    for path in PLAYBOOK_PATHS {
+        assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(status(&fx.router, "GET", path, Some(&reader)).await?, StatusCode::FORBIDDEN, "{path}");
+        let code = status(&fx.router, "GET", path, Some(&analyst)).await?;
+        assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
+        for method in ["HEAD", "PUT", "POST", "DELETE"] {
+            assert!(denied(status(&fx.router, method, path, Some(&analyst)).await?), "{path} {method}");
+        }
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_playbook_run_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
+    let permits = empty_permits(ALL_MODULES)?;
+    let limited = fixture_with_permits(ALL_MODULES, &permits)?;
+    let token = login(&limited.router, ANALYST).await?;
+    for path in PLAYBOOK_PATHS {
+        assert_eq!(
+            status(&limited.router, "GET", path, Some(&token)).await?,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_playbook_run_routes_follow_the_playbooks_module() -> TestResult {
+    let without = fixture("alerts")?;
+    let token = login(&without.router, ANALYST).await?;
+    for path in PLAYBOOK_PATHS {
+        assert_eq!(status(&without.router, "GET", path, Some(&token)).await?, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(status(&without.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let absent = body_json(call(&without.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    assert!(absent.get("paths").and_then(|paths| paths.get("/playbooks/runs")).is_none());
+    let selected = fixture("playbooks")?;
+    let document = body_json(call(&selected.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    assert!(document.get("paths").and_then(|paths| paths.get("/playbooks/runs")).is_some());
     Ok(())
 }

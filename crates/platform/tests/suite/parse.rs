@@ -9,10 +9,10 @@ use std::path::PathBuf;
 const LONG_VALUE_CHARS: usize = 10_000;
 
 
-const ALL_MODULES: usize = 15;
+const ALL_MODULES: usize = 16;
 
 
-const LONGEST_LIST: usize = 139;
+const LONGEST_LIST: usize = 150;
 
 
 const EXPECTED_LIMIT: usize = 256;
@@ -40,6 +40,7 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
     assert_eq!(module_of("status"), Some(Module::Status));
     assert_eq!(module_of("grc"), Some(Module::Grc));
     assert_eq!(module_of("attack_paths"), Some(Module::AttackPaths));
+    assert_eq!(module_of("playbooks"), Some(Module::Playbooks));
     assert_eq!(module_of("attack-paths"), None);
     assert_eq!(module_of("hunt"), None);
     Ok(())
@@ -49,7 +50,7 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
 #[test]
 fn the_longest_list_fits_the_limit() -> TestResult {
     let all =
-        "alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths";
+        "alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities, remote_shell, posture, status, grc, attack_paths, playbooks";
     assert_eq!(all.chars().count(), LONGEST_LIST);
     assert!(all.chars().count() <= MAX_MODULES_CHARS);
     assert_eq!(parse_modules(all)?.len(), ALL_MODULES);

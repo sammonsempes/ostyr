@@ -15,4 +15,5 @@ pub enum Module {
     Status,
     Grc,
     AttackPaths,
+    Playbooks,
 }

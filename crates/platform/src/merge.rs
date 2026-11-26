@@ -24,6 +24,7 @@ use grc::store::{MIGRATIONS as GRC_MIGRATIONS, MIGRATION_NAMESPACE as GRC_NAMESP
 use hunt_packs::store::{MIGRATIONS as HUNT_MIGRATIONS, MIGRATION_NAMESPACE as HUNT_NAMESPACE};
 use oncall::store::{MIGRATIONS as ONCALL_MIGRATIONS, MIGRATION_NAMESPACE as ONCALL_NAMESPACE};
 use remote_shell::store::{MIGRATIONS as RSHELL_MIGRATIONS, MIGRATION_NAMESPACE as RSHELL_NAMESPACE};
+use response_playbooks::runs::{MIGRATIONS as PLAYBOOK_MIGRATIONS, MIGRATION_NAMESPACE as PLAYBOOK_NAMESPACE};
 use risk_score::api::{risk_access, risk_document, risk_router};
 use risk_score::backend::{pg_backend as risk_backend, system_clock};
 use risk_score::cache::risk_state;
@@ -111,6 +112,9 @@ const GRC_PLAN: &[Migration] = &GRC_MIGRATIONS;
 const ATTACK_PLAN: &[Migration] = &ATTACK_MIGRATIONS;
 
 
+const PLAYBOOK_PLAN: &[Migration] = &PLAYBOOK_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -128,6 +132,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "status" => Some(Module::Status),
         "grc" => Some(Module::Grc),
         "attack_paths" => Some(Module::AttackPaths),
+        "playbooks" => Some(Module::Playbooks),
         _ => None,
     }
 }
@@ -290,6 +295,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Playbooks => Ok(response_playbooks::api::playbooks_router(response_playbooks::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Status => page.ok_or(PlatformError::MissingPageFile).map(|held| {
             status_page::api::status_router(status_page::backend::pg_backend(
                 Arc::clone(engine),
@@ -328,6 +337,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Status => status_page::api::status_access(),
         Module::Grc => grc::api::grc_access(),
         Module::AttackPaths => attack_paths::api::attack_paths_access(),
+        Module::Playbooks => response_playbooks::api::playbooks_access(),
     }
 }
 
@@ -353,6 +363,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Status => status_page::api::status_document(),
         Module::Grc => grc::api::grc_document(),
         Module::AttackPaths => attack_paths::api::attack_paths_document(),
+        Module::Playbooks => response_playbooks::api::playbooks_document(),
     }
 }
 
@@ -392,6 +403,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Status]), STATUS_NAMESPACE, STATUS_PLAN),
         (wants(&[Module::Grc]), GRC_NAMESPACE, GRC_PLAN),
         (wants(&[Module::AttackPaths]), ATTACK_NAMESPACE, ATTACK_PLAN),
+        (wants(&[Module::Playbooks]), PLAYBOOK_NAMESPACE, PLAYBOOK_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)
