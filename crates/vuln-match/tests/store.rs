@@ -48,6 +48,9 @@ const FIVE: u32 = 5;
 const SEVEN: u64 = 7;
 
 
+const SEVENTH_INDEX: usize = 6;
+
+
 const EIGHT: u64 = 8;
 
 
@@ -236,6 +239,7 @@ pub fn finding(asset: &str, package: &str, record: &str) -> AssetFinding {
                 ecosystem: "Debian:12".to_owned(),
                 record_id: record.to_owned(),
                 cve_aliases: vec!["CVE-2024-1234".to_owned()],
+                aliases_omitted: 0,
                 fixed_version: Some("1.2".to_owned()),
             },
             cvss: GOOD_CVSS,
@@ -1008,5 +1012,24 @@ async fn cursors_round_trip_keys_holding_url_special_characters() -> TestResult 
     assert_eq!(second.findings.first().map(|found| found.record_id.as_str()), Some("r?"));
     let calls = calls_of(&double)?;
     assert_eq!(calls.get(1).map(|call| call.2.get(1).map(String::as_str)), Some(Some(special)));
+    Ok(())
+}
+
+
+#[test]
+fn seventh_migration_stores_the_omitted_alias_count_on_every_path() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let sql = MIGRATIONS.get(SEVENTH_INDEX).ok_or("no seventh migration")?.sql;
+    let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(sql.starts_with("LOCK TABLE vuln_finding_rows, vuln_asset_resolved, vuln_findings IN ACCESS EXCLUSIVE MODE;"));
+    assert!(flat.contains("ALTER TABLE vuln_findings ADD COLUMN aliases_omitted bigint NOT NULL DEFAULT 0 CHECK (aliases_omitted >= 0);"));
+    assert!(flat.contains("DROP FUNCTION vuln_incoming(jsonb);"));
+    assert!(flat.contains("kev boolean, priority bigint, aliases_omitted bigint)"));
+    assert!(flat.contains("d.priority, d.aliases_omitted FROM jsonb_to_recordset(docs)"));
+    assert!(flat.contains("(f.installed_version, f.fixed_version, f.cvss, f.epss, f.kev, f.priority, f.aliases_omitted) IS DISTINCT FROM"));
+    assert!(flat.contains("kev_since_micros, aliases_omitted) SELECT"));
+    assert!(flat.contains("aliases_omitted = EXCLUDED.aliases_omitted"));
+    assert!(flat.contains("SET search_path = pg_catalog, public, pg_temp AS $$ #variable_conflict use_column"));
+    assert!(!flat.contains("last_seen_micros, aliases_omitted"));
     Ok(())
 }

@@ -279,3 +279,13 @@ fn first_matching_range_of_an_entry_wins() -> TestResult {
     );
     Ok(())
 }
+
+
+#[test]
+fn an_upstream_cve_of_a_debian_record_is_a_finding_alias() -> TestResult {
+    let text = r#"{"id":"DEBIAN-CVE-2024-1234","upstream":["CVE-2024-1234"],"affected":[{"package":{"ecosystem":"Debian:12","name":"curl"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"7.88.1-11"}]}]}]}"#;
+    let report = match_inventory(&[package("Debian:12", "curl", "7.88.1-10")], &[parse_record(text)?]);
+    let finding = report.findings.first().ok_or("no finding")?;
+    assert_eq!(finding.cve_aliases, ["CVE-2024-1234"]);
+    Ok(())
+}
