@@ -5,9 +5,9 @@ use crate::limits::{check_child_limits, Limits};
 use crate::model::{ReporterPolicy, Triage};
 use crate::policy::check_policy;
 use crate::triage::triage_with;
-use crate::types::{Job, ReadFn, SerializeFn, SpawnFn};
+use crate::types::{GroupKillFn, Job, ReadFn, SerializeFn, SpawnFn};
 use core_config::trusted_program::open_trusted_program;
-use rustix::process::{geteuid, kill_process, kill_process_group, Pid, Signal};
+use rustix::process::{geteuid, kill_process, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
@@ -203,7 +203,7 @@ pub fn triage_isolated(
         bytes,
         limits,
         REAP_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     )
 }
 
@@ -216,7 +216,7 @@ pub fn kill_all(pid: Pid) {
 }
 
 
-/// Kills what the child left in its process group; the child is already reaped, so only the group is signalled.
+/// Kills what the child left in its process group; the exited child is still a zombie, so the pgid cannot be recycled.
 pub fn kill_group(pid: Pid) {
     let group = kill_process_group(pid, Signal::KILL);
     let outcome = format!("{group:?}");
@@ -264,17 +264,26 @@ fn converse(streams: (ChildStdin, ChildStdout), bytes: Vec<u8>, limits: &Limits,
 }
 
 
-/// Waits for the child in bounded polls; `None` when it is still running after `polls`.
-pub fn reap(child: &mut Child, polls: u64) -> io::Result<Option<ExitStatus>> {
+/// Whether the child has exited, read without reaping it: the zombie keeps its pid and process group.
+pub fn exited(child: &Child) -> io::Result<bool> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    waitid(WaitId::Pid(Pid::from_child(child)), options)
+        .map(|status| status.is_some())
+        .map_err(io::Error::from)
+}
+
+
+/// Waits for the exit in bounded polls without reaping; `false` when the child still runs after `polls`.
+pub fn await_exit(child: &Child, polls: u64) -> io::Result<bool> {
     (0..polls)
-        .find_map(|_| match child.try_wait() {
-            Ok(None) => {
+        .find_map(|_| match exited(child) {
+            Ok(false) => {
                 thread::sleep(Duration::from_millis(REAP_POLL_MILLIS));
                 None
             }
             other => Some(other),
         })
-        .unwrap_or(Ok(None))
+        .unwrap_or(Ok(false))
 }
 
 
@@ -308,17 +317,21 @@ pub fn decide(status: ExitStatus, bytes: &[u8]) -> Result<Triage, TriageError> {
 }
 
 
-fn settle(pid: Pid, child: &mut Child, bytes: &[u8], grace_millis: u64) -> Result<Triage, TriageError> {
+fn settle(pid: Pid, child: &mut Child, bytes: &[u8], timing: (u64, GroupKillFn)) -> Result<Triage, TriageError> {
+    let (grace_millis, group_kill) = timing;
     let polls = grace_millis / REAP_POLL_MILLIS + 1;
-    let reaped = reap(child, polls);
-    let outcome = format!("{:?}", reaped.as_ref().err().map(io::Error::kind));
-    debug!(outcome, "the child status was read");
-    match reaped.unwrap_or(None) {
-        Some(status) => {
-            kill_group(pid);
-            decide(status, bytes)
+    let waited = await_exit(child, polls);
+    let outcome = format!("{:?}", waited.as_ref().err().map(io::Error::kind));
+    debug!(outcome, "the child exit was awaited");
+    match waited.unwrap_or(false) {
+        true => {
+            group_kill(pid);
+            let reaped = child.wait();
+            let reaped_outcome = format!("{:?}", reaped.as_ref().err().map(io::Error::kind));
+            debug!(reaped_outcome, "the child was reaped after the group kill");
+            reaped.map_or(Err(TriageError::ChildFailed), |status| decide(status, bytes))
         }
-        None => stop(pid, child, TriageError::ChildFailed),
+        false => stop(pid, child, TriageError::ChildFailed),
     }
 }
 
@@ -329,7 +342,7 @@ pub fn run_child_process(
     bytes: Vec<u8>,
     limits: &Limits,
     grace_millis: u64,
-    plumbing: (ReadFn, SpawnFn),
+    plumbing: (ReadFn, SpawnFn, GroupKillFn),
 ) -> Result<Triage, TriageError> {
     let profile: Option<(OsString, OsString)> = std::env::var_os(PROFILE_VARIABLE).map(|value| (OsString::from(PROFILE_VARIABLE), value));
     command
@@ -350,10 +363,10 @@ pub fn run_child_process(
         .take()
         .zip(child.stdout.take())
         .map_or(Err(TriageError::ChildFailed), |(stdin, stdout)| {
-            converse((stdin, stdout), bytes, limits, plumbing)
+            converse((stdin, stdout), bytes, limits, (plumbing.0, plumbing.1))
         });
     match collected {
-        Ok(output) => settle(pid, &mut child, &output, grace_millis),
+        Ok(output) => settle(pid, &mut child, &output, (grace_millis, plumbing.2)),
         Err(error) => stop(pid, &mut child, error),
     }
 }

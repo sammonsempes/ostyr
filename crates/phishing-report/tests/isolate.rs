@@ -3,15 +3,16 @@
 use data_encoding::BASE64_MIME;
 use phishing_report::error::TriageError;
 use phishing_report::isolate::{
-    child_command, decide, default_isolation, default_isolation_from, exit_code, parse_child_main, payload, read_capped, reap, run_child_process,
-    send_output, spawn_job, triage_isolated, write_payload, ChildRequest, Isolation, CHILD_ARGUMENT, EXIT_FAILED, EXIT_TOO_LARGE, EXIT_UNPARSABLE,
-    PRLIMIT_PROGRAM, REQUEST_LINE_BYTES,
+    await_exit, child_command, decide, default_isolation, default_isolation_from, exit_code, kill_group, parse_child_main, payload, read_capped,
+    run_child_process, send_output, spawn_job, triage_isolated, write_payload, ChildRequest, Isolation, CHILD_ARGUMENT, EXIT_FAILED, EXIT_TOO_LARGE,
+    EXIT_UNPARSABLE, PRLIMIT_PROGRAM, REQUEST_LINE_BYTES,
 };
 use phishing_report::limits::Limits;
 use phishing_report::model::{ReporterPolicy, Triage};
 use phishing_report::policy::{reporter_policy, MAX_DOMAIN_BYTES, MAX_INTERNAL_DOMAINS};
 use phishing_report::triage::triage_with;
 use phishing_report::types::Job;
+use rustix::process::Pid;
 use std::ffi::OsStr;
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -177,7 +178,7 @@ fn run_fake(body: &str, limits: &Limits, payload: Vec<u8>) -> Result<Result<Tria
         payload,
         limits,
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     ))
 }
 
@@ -558,7 +559,7 @@ fn a_fake_child_with_a_valid_record_is_accepted() -> Result<(), Box<dyn std::err
         b"x".to_vec(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(result, Ok(Triage::default()));
     Ok(())
@@ -672,7 +673,7 @@ fn a_failing_pipe_read_and_a_missing_program_are_child_failures() -> Result<(), 
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (failing_reader, spawn_job),
+        (failing_reader, spawn_job, kill_group),
     );
     assert_eq!(failed, Err(TriageError::ChildFailed));
     let missing = run_child_process(
@@ -680,7 +681,7 @@ fn a_failing_pipe_read_and_a_missing_program_are_child_failures() -> Result<(), 
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(missing, Err(TriageError::ChildFailed));
     Ok(())
@@ -688,13 +689,15 @@ fn a_failing_pipe_read_and_a_missing_program_are_child_failures() -> Result<(), 
 
 
 #[test]
-fn reap_returns_none_while_the_child_runs() -> Result<(), Box<dyn std::error::Error>> {
+fn await_exit_reads_the_exit_without_reaping() -> Result<(), Box<dyn std::error::Error>> {
     LazyLock::force(&ANCHOR);
     let mut child = Command::new("/bin/sleep").arg("30").stdin(Stdio::null()).spawn()?;
-    assert!(reap(&mut child, FEW_POLLS)?.is_none());
+    assert!(!await_exit(&child, FEW_POLLS)?);
     child.kill()?;
-    assert!(reap(&mut child, MANY_POLLS)?.is_some());
-    assert!(reap(&mut child, 0)?.is_none());
+    assert!(await_exit(&child, MANY_POLLS)?);
+    assert!(await_exit(&child, 0).is_ok_and(|exited| !exited));
+    assert!(child.wait()?.signal().is_some());
+    assert!(await_exit(&child, 1).is_err());
     Ok(())
 }
 
@@ -714,7 +717,7 @@ fn a_refused_helper_thread_is_a_child_failure() -> Result<(), Box<dyn std::error
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, failing_spawner),
+        (read_capped, failing_spawner, kill_group),
     );
     assert_eq!(result, Err(TriageError::ChildFailed));
     Ok(())
@@ -763,7 +766,7 @@ fn logged_flows() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(absent, Err(TriageError::ChildFailed));
     assert_eq!(
@@ -858,7 +861,7 @@ fn run_leaving_a_group(tail: &str) -> Result<GroupRun, Box<dyn std::error::Error
         b"x".to_vec(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     let text = std::fs::read_to_string(&note)?;
     let fields: Vec<&str> = text.split_whitespace().collect();
@@ -892,4 +895,38 @@ fn a_child_leaving_a_background_process_in_its_group_is_swept_on_every_exit_path
         assert!(run.gone, "the background process survived: {tail}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+
+const ZOMBIE_STATE: &str = "Z";
+
+
+fn is_zombie(pid: Pid) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+        .is_ok_and(|text| text.rsplit(')').next().and_then(|rest| rest.split_whitespace().next()) == Some(ZOMBIE_STATE))
+}
+
+
+fn kill_requiring_a_zombie(pid: Pid) {
+    assert!(is_zombie(pid), "the group kill must run before the child is reaped");
+    kill_group(pid);
+}
+
+
+#[test]
+fn the_group_is_killed_while_the_exited_child_is_still_a_zombie() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let dir = work_dir()?;
+    let record = dir.path().join("record.json");
+    std::fs::write(&record, serde_json::to_string(&Triage::default())?)?;
+    let script = install_script(dir.path(), "zombie.sh", &format!("exec /bin/cat {}", record.display()))?;
+    let result = run_child_process(
+        Command::new(script),
+        b"x".to_vec(),
+        &limits_for_fakes(),
+        FAST_GRACE_MILLIS,
+        (read_capped, spawn_job, kill_requiring_a_zombie),
+    );
+    assert_eq!(result, Ok(Triage::default()));
+    Ok(())
 }
