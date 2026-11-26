@@ -1,6 +1,6 @@
 //! Byte offsets of `task_struct.real_parent` and `task_struct.tgid` read from the kernel BTF.
 
-use crate::types::{Lookup, Member, Resolved, Walked};
+use crate::types::{Lookup, Member, Parsed, Resolved, Rule, Walked};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::ops::ControlFlow;
@@ -249,8 +249,14 @@ pub fn require_64_bit(pointer_bits: u32) -> Result<(), Unsupported> {
 
 /// Opens the BTF file once and reads the offsets from that handle.
 pub fn read_task_offsets(path: &Path) -> Result<TaskOffsets, Unsupported> {
-    let file = File::open(path).map_err(open_error)?;
+    let file = open_btf(path)?;
     read_task_offsets_from(file)
+}
+
+
+/// Opens the BTF file, mapping a failure to a fixed reason.
+pub fn open_btf(path: &Path) -> Result<File, Unsupported> {
+    File::open(path).map_err(open_error)
 }
 
 
@@ -265,6 +271,13 @@ fn open_error(error: std::io::Error) -> Unsupported {
 
 /// Reads at most `MAX_BTF_BYTES` from the reader, refusing anything longer.
 pub fn read_task_offsets_from<Source: Read>(reader: Source) -> Result<TaskOffsets, Unsupported> {
+    let data = read_btf_bytes(reader)?;
+    find_task_offsets(&data)
+}
+
+
+/// Reads at most `MAX_BTF_BYTES` from the reader, refusing anything longer.
+pub fn read_btf_bytes<Source: Read>(reader: Source) -> Result<Vec<u8>, Unsupported> {
     let mut data = Vec::new();
     reader
         .take(MAX_BTF_BYTES + 1)
@@ -273,31 +286,65 @@ pub fn read_task_offsets_from<Source: Read>(reader: Source) -> Result<TaskOffset
     if data.len() as u64 > MAX_BTF_BYTES {
         Err(Unsupported(REASON_OVERSIZED))
     } else {
-        find_task_offsets(&data)
+        Ok(data)
     }
 }
 
 
 /// Walks the type section of raw BTF bytes, looking at no more than `MAX_BTF_TYPES` types.
 pub fn find_task_offsets(data: &[u8]) -> Result<TaskOffsets, Unsupported> {
+    let parsed = parse_structs(data, &[STRUCT_NAME])?;
+    let task = parsed.found.first().copied().flatten().ok_or(Unsupported(REASON_NO_TASK_STRUCT))?;
+    task_offsets(&lookup_of(&parsed), &task)
+}
+
+
+/// Walks the type section once and records the first STRUCT of each wanted name.
+pub fn parse_structs<'a>(data: &'a [u8], names: &[&str]) -> Result<Parsed<'a>, Unsupported> {
     let [first, header_len, type_off, type_len, str_off, str_len] = read_words::<HEADER_WORDS>(data, 0)?;
     check_header(first, header_len)?;
     let types = section(data, header_len, type_off, type_len)?;
     let strings = section(data, header_len, str_off, str_len)?;
     let mut position = 0;
     let mut steps = 0;
-    let mut found = None;
+    let mut found = vec![None; names.len()];
     let mut index = Vec::new();
     while position < types.len() && steps < MAX_BTF_TYPES {
-        let (next, matched) = walk_type(types, strings, position)?;
+        let (next, matched) = walk_type(types, strings, position, names)?;
         index.push(position);
         position = next;
-        found = found.or(matched);
+        record_match(&mut found, matched);
         steps += 1;
     }
     walk_complete(position, types.len())?;
-    let task = found.ok_or(Unsupported(REASON_NO_TASK_STRUCT))?;
-    task_offsets(types, strings, &index, &task)
+    Ok(Parsed {
+        types,
+        strings,
+        index,
+        found,
+    })
+}
+
+
+/// The lookup tables of a parsed type section.
+pub fn lookup_of<'a>(parsed: &'a Parsed<'a>) -> Lookup<'a> {
+    Lookup {
+        types: parsed.types,
+        strings: parsed.strings,
+        index: &parsed.index,
+    }
+}
+
+
+fn record_match(found: &mut [Option<TaskStruct>], matched: Option<(usize, TaskStruct)>) {
+    matched.iter().for_each(|(which, body)| {
+        found
+            .iter_mut()
+            .skip(*which)
+            .take(1)
+            .filter(|slot| slot.is_none())
+            .for_each(|slot| *slot = Some(*body));
+    });
 }
 
 
@@ -346,13 +393,16 @@ fn name_is(strings: &[u8], name_offset: u32, expected: &str) -> bool {
 }
 
 
-fn walk_type(types: &[u8], strings: &[u8], position: usize) -> Result<Walked, Unsupported> {
+fn walk_type(types: &[u8], strings: &[u8], position: usize, names: &[&str]) -> Result<Walked, Unsupported> {
     let [name_offset, info, size_or_type] = read_words::<TYPE_WORDS>(types, position)?;
     let kind = (info >> KIND_SHIFT) & KIND_MASK;
     let count = (info & VLEN_MASK) as usize;
     let body = position + TYPE_BYTES;
     let next = body + extra_bytes(kind, count)?;
-    let is_task = kind == KIND_STRUCT && name_is(strings, name_offset, STRUCT_NAME);
+    let which = names
+        .iter()
+        .position(|name| name_is(strings, name_offset, name))
+        .filter(|_| kind == KIND_STRUCT);
     let flagged = info >> KIND_FLAG_SHIFT == 1;
     let task = TaskStruct {
         body,
@@ -360,7 +410,7 @@ fn walk_type(types: &[u8], strings: &[u8], position: usize) -> Result<Walked, Un
         flagged,
         size: size_or_type,
     };
-    Ok((next, is_task.then_some(task)))
+    Ok((next, which.map(|slot| (slot, task))))
 }
 
 
@@ -377,30 +427,24 @@ fn extra_bytes(kind: u32, count: usize) -> Result<usize, Unsupported> {
 }
 
 
-fn task_offsets(types: &[u8], strings: &[u8], index: &[usize], task: &TaskStruct) -> Result<TaskOffsets, Unsupported> {
-    let members = (0..task.count)
-        .flat_map(|i| read_words::<MEMBER_WORDS>(types, task.body + i * MEMBER_BYTES))
-        .collect::<Vec<Member>>();
-    let lookup = Lookup { types, strings, index };
-    let real_parent = member_offset(
-        &lookup,
-        &members,
-        task,
-        (REAL_PARENT_NAME, REASON_NO_REAL_PARENT),
-        (KIND_PTR, REAL_PARENT_BYTES),
-    )?;
-    let tgid = member_offset(&lookup, &members, task, (TGID_NAME, REASON_NO_TGID), (KIND_INT, TGID_BYTES))?;
+fn task_offsets(lookup: &Lookup, task: &TaskStruct) -> Result<TaskOffsets, Unsupported> {
+    let members = members_of(lookup.types, task);
+    let real_parent = member_offset(lookup, &members, task, (REAL_PARENT_NAME, REASON_NO_REAL_PARENT), Rule::Pointer)?;
+    let tgid = member_offset(lookup, &members, task, (TGID_NAME, REASON_NO_TGID), Rule::Int(TGID_BYTES))?;
     Ok(TaskOffsets { real_parent, tgid })
 }
 
 
-fn member_offset(
-    lookup: &Lookup,
-    members: &[Member],
-    task: &TaskStruct,
-    name: (&str, &'static str),
-    required: (u32, u32),
-) -> Result<u32, Unsupported> {
+/// The member records of a struct body; the walk proved each one readable.
+pub fn members_of(types: &[u8], task: &TaskStruct) -> Vec<Member> {
+    (0..task.count)
+        .flat_map(|i| read_words::<MEMBER_WORDS>(types, task.body + i * MEMBER_BYTES))
+        .collect::<Vec<Member>>()
+}
+
+
+/// The byte offset of a named member whose type matches the rule.
+pub fn member_offset(lookup: &Lookup, members: &[Member], task: &TaskStruct, name: (&str, &'static str), required: Rule) -> Result<u32, Unsupported> {
     let member = members.iter().find(|&&[name_offset, _, _]| name_is(lookup.strings, name_offset, name.0));
     let [_, type_id, raw] = member.ok_or(Unsupported(name.1))?;
     let (bit_offset, bitfield_size) = if task.flagged {
@@ -415,12 +459,25 @@ fn member_offset(
     let fits = byte_offset.checked_add(field_bytes).is_some_and(|end| end <= task.size);
     if !aligned {
         Err(Unsupported(REASON_BITFIELD))
-    } else if resolved.0 != required.0 || field_bytes != required.1 {
+    } else if !rule_matches(lookup, resolved, field_bytes, required) {
         Err(Unsupported(REASON_MEMBER_TYPE))
     } else if !fits {
         Err(Unsupported(REASON_OUT_OF_STRUCT))
     } else {
         Ok(byte_offset)
+    }
+}
+
+
+fn rule_matches(lookup: &Lookup, resolved: Resolved, bytes: u32, rule: Rule) -> bool {
+    let (kind, position) = resolved;
+    match rule {
+        Rule::Int(size) => kind == KIND_INT && bytes == size,
+        Rule::Pointer => kind == KIND_PTR,
+        Rule::Struct(name) => {
+            kind == KIND_STRUCT
+                && read_words::<TYPE_WORDS>(lookup.types, position).is_ok_and(|[name_offset, _, _]| name_is(lookup.strings, name_offset, name))
+        }
     }
 }
 
@@ -459,6 +516,7 @@ fn type_bytes(types: &[u8], resolved: Resolved) -> Result<u32, Unsupported> {
     match kind {
         KIND_PTR => Ok(REAL_PARENT_BYTES),
         KIND_INT => int_bytes(types, position),
+        KIND_STRUCT => struct_bytes(types, position),
         _ => Err(Unsupported(REASON_MEMBER_TYPE)),
     }
 }
@@ -474,4 +532,10 @@ fn int_bytes(types: &[u8], position: usize) -> Result<u32, Unsupported> {
     } else {
         Err(Unsupported(REASON_BITFIELD))
     }
+}
+
+
+fn struct_bytes(types: &[u8], position: usize) -> Result<u32, Unsupported> {
+    let [_, _, size] = read_words::<TYPE_WORDS>(types, position)?;
+    Ok(size)
 }
