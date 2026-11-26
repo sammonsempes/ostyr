@@ -13,7 +13,7 @@ use agent_channel::agent_app::{dialer, ended_on_rate, execute_fn, load_agent_fil
 use agent_channel::client::{run_commands_until, subscribe};
 use agent_channel::error::{AppError, ChannelError, EndpointFault};
 use agent_channel::model::{
-    CommandRun, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
+    CommandRun, Executors, Identity, ServerTlsPaths, CONNECT_TIMEOUT_SECONDS, MAX_RELAYS, PREFERRED_RETRY_SECONDS, UNARY_TIMEOUT_SECONDS,
 };
 use agent_channel::relay::{
     check_scope, endpoint_addresses, error_text, hold_internal, is_held, is_rate_refusal, kind_of, pinned_dialer, select_endpoint, selection_order,
@@ -759,7 +759,14 @@ fn accept_any_acl(_directory: &std::fs::File, _shown: &Path) -> Result<(), sys_w
 
 async fn run_held(agent: &AgentFile, hold: &HoldDown) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
     let dirs = open_spool_dirs_with(agent, accept_any_acl)?;
-    Ok(bounded(run_agent(agent, &dirs, &|_delay| Box::pin(std::future::ready(())), None, hold)).await??)
+    Ok(bounded(run_agent(
+        agent,
+        &dirs,
+        &|_delay| Box::pin(std::future::ready(())),
+        &Executors::default(),
+        hold,
+    ))
+    .await??)
 }
 
 

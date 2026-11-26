@@ -1,6 +1,7 @@
 #![cfg(unix)]
 mod capabilities;
 mod cursor;
+mod dispatch;
 mod exec_events;
 mod exec_probe;
 mod fim;

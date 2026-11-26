@@ -797,19 +797,7 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
     assert!(matches!(validate_file(&file), Err(SourceError::Settings(names)) if names.contains("isolation.dns")));
     let zero = write_files(dir.path(), "isolation:\n  endpoints:\n    - address: 10.0.0.1\n      port: 0\n", "")?;
     assert_eq!(invalid_isolation_settings(&load_file::<LinuxFile>(&zero)?), ["isolation.ports"]);
-    for address in [
-        "0.0.0.0",
-        "::",
-        "127.0.0.1",
-        "::1",
-        "224.0.0.1",
-        "ff02::1",
-        "255.255.255.255",
-        "::ffff:127.0.0.1",
-        "::ffff:0.0.0.0",
-        "::ffff:224.0.0.1",
-        "::ffff:255.255.255.255",
-    ] {
+    for address in ["0.0.0.0", "::", "127.0.0.1", "::1", "224.0.0.1", "ff02::1", "255.255.255.255"] {
         let text = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n  dns:\n    - \"{address}\"\n");
         let hostile = load_file::<LinuxFile>(&write_files(dir.path(), &text, "")?)?;
         assert_eq!(
@@ -818,6 +806,26 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
             "{address}"
         );
     }
+    for address in ["::ffff:127.0.0.1", "::ffff:0.0.0.0", "::ffff:224.0.0.1", "::ffff:255.255.255.255"] {
+        let text = format!("isolation:\n  endpoints:\n    - address: \"{address}\"\n      port: 80\n  dns:\n    - \"{address}\"\n");
+        let hostile = load_file::<LinuxFile>(&write_files(dir.path(), &text, "")?)?;
+        assert_eq!(
+            invalid_isolation_settings(&hostile),
+            [
+                "isolation.endpoints.address",
+                "isolation.dns.address",
+                "isolation.endpoints.mapped",
+                "isolation.dns.mapped"
+            ],
+            "{address}"
+        );
+    }
+    let routable = "isolation:\n  endpoints:\n    - address: \"::ffff:10.0.0.9\"\n      port: 80\n";
+    let mapped_endpoint = load_file::<LinuxFile>(&write_files(dir.path(), routable, "")?)?;
+    assert_eq!(invalid_isolation_settings(&mapped_endpoint), ["isolation.endpoints.mapped"]);
+    let routable_dns = "isolation:\n  endpoints:\n    - address: 10.0.0.9\n      port: 80\n  dns:\n    - \"::ffff:10.0.0.53\"\n";
+    let mapped_dns = load_file::<LinuxFile>(&write_files(dir.path(), routable_dns, "")?)?;
+    assert_eq!(invalid_isolation_settings(&mapped_dns), ["isolation.dns.mapped"]);
     let good = write_files(dir.path(), GOOD, "")?;
     let valid = load_file::<LinuxFile>(&good)?;
     assert!(invalid_isolation_settings(&valid).is_empty());

@@ -129,7 +129,13 @@ pub fn unusable_address(address: &IpAddr) -> bool {
 }
 
 
-/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a zero port.
+/// True for an IPv4-mapped IPv6 address: the ruleset would render it as an `ip6` rule no IPv4 packet matches, so it is refused, never folded.
+pub fn mapped_address(address: &IpAddr) -> bool {
+    matches!(address, IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some())
+}
+
+
+/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, an unusable or IPv4-mapped address.
 pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
     [
         ("isolation.endpoints", file.isolation.endpoints.len() > MAX_ENDPOINTS),
@@ -140,6 +146,11 @@ pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
             file.isolation.endpoints.iter().any(|endpoint| unusable_address(&endpoint.address)),
         ),
         ("isolation.dns.address", file.isolation.dns.iter().any(unusable_address)),
+        (
+            "isolation.endpoints.mapped",
+            file.isolation.endpoints.iter().any(|endpoint| mapped_address(&endpoint.address)),
+        ),
+        ("isolation.dns.mapped", file.isolation.dns.iter().any(mapped_address)),
     ]
     .into_iter()
     .filter_map(|(name, invalid)| invalid.then_some(name))
