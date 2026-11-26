@@ -1,10 +1,8 @@
 use crate::error::GrcError;
 use crate::evaluate::threshold_met;
 use crate::model::{Control, ControlKind, Framework, Threshold};
-use core_config::error::ConfigError;
-use core_config::parse::{parse_document, read_text_capped};
+use core_config::parse::{open_regular, parse_document, read_text_capped};
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -151,6 +149,6 @@ pub fn parse_framework(reader: &mut dyn Read, file: &str) -> Result<Framework, G
 
 pub fn load_framework(path: &Path) -> Result<Framework, GrcError> {
     let file = path.display().to_string();
-    let mut handle = File::open(path).map_err(|source| ConfigError::Io { file: file.clone(), source })?;
+    let mut handle = open_regular(path, &file)?;
     parse_framework(&mut handle, &file)
 }
