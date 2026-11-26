@@ -1,7 +1,10 @@
 use core_audit::error::AuditError;
 use core_config::error::{ConfigError, WatchError};
-use siem_ingest::error::{IngestError, NatsError};
+use siem_ingest::error::{IngestError, InsertClass, InsertError, NatsError, SettingsError};
+use sigma_sql::error::SigmaError;
+use std::io;
 use std::path::PathBuf;
+use std::str::Utf8Error;
 use stream_correlation::error::CorrelationError;
 use thiserror::Error;
 
@@ -70,4 +73,46 @@ pub enum DetectionError {
     InvalidTenant,
     #[error("more than {max} tenants")]
     TooManyTenants { max: usize },
+}
+
+
+/// Every text is fixed: the server's message, a row, an event id, the SQL and the URL never reach an error.
+#[derive(Debug, Error)]
+pub enum RetroError {
+    #[error("the rule cannot be compiled")]
+    Rule(#[source] SigmaError),
+    #[error("the reader url is refused")]
+    Url(#[source] SettingsError),
+    #[error("retro setting out of range: {0}")]
+    Settings(&'static str),
+    #[error("the tenant is empty or is refused by core-pg's tenant rule")]
+    Tenant,
+    #[error("the window is empty or outside the supported range")]
+    Window,
+    #[error("the window is longer than {0} days")]
+    WindowTooLong(i64),
+    #[error("the ClickHouse password file could not be used")]
+    Password(#[source] core_pg::error::PgError),
+    #[error("the ClickHouse password is not valid UTF-8")]
+    PasswordEncoding(#[source] Utf8Error),
+    #[error("the ClickHouse CA file could not be used")]
+    CaFile(#[source] core_pg::error::PgError),
+    #[error("the ClickHouse agent cannot be built")]
+    Agent(#[source] InsertError),
+    #[error("the read was refused: {0:?}")]
+    Refused(InsertClass),
+    #[error("timeout")]
+    Timeout,
+    #[error("read_limit_reached")]
+    ReadLimit,
+    #[error("the reply body could not be read: {0:?}")]
+    Body(io::ErrorKind),
+    #[error("reply larger than {0} bytes")]
+    TooManyBytes(u64),
+    #[error("more than {0} rows")]
+    TooManyRows(usize),
+    #[error("malformed_reply")]
+    MalformedReply,
+    #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
+    ReaderProfileChanged(usize),
 }

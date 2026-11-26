@@ -12,10 +12,12 @@ core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
+sigma-sql = { version = "0.0.0", path = "../sigma-sql" }
 stream-correlation = { version = "0.0.0", path = "../stream-correlation" }
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
@@ -23,6 +25,8 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-postgres = "0.7"
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 tracing-subscriber = "0.3"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.6"

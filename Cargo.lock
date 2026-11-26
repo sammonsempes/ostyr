@@ -2082,12 +2082,14 @@ dependencies = [
  "core-config",
  "core-pg",
  "data-encoding",
+ "log",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "siem-ingest",
+ "sigma-sql",
  "signal-hook",
  "stream-correlation",
  "tempfile",
@@ -2098,6 +2100,8 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]

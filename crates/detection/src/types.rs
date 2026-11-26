@@ -1,5 +1,7 @@
 use crate::error::SinkError;
 use crate::model::{AlertRecord, AlertStore};
+use crate::retro::{RetroReply, RetroRequest};
+use siem_ingest::error::InsertClass;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
@@ -54,3 +56,11 @@ pub type KindCounts = BTreeMap<String, u64>;
 
 /// Raised by SIGINT and SIGTERM, read by the loop between two cycles.
 pub type StopFlag = Arc<AtomicBool>;
+
+
+/// One request to the reader; a transport failure is already a fixed class.
+pub type RetroSendFn<'a> = dyn Fn(&RetroRequest) -> Result<RetroReply, InsertClass> + 'a;
+
+
+/// The time spent since the run began, injected so a test freezes it.
+pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;

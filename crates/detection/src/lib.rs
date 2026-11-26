@@ -6,6 +6,7 @@ pub mod id;
 pub mod logging;
 pub mod model;
 pub mod pg;
+pub mod retro;
 pub mod run;
 #[cfg(unix)]
 pub mod serve;
