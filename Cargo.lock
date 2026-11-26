@@ -7846,9 +7846,11 @@ name = "virt-inventory"
 version = "0.0.0"
 dependencies = [
  "cmdb",
+ "core-audit",
  "core-config",
  "core-pg",
  "log",
+ "pg-fake",
  "rcgen",
  "rustls",
  "serde",
@@ -7858,6 +7860,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",

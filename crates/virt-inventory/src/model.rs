@@ -94,3 +94,12 @@ pub struct InventoryDiff {
     pub unreadable: Vec<ItemKey>,
     pub retired_unreadable: Vec<ItemKey>,
 }
+
+
+/// What a round needs: the fetch settings, the cmdb connection settings, the store caps and the audit log.
+pub struct Context {
+    pub fetch: crate::settings::FetchSettings,
+    pub pg: core_pg::settings::PgSettings,
+    pub limits: cmdb::model::Limits,
+    pub audit: core_audit::log::AuditLog<std::fs::File>,
+}

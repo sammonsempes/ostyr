@@ -97,3 +97,27 @@ pub enum SyncError {
     #[error("cmdb store: {0}")]
     Store(#[from] cmdb::error::StoreError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("proxmox fetch refused: {0}")]
+    Fetch(#[from] FetchError),
+    #[error("the cmdb store is unreachable: {0}")]
+    Pg(#[from] PgError),
+    #[error("cmdb sync failed: {0}")]
+    Sync(#[from] SyncError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("usage: ostyr-virt-inventory <settings.yaml>")]
+    Usage,
+    #[error("interval_seconds must be within {min}..={max}")]
+    Interval { min: u64, max: u64 },
+    #[error("max_assets must be within 1..={max}")]
+    MaxAssets { max: usize },
+    #[error("max_child_rows must be within 1..={max}")]
+    MaxChildRows { max: usize },
+}
