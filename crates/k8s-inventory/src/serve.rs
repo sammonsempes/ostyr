@@ -15,6 +15,7 @@ use core_config::watch::watch_files;
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::settings::{load_settings as load_pg_settings, PgSettings};
+use core_redact::value::{redact_text, REDACTED};
 use std::error::Error;
 use std::fs::File;
 use std::future::Future;
@@ -153,11 +154,17 @@ pub async fn stop_asked(interrupt: &mut InterruptWait) -> Result<bool, Box<dyn E
 }
 
 
-/// The first configuration, audited at start: every setting name and value (paths, tenant, cluster, URL; never a secret), bounded by the audit; entries end in `; ` because a value ending in `token` followed by a newline would make the redactor swallow the next entry.
+pub fn listing_entry(key: &str, value: &str) -> String {
+    let shown = if redact_text(value) == value { value } else { REDACTED };
+    format!("{key}={};\n", shown.escape_debug().to_string().replace(';', "\\x3b"))
+}
+
+
+/// The first configuration, audited at start: every setting name and value (never a secret), one entry per line; a value a redaction rule changes is written `[REDACTED]` whole, so a match ends with its entry.
 pub fn audit_start(engine: &ReloadEngine<LiveSettings>) -> Result<(), AuditError> {
     let listing: String = (engine.to_state)(&current_config(engine))
         .iter()
-        .map(|(key, value)| format!("{key}={value}; "))
+        .map(|(key, value)| listing_entry(key, value))
         .collect();
     (engine.audit)(reload_entry(
         &engine.context,

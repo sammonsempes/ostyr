@@ -9,7 +9,7 @@ use core_audit::error::AuditError;
 use core_audit::log::{append_declared, open_file_log};
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome, RELOAD_DECLARED_KEYS};
 use core_pg::settings::load_settings as load_pg;
-use k8s_inventory::serve::{announce, announce_interrupts, audit_start, boxed_reload_audit, drain_reloads, serve, stop_asked};
+use k8s_inventory::serve::{announce, announce_interrupts, audit_start, boxed_reload_audit, drain_reloads, listing_entry, serve, stop_asked};
 use k8s_inventory::service::{
     limits_of, load_service_settings, open_service_settings_from, settings_state, start_only_changes, LiveSettings, MAX_INTERVAL_SECONDS,
     MIN_INTERVAL_SECONDS,
@@ -78,9 +78,14 @@ struct Pair {
 
 
 fn pair(dir: &Path) -> Result<Pair, Box<dyn std::error::Error>> {
+    pair_with(dir, FETCH_BODY)
+}
+
+
+fn pair_with(dir: &Path, fetch_body: &str) -> Result<Pair, Box<dyn std::error::Error>> {
     let audit = dir.join("audit.log");
     let fetch = dir.join("fetch.yaml");
-    fs::write(&fetch, FETCH_BODY)?;
+    fs::write(&fetch, fetch_body)?;
     let body = text(MIN_INTERVAL_SECONDS, "", &audit.display().to_string()).replace("/etc/f.yaml", &fetch.display().to_string());
     let service = service_file(dir, &body)?;
     let live = LiveSettings {
@@ -414,11 +419,82 @@ fn the_first_configuration_is_audited_at_start_without_a_secret() -> TestResult 
     assert!(records.contains("\"result\":\"started\""), "{records}");
     assert!(records.contains("fetch::tenant=a"), "{records}");
     assert!(
-        records.contains(&format!("fetch::token_file=/token; fetch_settings={}; ", site.fetch.display())),
+        records.contains(&format!("fetch::token_file=/token;\\nfetch_settings={};\\n", site.fetch.display())),
         "{records}"
     );
     assert!(!records.contains("[REDACTED]"), "{records}");
     assert!(records.contains("\"tenant\":\"all\""), "{records}");
+    Ok(())
+}
+
+
+#[test]
+fn a_redactor_match_in_one_start_entry_never_blanks_a_later_one() -> TestResult {
+    let dir = tempdir()?;
+    let site = pair_with(dir.path(), &fetch_text("/ca.pem", "/etc/token=1/ca.pem"))?;
+    let engine = engine_of(&site)?;
+    audit_start(&engine)?;
+    let records = fs::read_to_string(&site.audit)?;
+    assert!(records.contains("fetch::cluster=c1"), "{records}");
+    assert!(records.contains("fetch::tenant=a"), "{records}");
+    assert!(records.contains("fetch::token_file=/token"), "{records}");
+    assert!(records.contains(&format!("fetch_settings={}", site.fetch.display())), "{records}");
+    Ok(())
+}
+
+
+fn later_entries_survive(records: &str, site: &Pair) -> bool {
+    ["fetch::cluster=c1", "fetch::tenant=a", "fetch::token_file=/token"]
+        .iter()
+        .all(|entry| records.contains(entry))
+        && records.contains(&format!("fetch_settings={}", site.fetch.display()))
+}
+
+
+#[test]
+fn a_pem_or_encoded_match_in_one_start_entry_never_blanks_a_later_one() -> TestResult {
+    let forms = [
+        "/etc/-----BEGIN/ca.pem",
+        "/etc/%41/token=1/ca.pem",
+        "/etc/%2D%2D%2D%2D%2DBEGIN/ca.pem",
+        "/etc/-%2D-%2D-BEGIN/%41/ca.pem",
+    ];
+    forms.iter().try_for_each(|form| -> TestResult {
+        let dir = tempdir()?;
+        let site = pair_with(dir.path(), &fetch_text("/ca.pem", form))?;
+        let engine = engine_of(&site)?;
+        audit_start(&engine)?;
+        let records = fs::read_to_string(&site.audit)?;
+        assert!(later_entries_survive(&records, &site), "{form}: {records}");
+        Ok(())
+    })?;
+    let dir = tempdir()?;
+    let encoded_dir = dir.path().join("d%41");
+    fs::create_dir(&encoded_dir)?;
+    let site = pair_with(&encoded_dir, &fetch_text("/ca.pem", "/etc/token=1/ca.pem"))?;
+    let engine = engine_of(&site)?;
+    audit_start(&engine)?;
+    let records = fs::read_to_string(&site.audit)?;
+    assert!(later_entries_survive(&records, &site), "{records}");
+    Ok(())
+}
+
+
+#[test]
+fn a_value_holding_the_separator_cannot_forge_an_entry() -> TestResult {
+    assert_eq!(
+        listing_entry("fetch::ca_file", "a; fetch::tenant=victim; b"),
+        "fetch::ca_file=a\\x3b fetch::tenant=victim\\x3b b;\n"
+    );
+    assert_eq!(listing_entry("k", "a\n;\nfetch::tenant=victim"), "k=a\\n\\x3b\\nfetch::tenant=victim;\n");
+    assert_eq!(listing_entry("k", "plain"), "k=plain;\n");
+    let dir = tempdir()?;
+    let site = pair_with(dir.path(), &fetch_text("/ca.pem", "'a; fetch::tenant=victim; b'"))?;
+    let engine = engine_of(&site)?;
+    audit_start(&engine)?;
+    let records = fs::read_to_string(&site.audit)?;
+    assert!(records.contains("fetch::ca_file=a\\\\x3b fetch::tenant=victim\\\\x3b b;\\n"), "{records}");
+    assert!(!records.contains("; fetch::tenant=victim"), "{records}");
     Ok(())
 }
 
