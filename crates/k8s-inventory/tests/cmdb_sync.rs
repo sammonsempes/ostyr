@@ -14,8 +14,8 @@ use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use fixtures::{list, node, pod, set, uid};
 use k8s_inventory::cmdb_sync::{
-    blocked_cap, cap_label, cloud_id, node_observation, observations, pod_observation, refused_page, source_of, sync, unknown_cause, Room,
-    SyncReport, PAGE_OBSERVATIONS,
+    blocked_cap, cap_label, cloud_id, failed_page, node_observation, observations, pod_observation, refused_page, source_of, sync, unknown_cause,
+    Room, SyncReport, PAGE_OBSERVATIONS,
 };
 use k8s_inventory::error::SyncError;
 use k8s_inventory::inventory::{build_inventory, Inventory};
@@ -567,6 +567,66 @@ fn the_causes_of_an_unknown_outcome_are_told_apart_from_the_known_refusals() -> 
     assert_eq!(unknown(StoreError::Pg(PgError::ConnectTimeout { seconds: 1 })), None);
     assert_eq!(unknown(StoreError::VersionConflict), None);
     assert_eq!(unknown(StoreError::CapReached { table: "t" }), None);
+    Ok(())
+}
+
+
+#[test]
+fn a_failure_after_earlier_pages_keeps_their_conflict_count() -> TestResult {
+    let report = SyncReport {
+        created: THREE,
+        updated: TWO,
+        conflicts: FIVE,
+        ..SyncReport::default()
+    };
+    let unknown = failed_page(1, &report, StoreError::Pg(PgError::ClientDeadline { seconds: 1 }));
+    assert!(
+        matches!(
+            unknown,
+            SyncError::Unknown {
+                pages: 1,
+                created: THREE,
+                updated: TWO,
+                conflicts: FIVE,
+                ..
+            }
+        ),
+        "{unknown:?}"
+    );
+    let partial = failed_page(1, &report, StoreError::VersionConflict);
+    assert!(
+        matches!(
+            partial,
+            SyncError::Partial {
+                pages: 1,
+                created: THREE,
+                updated: TWO,
+                conflicts: FIVE,
+                ..
+            }
+        ),
+        "{partial:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn every_pre_write_refusal_is_a_known_failure() -> TestResult {
+    let refusals = [
+        StoreError::TooManyRows { table: "t", limit: 1 },
+        StoreError::BadLimits,
+        StoreError::BadPageSize { limit: 1 },
+        StoreError::BadCursor,
+        StoreError::BadId,
+        StoreError::DuplicateConflict {
+            asset: "a".to_owned(),
+            attribute: "b".to_owned(),
+            source_name: "c".to_owned(),
+        },
+        StoreError::RetriesExhausted { attempts: 1 },
+    ];
+    assert!(refusals.iter().all(|error| unknown_cause(error).is_none()));
     Ok(())
 }
 

@@ -153,11 +153,16 @@ pub async fn stop_asked(interrupt: &mut InterruptWait) -> Result<bool, Box<dyn E
 }
 
 
-/// The first configuration, audited at start: every setting name and value (paths, tenant, cluster, URL; never a secret), bounded by the audit; entries end in `; ` because a value ending in `token` followed by a newline would make the redactor swallow the next entry.
+pub fn listing_entry(key: &str, value: &str) -> String {
+    format!("{key}={};\n", value.escape_debug().to_string().replace(';', "\\x3b"))
+}
+
+
+/// The first configuration, audited at start: every setting name and value (paths, tenant, cluster, URL; never a secret), bounded by the audit; one entry per line (`;` then a newline), a value is escaped and its `;` written `\x3b`, so a redactor match ends with its entry and a value cannot forge another.
 pub fn audit_start(engine: &ReloadEngine<LiveSettings>) -> Result<(), AuditError> {
     let listing: String = (engine.to_state)(&current_config(engine))
         .iter()
-        .map(|(key, value)| format!("{key}={value}; "))
+        .map(|(key, value)| listing_entry(key, value))
         .collect();
     (engine.audit)(reload_entry(
         &engine.context,
