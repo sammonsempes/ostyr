@@ -197,6 +197,16 @@ check_present() {
     fi
 }
 
+check_base64_text() {
+    local name="$1" content
+    content="$(cat "$SECRETS_DIR/$name"; printf x)"
+    content="${content%x}"
+    if [[ ! "$content" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+        printf 'error: %s is not the 44 base64 characters init.sh writes, remove it and rerun\n' "$SECRETS_DIR/$name" >&2
+        exit 1
+    fi
+}
+
 make_random_file() {
     local name="$1" encoding="$2" size="$KEY_BYTES" temporary
     if [[ "$encoding" == base64 ]]; then
@@ -204,6 +214,9 @@ make_random_file() {
     fi
     if is_present "$SECRETS_DIR/$name"; then
         check_present "$name" "$size"
+        if [[ "$encoding" == base64 ]]; then
+            check_base64_text "$name"
+        fi
     else
         temporary="$(mktemp "$scratch/$name.XXXXXX")"
         if [[ "$encoding" == base64 ]]; then
