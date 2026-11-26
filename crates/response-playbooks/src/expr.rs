@@ -204,8 +204,11 @@ pub fn check_limits(text: &str) -> Result<(), ExprError> {
 
 /// Runs the work on a scoped thread with an explicit stack size, so the guarantee does not depend on the caller's thread.
 pub fn on_worker<Output: Send>(stack_bytes: usize, work: impl FnOnce() -> Result<Output, ExprError> + Send) -> Result<Output, ExprError> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     thread::scope(|scope| {
-        let handle = thread::Builder::new().stack_size(stack_bytes).spawn_scoped(scope, work)?;
+        let handle = thread::Builder::new()
+            .stack_size(stack_bytes)
+            .spawn_scoped(scope, move || tracing::dispatcher::with_default(&dispatch, work))?;
         handle.join().map_err(|_panic| ExprError::WorkerPanicked)?
     })
 }
