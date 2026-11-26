@@ -1565,7 +1565,11 @@ fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and
         Action::Ping,
         Action::CollectStatus,
         Action::Isolate,
-        Action::Kill { process_id: 1 },
+        Action::Kill {
+            process_id: 1,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+        },
         Action::RunScript { script: "s".to_owned() },
         Action::Update { version: "1".to_owned() },
         Action::Uninstall,
@@ -1592,7 +1596,14 @@ fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and
 
 #[test]
 fn the_kind_names_are_fixed_and_hold_no_field() -> TestResult {
-    assert_eq!(agent_channel::agent_app::action_kind(&Action::Kill { process_id: SEVEN as u32 }), "kill");
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::Kill {
+            process_id: SEVEN as u32,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned()
+        }),
+        "kill"
+    );
     assert_eq!(agent_channel::agent_app::action_kind(&Action::Isolate), "isolate");
     assert_eq!(agent_channel::agent_app::action_kind(&open_shell_command(FIRST).action), "open_shell");
     Ok(())

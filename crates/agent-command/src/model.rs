@@ -78,6 +78,12 @@ pub const MAX_REFERENCE_BYTES: usize = 128;
 pub const MAX_SUBJECT_BYTES: usize = 255;
 
 
+pub const BOOT_ID_LENGTH: usize = 36;
+
+
+pub const BOOT_ID_DASHES: [usize; 4] = [8, 13, 18, 23];
+
+
 pub const SESSION_ID_PUNCTUATION: &str = "_.-";
 
 
@@ -105,6 +111,8 @@ pub enum Action {
     Isolate,
     Kill {
         process_id: u32,
+        start_ticks: u64,
+        boot_id: String,
     },
     RunScript {
         script: String,

@@ -149,7 +149,11 @@ fn all_actions() -> Vec<Action> {
         Action::Ping,
         Action::CollectStatus,
         Action::Isolate,
-        Action::Kill { process_id: 1 },
+        Action::Kill {
+            process_id: 1,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+        },
         Action::RunScript { script: "s".to_owned() },
         Action::Update { version: "1".to_owned() },
         Action::Uninstall,

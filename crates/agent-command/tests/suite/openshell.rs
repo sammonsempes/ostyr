@@ -328,7 +328,11 @@ fn every_action_name_maps_to_exactly_one_variant() -> TestResult {
         Action::Ping,
         Action::CollectStatus,
         Action::Isolate,
-        Action::Kill { process_id: 1 },
+        Action::Kill {
+            process_id: 1,
+            start_ticks: 1,
+            boot_id: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".to_owned(),
+        },
         Action::RunScript { script: "s".to_owned() },
         Action::Update { version: "1".to_owned() },
         Action::Uninstall,
@@ -353,5 +357,33 @@ fn every_action_name_maps_to_exactly_one_variant() -> TestResult {
     EXCLUSIVE_ACTIONS
         .iter()
         .for_each(|name| assert!(SENSITIVE_ACTION_NAMES.contains(name), "{name}"));
+    Ok(())
+}
+
+
+#[test]
+fn the_kill_boot_id_grammar_is_pinned() -> TestResult {
+    let good = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+    let bad = [
+        "",
+        "0A1B2C3D-4E5F-6789-ABCD-EF0123456789",
+        "0a1b2c3d4e5f-6789-abcd-ef01234567890",
+        "0a1b2c3d-4e5f-6789-abcd-ef012345678",
+        "0a1b2c3d-4e5f-6789-abcd-ef01234567890",
+        "0a1b2c3d-4e5f-6789-abcd-ef012345678g",
+        "0a1b2c3d-4e5f-6789-abcd_ef0123456789",
+        "0a1b2c3d-4e5f-6789-abcd-ef0123456789\n",
+    ];
+    assert!(agent_command::action::valid_boot_id(good));
+    bad.iter().try_for_each(|boot_id| -> TestResult {
+        assert!(!agent_command::action::valid_boot_id(boot_id), "{boot_id:?}");
+        let action = Action::Kill {
+            process_id: 1,
+            start_ticks: 1,
+            boot_id: (*boot_id).to_owned(),
+        };
+        assert_eq!(validate_action(&action), Err(ActionError::KillBootId));
+        Ok(())
+    })?;
     Ok(())
 }

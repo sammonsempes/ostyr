@@ -1,8 +1,8 @@
 use crate::error::ActionError;
 use crate::model::{
-    Action, PackageSelection, MAX_PACKAGES, MAX_PACKAGE_NAME_LENGTH, MAX_REFERENCE_BYTES, MAX_SESSION_ID_BYTES, MAX_SHELL_APPROVERS,
-    MAX_SHELL_IDLE_SECONDS, MAX_SHELL_SECONDS, MAX_SUBJECT_BYTES, PACKAGE_NAME_PUNCTUATION, REFERENCE_PUNCTUATION, SESSION_ID_PUNCTUATION,
-    SUBJECT_PUNCTUATION,
+    Action, PackageSelection, BOOT_ID_DASHES, BOOT_ID_LENGTH, MAX_PACKAGES, MAX_PACKAGE_NAME_LENGTH, MAX_REFERENCE_BYTES, MAX_SESSION_ID_BYTES,
+    MAX_SHELL_APPROVERS, MAX_SHELL_IDLE_SECONDS, MAX_SHELL_SECONDS, MAX_SUBJECT_BYTES, PACKAGE_NAME_PUNCTUATION, REFERENCE_PUNCTUATION,
+    SESSION_ID_PUNCTUATION, SUBJECT_PUNCTUATION,
 };
 
 
@@ -47,6 +47,7 @@ pub fn validate_action(action: &Action) -> Result<(), ActionError> {
             max_seconds,
             idle_seconds,
         } => validate_open_shell(session_id, asset, ticket, requester, approvers, (*max_seconds, *idle_seconds)),
+        Action::Kill { boot_id, .. } if !valid_boot_id(boot_id) => Err(ActionError::KillBootId),
         Action::Ping
         | Action::CollectStatus
         | Action::Isolate
@@ -57,6 +58,19 @@ pub fn validate_action(action: &Action) -> Result<(), ActionError> {
         | Action::ChangePolicy { .. }
         | Action::Reboot { .. } => Ok(()),
     }
+}
+
+
+/// `/proc/sys/kernel/random/boot_id`: 36 characters, lowercase hex with `-` at positions 8, 13, 18 and 23.
+pub fn valid_boot_id(text: &str) -> bool {
+    text.len() == BOOT_ID_LENGTH
+        && text.chars().enumerate().all(|(index, character)| {
+            if BOOT_ID_DASHES.contains(&index) {
+                character == '-'
+            } else {
+                character.is_ascii_digit() || ('a'..='f').contains(&character)
+            }
+        })
 }
 
 

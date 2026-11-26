@@ -51,6 +51,8 @@ pub enum ActionError {
     ShellMaxSeconds,
     #[error("the shell idle timeout is invalid")]
     ShellIdleSeconds,
+    #[error("the kill boot id is invalid")]
+    KillBootId,
 }
 
 
