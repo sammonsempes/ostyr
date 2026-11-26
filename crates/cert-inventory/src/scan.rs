@@ -97,6 +97,8 @@ pub struct ScanState {
     pub malformed: BTreeMap<&'static str, usize>,
     pub max_open_dirs: usize,
     pub private_keys_refused: usize,
+    pub roots_unreached: usize,
+    pub roots_refused: usize,
     pub errors: Vec<String>,
     pub errors_omitted: usize,
 }
@@ -148,10 +150,10 @@ pub fn scan_with(settings: &ScanSettings, before_open: fn(&Path), max_listed: us
     let mut state = ScanState::default();
     match check_settings(settings) {
         Err(error) => record_error(&mut state, format!("invalid settings: {error}")),
-        Ok(()) => settings
-            .roots
-            .iter()
-            .for_each(|root| scan_root(settings, root, before_open, max_listed, &mut state)),
+        Ok(()) => settings.roots.iter().for_each(|root| {
+            state.roots_unreached += usize::from(state.examined >= settings.max_files);
+            scan_root(settings, root, before_open, max_listed, &mut state);
+        }),
     }
     ScanOutcome {
         records: state.found.into_values().collect(),
@@ -160,6 +162,8 @@ pub fn scan_with(settings: &ScanSettings, before_open: fn(&Path), max_listed: us
         malformed: state.malformed,
         max_open_dirs: state.max_open_dirs,
         private_keys_refused: state.private_keys_refused,
+        roots_unreached: state.roots_unreached,
+        roots_refused: state.roots_refused,
         errors: state.errors,
         errors_omitted: state.errors_omitted,
     }

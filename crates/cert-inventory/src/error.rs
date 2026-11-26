@@ -124,6 +124,17 @@ pub enum FetchError {
 
 
 #[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("the scan task failed: {0}")]
+    Scan(#[from] tokio::task::JoinError),
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("store: {0}")]
+    Store(#[from] InventoryStoreError),
+}
+
+
+#[derive(Debug, Error)]
 pub enum InventoryStoreError {
     #[error("database: {0}")]
     Pg(#[from] core_pg::error::PgError),
