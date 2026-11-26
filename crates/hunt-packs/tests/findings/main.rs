@@ -7,9 +7,9 @@ use hunt_packs::api::FIRST_END;
 use hunt_packs::packs::{is_pack_id, MAX_ID_CHARS};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    count_oversized, finding_reply, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, start_cursor, CursorError, FindingPage,
-    FindingRow, Param, StateError, FINDING_CONFLICT, FINDING_INSERTED, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
-    OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
+    count_oversized, finding_reply, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, refusal_reason, start_cursor,
+    CursorError, FindingPage, FindingRow, Param, StateError, FINDING_CONFLICT, FINDING_INSERTED, FINDING_REPLAY, FINDING_SQL, ID_BYTE_CAP, LIST_SQL,
+    MAX_FINDINGS_PAGE, MIGRATIONS, OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
@@ -102,7 +102,7 @@ fn insert_exec(store: &Rows, seen: &Seen) -> impl FnMut(&TenantScope, &'static s
                 Ok(match known {
                     None => vec![FINDING_INSERTED],
                     Some(true) => vec![FINDING_CONFLICT],
-                    Some(false) => Vec::new(),
+                    Some(false) => vec![FINDING_REPLAY],
                 })
             }
             _ => Err(PgError::InvalidTenant),
@@ -146,8 +146,12 @@ fn fresh() -> (Rows, Seen) {
 #[test]
 fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(FINDING_SQL.contains("VALUES ($1, $2, $3, $4, $5, $6, now())"));
-    assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING 0::bigint AS code"));
-    assert!(FINDING_SQL.contains("AND (window_start, matches, max_matches) <> ($3, $5, $6)"));
+    assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO UPDATE SET found_at = hunt_pack_findings.found_at RETURNING CASE"));
+    assert!(
+        FINDING_SQL.contains("WHEN hunt_pack_findings.xmax = 0 THEN 0 WHEN (window_start, matches, max_matches) = ($3, $5, $6) THEN 2 ELSE 1 END")
+    );
+    assert!(!FINDING_SQL.contains("DO NOTHING"));
+    assert_eq!((FINDING_INSERTED, FINDING_CONFLICT, FINDING_REPLAY), (0, 1, SECOND));
     assert!(LIST_SQL
         .contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4"));
     assert!(!LIST_SQL.contains("OFFSET"));
@@ -226,7 +230,26 @@ async fn a_different_finding_under_the_same_key_is_a_conflict_and_an_odd_reply_i
     ));
     assert!(matches!(finding_reply(&[FINDING_INSERTED, FINDING_CONFLICT]), Err(StateError::BadReply)));
     assert!(matches!(finding_reply(&[THREE]), Err(StateError::BadReply)));
-    assert!(matches!(finding_reply(&[]), Ok(false)));
+    assert!(matches!(finding_reply(&[]), Err(StateError::BadReply)));
+    assert!(matches!(finding_reply(&[FINDING_REPLAY]), Ok(false)));
+    Ok(())
+}
+
+
+#[test]
+fn the_live_race_script_runs_the_statement_of_the_crate() -> TestResult {
+    assert!(include_str!("../live-finding-race.sh").contains(&format!("FINDING_SQL='{FINDING_SQL}'")));
+    Ok(())
+}
+
+
+#[test]
+fn a_refusal_is_logged_with_a_fixed_reason() -> TestResult {
+    let overflow = i64::try_from(u64::MAX).err().ok_or("fits")?;
+    assert_eq!(refusal_reason(&StateError::FindingConflict), "conflict");
+    assert_eq!(refusal_reason(&StateError::CountOutOfRange(overflow)), "count out of range");
+    assert_eq!(refusal_reason(&StateError::InvalidPackId), "invalid id");
+    assert_eq!(refusal_reason(&StateError::BadReply), "not refused for good");
     Ok(())
 }
 

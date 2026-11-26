@@ -18,7 +18,7 @@ use socket2::{Domain, Socket, Type};
 use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::Duration;
-use stub::{reply, serve, serve_check, CLEAN_NAMES};
+use stub::{accept_guarded, reply, serve, serve_check, CLEAN_NAMES};
 
 
 const COUNT: u64 = 42;
@@ -556,7 +556,7 @@ fn a_count_request_that_fails_after_a_clean_check_is_an_outage() -> TestResult {
     let port = bound.local_addr()?.port();
     let server = std::thread::spawn(move || -> io::Result<()> {
         serve_check(&bound)?;
-        let (stream, _) = bound.accept()?;
+        let stream = accept_guarded(&bound)?;
         drop(stream);
         Ok(())
     });
