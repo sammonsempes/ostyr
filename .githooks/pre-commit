@@ -34,6 +34,48 @@ check_cargo_directories() {
 }
 
 if ! check_cargo_directories; then exit 1; fi
+
+GATE_BASE_SHA=""
+GATE_BASE_PATTERN='^[A-Za-z0-9._/^~-]+$'
+GATE_BASE_MAX=200
+
+refuse() {
+  echo "pre-commit: $*" >&2
+  return 1
+}
+
+resolve_gate_base() {
+  local base=${GATE_SCOPE#diff:}
+  if [ "${#base}" -gt "$GATE_BASE_MAX" ] || [[ ! "$base" =~ $GATE_BASE_PATTERN ]] || [[ "$base" == -* ]]; then
+    refuse "GATE_SCOPE=diff:<base> needs 1 to $GATE_BASE_MAX characters of [A-Za-z0-9._/^~-] and no leading '-' (refused)"
+  else
+    GATE_BASE_SHA=$(git rev-parse --verify --quiet --end-of-options "$base^{commit}") ||
+      refuse "GATE_SCOPE=diff:$base does not resolve to a commit (refused)"
+  fi
+}
+
+check_gate_base() {
+  resolve_gate_base &&
+    { git merge-base --is-ancestor "$GATE_BASE_SHA" HEAD || refuse "GATE_SCOPE base $GATE_BASE_SHA is not an ancestor of HEAD (refused)"; } &&
+    { git diff --quiet --ignore-submodules=none || refuse "GATE_SCOPE=diff: the working tree differs from HEAD (refused)"; } &&
+    { git diff --cached --quiet --ignore-submodules=none || refuse "GATE_SCOPE=diff: the index differs from HEAD (refused)"; } &&
+    { [ -z "$(git ls-files --others --exclude-standard -- crates tools)" ] || refuse "GATE_SCOPE=diff: untracked files under crates or tools (refused)"; } &&
+    { ! git diff --quiet --ignore-submodules=none "$GATE_BASE_SHA" HEAD || refuse "GATE_SCOPE=diff: $GATE_BASE_SHA and HEAD have the same tree, nothing to gate (refused)"; }
+}
+
+check_gate_scope() {
+  case "${GATE_SCOPE:-}" in
+    "" | full) ;;
+    diff:*) check_gate_base ;;
+    *) refuse "GATE_SCOPE must be full, diff:<base> or unset (refused)" ;;
+  esac
+}
+
+if ! check_gate_scope; then exit 1; fi
+
+changed() {
+  if [ -n "$GATE_BASE_SHA" ]; then git diff --ignore-submodules=none "$@" "$GATE_BASE_SHA" HEAD; else git diff --cached --ignore-submodules=none "$@"; fi
+}
 export CARGO_INCREMENTAL=0
 if command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
@@ -202,7 +244,7 @@ if ! check_published_migrations; then exit 1; fi
 
 docs_only() {
   local staged path
-  staged=$(git diff --cached --ignore-submodules=none --name-only --diff-filter=ACMRD)
+  staged=$(changed --name-only --diff-filter=ACMRD)
   [ -n "$staged" ] || return 1
   while IFS= read -r path; do
     case "$path" in
@@ -248,7 +290,7 @@ compute_scope() {
   SCOPE_DIRS=()
   SCOPE_REASON=""
   local staged path line metadata
-  staged=$(git diff --cached --ignore-submodules=none --name-only --no-renames)
+  staged=$(changed --name-only --no-renames)
   if [ "${GATE_SCOPE:-}" = full ]; then
     SCOPE_REASON="GATE_SCOPE=full"
   elif [ -z "$staged" ]; then
@@ -280,7 +322,7 @@ compute_scope() {
     SCOPE_DIRS=()
     echo "pre-commit: scope full workspace ($SCOPE_REASON)" >&2
   else
-    echo "pre-commit: scope ${#SCOPE_PKGS[@]} packages: ${SCOPE_PKGS[*]}" >&2
+    echo "pre-commit: scope ${GATE_BASE_SHA:+(diff $GATE_BASE_SHA) }${#SCOPE_PKGS[@]} packages: ${SCOPE_PKGS[*]}" >&2
   fi
 }
 
@@ -300,7 +342,7 @@ kernel_touched() {
   local path
   local -a staged
   if [ "${GATE_SCOPE:-}" = full ]; then return 0; fi
-  mapfile -d '' staged < <(git diff --cached --ignore-submodules=none --name-only -z --no-renames)
+  mapfile -d '' staged < <(changed --name-only -z --no-renames)
   for path in "${staged[@]+"${staged[@]}"}"; do
     if forced_full_path "$path"; then return 0; fi
     case "$path" in
@@ -371,7 +413,7 @@ kernel_only_commit() {
   local i meta path status old_mode new_mode
   local -a entries
   if [ "${GATE_SCOPE:-}" = full ]; then return 1; fi
-  mapfile -d '' entries < <(git diff --cached --ignore-submodules=none --raw -z --no-renames --no-abbrev)
+  mapfile -d '' entries < <(changed --raw -z --no-renames --no-abbrev)
   [ "${#entries[@]}" -gt 0 ] || return 1
   for ((i = 0; i + 1 < ${#entries[@]}; i += 2)); do
     meta="${entries[i]}"
