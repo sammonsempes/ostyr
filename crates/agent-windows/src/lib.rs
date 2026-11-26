@@ -17,6 +17,7 @@ pub mod recreated;
 pub mod room;
 pub mod round;
 pub mod run;
+pub mod serve;
 pub mod settings;
 pub mod split;
 pub mod stream;

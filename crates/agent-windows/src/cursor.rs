@@ -57,9 +57,14 @@ pub fn read_cursor(state_dir: &Path, channel: &Channel) -> io::Result<CursorStat
 }
 
 
+pub fn cursor_temporary_path(state_dir: &Path, channel: &Channel) -> PathBuf {
+    state_dir.join(format!("{}.tmp", channel.cursor_file))
+}
+
+
 pub fn write_cursor(state_dir: &Path, channel: &Channel, record_id: u64, time: &str, created: Option<&str>) -> io::Result<()> {
     let path = cursor_path(state_dir, channel);
-    let temporary = state_dir.join(format!("{}.tmp", channel.cursor_file));
+    let temporary = cursor_temporary_path(state_dir, channel);
     let mut file = File::create(&temporary)?;
     let suffix = created.map_or_else(String::new, |text| format!(" {text}"));
     writeln!(file, "{record_id} {time}{suffix}")?;
