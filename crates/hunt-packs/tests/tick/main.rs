@@ -6,7 +6,7 @@ use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::{due_runs, RunWindow, ScheduleError};
-use hunt_packs::store::{last_done, record_done, Param, FINDING_CONFLICT, FINDING_INSERTED, FINDING_SQL, GET_SQL, SET_SQL};
+use hunt_packs::store::{last_done, record_done, Param, FINDING_CONFLICT, FINDING_INSERTED, FINDING_REPLAY, FINDING_SQL, GET_SQL, SET_SQL};
 use hunt_packs::tick::{
     check_limits, tick, Hooks, PackStatus, RunRecord, TickError, TickLimits, DEFAULT_MAX_RUNS_PER_TICK, MAX_CLOCK_SKEW, MAX_RUNS_PER_TICK_CEILING,
     MAX_TENANTS_CEILING,
@@ -145,7 +145,7 @@ fn answer(store: &Store, scope: &TenantScope, sql: &'static str, params: &[Param
             let held = *map.entry(key).or_insert(*matches);
             Ok(match (fresh, held == *matches) {
                 (true, _) => vec![FINDING_INSERTED],
-                (false, true) => Vec::new(),
+                (false, true) => vec![FINDING_REPLAY],
                 (false, false) => vec![FINDING_CONFLICT],
             })
         }
@@ -773,7 +773,16 @@ async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it(
     let text = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
     let refusals = text.lines().filter(|line| line.contains("hunt finding refused for good")).count();
     assert_eq!(refusals, 1);
-    assert!(text.contains("tenant a pack p"));
+    assert!(text.contains("tenant a finding p: count out of range"), "{text}");
+    let summaries: Vec<&str> = text.lines().filter(|line| line.contains("hunt tick:")).collect();
+    assert!(
+        summaries.first().is_some_and(|line| line.contains("0 store failed, 1 refused")),
+        "{summaries:?}"
+    );
+    assert!(
+        summaries.get(1).is_some_and(|line| line.contains("0 store failed, 0 refused")),
+        "{summaries:?}"
+    );
     Ok(())
 }
 

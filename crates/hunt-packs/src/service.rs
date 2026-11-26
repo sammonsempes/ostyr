@@ -32,6 +32,7 @@ pub struct ServiceReport {
     pub refused_tenants: usize,
     pub pack_dir_failures: u64,
     pub refused_stat_hunts: usize,
+    pub findings_refused: usize,
     pub tick_failures: u64,
 }
 
@@ -116,6 +117,7 @@ where
                     report.ticks += 1;
                     report.runs += done.packs.iter().map(|entry| entry.runs.len()).sum::<usize>();
                     report.refused_tenants += done.refused_tenants;
+                    report.findings_refused += done.findings_refused;
                 }
                 Err(error) => {
                     let text = error.to_string();

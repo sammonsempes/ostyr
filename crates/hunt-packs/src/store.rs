@@ -60,12 +60,10 @@ pub const SET_SQL: &str = "INSERT INTO hunt_pack_runs (tenant, pack_id, last_don
     RETURNING last_done_end";
 
 
-/// Params: `$2` pack id, `$3` window start, `$4` window end, `$5` matches, `$6` baseline. One row of `FINDING_INSERTED` when inserted, one of `FINDING_CONFLICT` when a different row holds the key, none for an identical replay.
-pub const FINDING_SQL: &str =
-    "WITH inserted AS (INSERT INTO hunt_pack_findings (tenant, pack_id, window_start, window_end, matches, max_matches, found_at) \
-    VALUES ($1, $2, $3, $4, $5, $6, now()) ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING 0::bigint AS code) \
-    SELECT code FROM inserted UNION ALL SELECT 1::bigint FROM hunt_pack_findings WHERE tenant = $1 AND pack_id = $2 AND window_end = $4 \
-    AND (window_start, matches, max_matches) <> ($3, $5, $6)";
+/// Params: `$2` pack id, `$3` window start, `$4` window end, `$5` matches, `$6` baseline. One row: `FINDING_INSERTED`, `FINDING_CONFLICT` or `FINDING_REPLAY`, read under the conflict lock.
+pub const FINDING_SQL: &str = "INSERT INTO hunt_pack_findings (tenant, pack_id, window_start, window_end, matches, max_matches, found_at) \
+    VALUES ($1, $2, $3, $4, $5, $6, now()) ON CONFLICT (tenant, pack_id, window_end) DO UPDATE SET found_at = hunt_pack_findings.found_at \
+    RETURNING CASE WHEN hunt_pack_findings.xmax = 0 THEN 0 WHEN (window_start, matches, max_matches) = ($3, $5, $6) THEN 2 ELSE 1 END::bigint";
 
 
 /// The row `FINDING_SQL` returns for an inserted finding.
@@ -74,6 +72,10 @@ pub const FINDING_INSERTED: i64 = 0;
 
 /// The row `FINDING_SQL` returns when the key is held by a finding that differs.
 pub const FINDING_CONFLICT: i64 = 1;
+
+
+/// The row `FINDING_SQL` returns when the key already holds the identical finding.
+pub const FINDING_REPLAY: i64 = 2;
 
 
 /// The longest stored pack id in bytes (the `hunt_packs_0003` constraint); a longer stored id is never read, so a cursor always parses back.
@@ -132,6 +134,16 @@ pub fn is_permanent(error: &StateError) -> bool {
         error,
         StateError::CountOutOfRange(_) | StateError::InvalidPackId | StateError::FindingConflict
     )
+}
+
+
+/// The fixed reason a permanent refusal is logged with.
+pub fn refusal_reason(error: &StateError) -> &'static str {
+    match error {
+        StateError::FindingConflict => "conflict",
+        StateError::CountOutOfRange(_) => "count out of range",
+        _ => "invalid id",
+    }
 }
 
 
@@ -197,10 +209,10 @@ pub struct FindingPage {
 }
 
 
-/// What the rows `FINDING_SQL` returned say: inserted, an identical replay, a conflict, or an odd reply.
+/// What the row `FINDING_SQL` returned says: inserted, an identical replay, a conflict, or an odd reply (no row included).
 pub fn finding_reply(rows: &[i64]) -> Result<bool, StateError> {
     match rows {
-        [] => Ok(false),
+        [FINDING_REPLAY] => Ok(false),
         [FINDING_INSERTED] => Ok(true),
         [FINDING_CONFLICT] => Err(StateError::FindingConflict),
         _ => Err(StateError::BadReply),
