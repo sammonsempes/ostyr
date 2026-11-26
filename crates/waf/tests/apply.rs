@@ -7,6 +7,7 @@ use core_audit::tenant::PLATFORM_TENANT;
 use core_config::reload::{current_config, reload, reload_entry, ReloadContext, ReloadEngine, ReloadOutcome};
 use core_config::trusted_program::open_trusted_program;
 use data_encoding::HEXLOWER;
+use rustix::fs::{openat, Mode, OFlags, CWD};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::error::Error;
@@ -14,7 +15,7 @@ use std::error::Error as StdError;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -24,14 +25,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use waf::admin::open_admin_directory;
 use waf::apply::{
-    applied_state, check_settings, check_start_only, config_error, config_id, deliver, discard, file_trusted, judge_program, late_audit,
-    load_trusted_routes, load_trusted_settings, load_trusted_settings_file, open_apply, open_apply_audited, open_apply_audited_with_program,
-    open_apply_with_program, path_text_ok, production_program, refused_text, render_applied, render_applied_capped, start_refusal,
+    applied_state, check_settings, check_sink_apart, check_start_only, config_error, config_id, deliver, discard, file_trusted, judge_program,
+    late_audit, load_trusted_routes, load_trusted_settings, load_trusted_settings_file, open_apply, open_apply_audited,
+    open_apply_audited_with_program, open_apply_with_program, path_text_ok, production_program, refused_text, render_applied, render_applied_capped,
+    stage_file, stage_file_after, start_refusal,
 };
 use waf::error::{DeliverError, OpenError, WafError};
 use waf::limits::CADDY_PROGRAM;
-use waf::model::{Applied, ApplySettings, CommandStatus, Refusal};
+use waf::model::{Applied, ApplySettings, CaRoot, CommandStatus, Refusal};
 use waf::runner::{leave_alone, logged, run_child, run_child_with_hook, run_with_deadline, stop, wait_child};
+use waf::types::{AuditIdentity, AuditProbeFn};
 
 
 const TWO_ROUTES: &str = "tests/fixtures/two_routes.yaml";
@@ -173,6 +176,7 @@ fn settings_of(fixture: &Fixture) -> ApplySettings {
         retired_caddy_program: false,
         admin_socket: fixture.admin.join("sock").to_string_lossy().into_owned(),
         deadline_seconds: SETTINGS_DEADLINE,
+        audit_file: None,
     }
 }
 
@@ -562,6 +566,7 @@ fn the_refused_list_is_cut_with_a_visible_marker() -> Result<(), Box<dyn Error>>
             retired_caddy_program: false,
             admin_socket: "/s".to_owned(),
             deadline_seconds: SETTINGS_DEADLINE,
+            audit_file: None,
         },
         json: "{}".to_owned(),
         ca_root: None,
@@ -606,7 +611,7 @@ fn a_fifo_symlink_or_directory_at_the_final_name_is_refused_before_any_write() -
 
 
 #[test]
-fn a_fifo_or_symlink_at_the_staged_name_is_never_followed_or_opened() -> Result<(), Box<dyn Error>> {
+fn a_fifo_or_symlink_at_the_staged_name_is_replaced_never_followed_or_opened() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
     let staged = fixture.out.join(format!(".apply-{}.json", std::process::id()));
     rustix::fs::mknodat(
@@ -616,14 +621,14 @@ fn a_fifo_or_symlink_at_the_staged_name_is_never_followed_or_opened() -> Result<
         rustix::fs::Mode::from_raw_mode(OWNER_ONLY),
         0,
     )?;
-    let failure = try_open(&fixture)?.err();
-    assert!(matches!(failure, Some(OpenError::Deliver(DeliverError::Write(_)))));
+    assert!(try_open(&fixture)?.is_ok());
+    assert!(final_text(&fixture)?.contains("a.example.test"));
     let elsewhere = fixture.dir.path().join("elsewhere");
     fs::write(&elsewhere, "untouched")?;
     symlink(&elsewhere, &staged)?;
-    assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Deliver(DeliverError::Write(_)))));
+    assert!(try_open(&fixture)?.is_ok());
     assert_eq!(fs::read_to_string(&elsewhere)?, "untouched");
-    assert!(calls(&fixture).is_empty());
+    assert_eq!(fs::read_dir(&fixture.out)?.count(), 1);
     Ok(())
 }
 
@@ -1183,7 +1188,7 @@ fn a_program_owned_by_another_user_is_refused_at_load_at_delivery_and_in_the_run
     std::os::unix::fs::chown(prog(&fixture), Some(FOREIGN_PROGRAM_OWNER), None)?;
     assert!(judge_program(prog(&fixture)).is_err());
     assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Config(_))));
-    let failure = deliver(&applied, fake).err().ok_or("delivered")?;
+    let failure = deliver(&applied, fake, None).err().ok_or("delivered")?;
     assert!(matches!(failure, DeliverError::Program(_)));
     let text = format!("{failure} {failure:?}");
     assert!(!text.contains(&fixture.program));
@@ -1614,5 +1619,117 @@ fn a_sink_that_cannot_open_is_named_with_the_refusal_when_there_is_one() -> Resu
     let log = Arc::new(open_file_log(&good.dir.path().join("audit.log"))?);
     let sink: Box<core_config::types::SharedAuditFn> = Box::new(move |entry| append(&log, entry));
     assert!(open_apply_audited_with_program(&good.settings_file, prog(&good), fake, Ok(sink), context()).is_ok());
+    Ok(())
+}
+
+
+fn identity_of(path: &Path) -> io::Result<AuditIdentity> {
+    let meta = fs::metadata(path)?;
+    Ok((meta.dev(), meta.ino(), meta.nlink()))
+}
+
+
+fn directory_handle(path: &Path) -> Result<OwnedFd, Box<dyn Error>> {
+    Ok(openat(CWD, path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?)
+}
+
+
+const CA_ROOT_NAME: &str = "ca-root-test.pem";
+
+
+#[test]
+fn an_audit_sink_that_is_a_name_the_delivery_creates_or_replaces_is_refused_before_anything_is_written() -> Result<(), Box<dyn Error>> {
+    let pid = std::process::id();
+    let names = [
+        "caddy.json".to_owned(),
+        format!(".apply-{pid}.json"),
+        format!(".ca-root-{pid}.tmp"),
+        CA_ROOT_NAME.to_owned(),
+    ];
+    names.iter().try_for_each(|name| -> Result<(), Box<dyn Error>> {
+        let fixture = fixture(ONE_ROUTE)?;
+        let mut applied = render_applied(&settings_of(&fixture), prog(&fixture), 0)?;
+        applied.ca_root = Some(CaRoot {
+            name: CA_ROOT_NAME.to_owned(),
+            pem: "pem".to_owned(),
+        });
+        let sink = fixture.out.join(name);
+        fs::write(&sink, "audit")?;
+        let identity = identity_of(&sink)?;
+        let probe: &AuditProbeFn = &move || Ok(identity);
+        let failure = deliver(&applied, fake, Some(probe)).err().ok_or("delivered")?;
+        assert!(matches!(failure, DeliverError::AuditSinkClash), "{name}: {failure}");
+        assert_eq!(fs::read_to_string(&sink)?, "audit");
+        assert!(calls(&fixture).is_empty());
+        Ok(())
+    })
+}
+
+
+#[test]
+fn an_audit_sink_with_a_second_link_or_that_cannot_be_read_is_refused_and_an_apart_one_delivers() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let applied = render_applied(&settings_of(&fixture), prog(&fixture), 0)?;
+    let sink = fixture.dir.path().join("audit.log");
+    fs::write(&sink, "audit")?;
+    let apart = identity_of(&sink)?;
+    fs::hard_link(&sink, fixture.dir.path().join("second-name"))?;
+    let linked = identity_of(&sink)?;
+    let probe: &AuditProbeFn = &move || Ok(linked);
+    assert!(matches!(deliver(&applied, fake, Some(probe)).err(), Some(DeliverError::AuditSinkLinked)));
+    let broken: &AuditProbeFn = &|| Err(io::Error::other("no handle"));
+    assert!(matches!(deliver(&applied, fake, Some(broken)).err(), Some(DeliverError::AuditSink(_))));
+    assert!(calls(&fixture).is_empty());
+    let single = (apart.0, apart.1, 1);
+    let good: &AuditProbeFn = &move || Ok(single);
+    deliver(&applied, fake, Some(good))?;
+    assert!(final_text(&fixture)?.contains("a.example.test"));
+    Ok(())
+}
+
+
+const LONG_NAME_BYTES: usize = 300;
+
+
+#[test]
+fn a_name_that_cannot_be_inspected_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let directory = directory_handle(&fixture.out)?;
+    let probe: &AuditProbeFn = &|| Ok((0, 0, 1));
+    let long_name = "a".repeat(LONG_NAME_BYTES);
+    assert!(matches!(check_sink_apart(&directory, &[long_name], probe), Err(DeliverError::Write(_))));
+    Ok(())
+}
+
+
+fn keep_the_name(_directory: &OwnedFd, _name: &str) -> Result<(), DeliverError> {
+    Ok(())
+}
+
+
+#[test]
+fn staging_replaces_a_stale_name_never_follows_a_link_and_never_opens_an_existing_file() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let directory = directory_handle(&fixture.out)?;
+    fs::write(fixture.out.join("stale"), "old stage")?;
+    stage_file(&directory, "stale", b"new")?;
+    assert_eq!(fs::read_to_string(fixture.out.join("stale"))?, "new");
+    let outside = fixture.dir.path().join("outside");
+    fs::write(&outside, "outside")?;
+    symlink(&outside, fixture.out.join("linked"))?;
+    stage_file(&directory, "linked", b"new")?;
+    assert_eq!(fs::read_to_string(&outside)?, "outside");
+    assert_eq!(fs::read_to_string(fixture.out.join("linked"))?, "new");
+    fs::write(fixture.out.join("kept"), "audit")?;
+    assert!(matches!(
+        stage_file_after(&directory, "kept", b"new", keep_the_name),
+        Err(DeliverError::Write(_))
+    ));
+    assert_eq!(fs::read_to_string(fixture.out.join("kept"))?, "audit");
+    symlink(&outside, fixture.out.join("kept-link"))?;
+    assert!(stage_file_after(&directory, "kept-link", b"new", keep_the_name).is_err());
+    assert_eq!(fs::read_to_string(&outside)?, "outside");
+    fs::create_dir(fixture.out.join("subdirectory"))?;
+    assert!(matches!(stage_file(&directory, "subdirectory", b"new"), Err(DeliverError::Write(_))));
     Ok(())
 }
