@@ -2,6 +2,7 @@
 
 use crate::cursor::{read_cursor, write_cursor};
 use crate::row::{normalise_mac, valid_hostname, Converted};
+use crate::types::LeaseRef;
 use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Alert, Severity};
@@ -34,6 +35,9 @@ pub const MAX_LOOKUP_MACS: usize = MAX_UNKNOWN_PER_RUN * LOOKUP_FACTOR;
 
 
 pub const MAX_LOOKUP_CHUNKS: usize = 10;
+
+
+pub const MAX_WAITING_MACS: usize = MAX_LOOKUP_MACS;
 
 
 pub const SECONDS_PER_DAY: u64 = 86_400;
@@ -187,10 +191,11 @@ pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidate
 }
 
 
-/// What the lookup learned: the MACs to leave out of the run, the scanned MACs in scan order, how many of them already held an alert, the chunk the next run starts at, and whether a query failed.
+/// What the lookup learned: the MACs that already hold an alert, the MACs of the chunks it did not scan, the scanned MACs in scan order, how many of them already held an alert, the chunk the next run starts at, and whether a query failed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lookup {
     pub skip: BTreeSet<String>,
+    pub deferred: BTreeSet<String>,
     pub scan_order: Vec<String>,
     pub found: usize,
     pub next_chunk: usize,
@@ -205,12 +210,28 @@ pub fn next_chunk_of(start: usize, scanned: usize, chunk_count: usize, fresh: us
 }
 
 
-/// The MACs of the batch to leave out of this run and the order to pick the rest in: at most `MAX_LOOKUP_CHUNKS` chunk lookups from the tenant's stored cursor, wrapping around, until enough fresh MACs are seen; every MAC of an unscanned chunk is left out (its turn is a later run).
+/// The lookup from the tenant's stored cursor.
 pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted], known_macs: &BTreeSet<String>) -> Lookup {
+    lookup_batch(exec, scope, leases, known_macs, false).await
+}
+
+
+/// The MACs of the batch that already hold an alert, the MACs of unscanned chunks (`deferred`, never known) and the order to pick the rest in: at most `MAX_LOOKUP_CHUNKS` chunk lookups wrapping around, until enough fresh MACs are seen; they start at the stored cursor, or at chunk 0 when `from_first` (the leading leases waited from an earlier round).
+pub async fn lookup_batch(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    leases: &[Converted],
+    known_macs: &BTreeSet<String>,
+    from_first: bool,
+) -> Lookup {
     let candidates = candidate_macs(leases, known_macs);
     let chunks: Vec<&[String]> = candidates.chunks(MAX_LOOKUP_MACS).collect();
     let chunk_count = chunks.len();
-    let start = read_cursor(exec, scope).await % chunk_count.max(1);
+    let start = if from_first {
+        0
+    } else {
+        read_cursor(exec, scope).await % chunk_count.max(1)
+    };
     let mut order = (0..chunk_count.min(MAX_LOOKUP_CHUNKS)).filter_map(|offset| {
         let index = (start + offset) % chunk_count;
         chunks.get(index).map(|chunk| (index, *chunk))
@@ -253,7 +274,7 @@ pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, lease
 }
 
 
-/// The lookup of a failed run: every candidate is left out (fresh and alerted cannot be told apart), so no alert and no flood; the cursor stays.
+/// The lookup of a failed run: every candidate is skipped (fresh and alerted cannot be told apart), so no alert and no flood; the cursor stays.
 pub fn failed_lookup(candidates: Vec<String>, start: usize) -> Lookup {
     Lookup {
         skip: candidates.into_iter().collect(),
@@ -264,28 +285,29 @@ pub fn failed_lookup(candidates: Vec<String>, start: usize) -> Lookup {
 }
 
 
-/// The lookup of a run whose queries all answered: the unscanned chunks join the skipped MACs.
+/// The lookup of a run whose queries all answered: the MACs of the unscanned chunks are `deferred`, not skipped.
 pub fn finish_lookup(
     chunks: &[&[String]],
     visited: &BTreeSet<usize>,
-    mut alerted: BTreeSet<String>,
+    alerted: BTreeSet<String>,
     scan_order: Vec<String>,
     progress: (usize, usize, usize, usize),
 ) -> Lookup {
     let (start, scanned, fresh, found_total) = progress;
     let chunk_count = chunks.len();
     let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
-    let deferred = chunks
+    let deferred: BTreeSet<String> = chunks
         .iter()
         .enumerate()
         .filter(|(index, _chunk)| !visited.contains(index))
-        .flat_map(|(_index, chunk)| chunk.iter().cloned());
-    alerted.extend(deferred);
+        .flat_map(|(_index, chunk)| chunk.iter().cloned())
+        .collect();
     if fresh < MAX_UNKNOWN_PER_RUN && scanned < chunk_count {
         tracing::warn!(total, scanned, start, "dhcp lookup cap reached");
     }
     Lookup {
         skip: alerted,
+        deferred,
         scan_order,
         found: found_total,
         next_chunk: next_chunk_of(start, scanned, chunk_count, fresh),
@@ -316,6 +338,29 @@ pub fn unknown_device_alerts_in_order(
     now_micros: u64,
     scan_order: &[String],
 ) -> (Vec<Alert>, Rejected) {
+    let plan = plan_alerts(scope, leases, known_macs, now_micros, (scan_order, &BTreeSet::new()));
+    (plan.alerts, plan.rejected)
+}
+
+
+/// What a round raises and keeps: the alerts, the leases whose MAC is left out and waits for the next round, and how many MACs were left out in all.
+#[derive(Debug, Clone)]
+pub struct AlertPlan {
+    pub alerts: Vec<Alert>,
+    pub rejected: Rejected,
+    pub waiting: Vec<Converted>,
+    pub omitted: usize,
+}
+
+
+/// The plan of a batch: the `MAX_UNKNOWN_PER_RUN` first fresh MACs of the scan order get an alert; every other unknown MAC (fresh beyond the cap, or `deferred` and never looked up) waits, at most `MAX_WAITING_MACS` of them, and the flood alert counts all of them, the ones that do not fit the waiting list included.
+pub fn plan_alerts(
+    scope: &TenantScope,
+    leases: &[Converted],
+    known_macs: &BTreeSet<String>,
+    now_micros: u64,
+    (scan_order, deferred): (&[String], &BTreeSet<String>),
+) -> AlertPlan {
     let created_micros = now_micros.min(MAX_CREATED_MICROS);
     let bad_known = known_macs
         .iter()
@@ -324,10 +369,14 @@ pub fn unknown_device_alerts_in_order(
     let macs: Vec<Option<String>> = leases.iter().map(mac_of).collect();
     let no_mac = macs.iter().filter(|mac| mac.is_none()).count();
     let rank: BTreeMap<&str, usize> = scan_order.iter().enumerate().map(|(position, mac)| (mac.as_str(), position)).collect();
-    let mut unknown = unknown_of(&macs, leases, known_macs);
-    unknown.sort_by_key(|(mac, _lease)| rank.get(mac).copied().unwrap_or(usize::MAX));
-    let omitted = unknown.len().saturating_sub(MAX_UNKNOWN_PER_RUN);
-    let mut alerts: Vec<Alert> = unknown
+    let (held, mut fresh): (Vec<LeaseRef>, Vec<LeaseRef>) = unknown_of(&macs, leases, known_macs)
+        .into_iter()
+        .partition(|(mac, _lease)| deferred.contains(*mac));
+    fresh.sort_by_key(|(mac, _lease)| rank.get(mac).copied().unwrap_or(usize::MAX));
+    let over_cap = fresh.len().saturating_sub(MAX_UNKNOWN_PER_RUN);
+    let unscanned = held.len();
+    let omitted = over_cap + unscanned;
+    let mut alerts: Vec<Alert> = fresh
         .iter()
         .take(MAX_UNKNOWN_PER_RUN)
         .map(|(mac, lease)| unknown_alert(scope, mac, lease, created_micros))
@@ -335,10 +384,23 @@ pub fn unknown_device_alerts_in_order(
     if omitted > 0 {
         alerts.push(flood_alert(scope, omitted, created_micros));
     }
+    let waiting: Vec<Converted> = fresh
+        .iter()
+        .skip(MAX_UNKNOWN_PER_RUN)
+        .chain(held.iter())
+        .take(MAX_WAITING_MACS)
+        .map(|(_mac, lease)| (*lease).clone())
+        .collect();
+    let dropped = omitted - waiting.len();
     if no_mac > 0 || bad_known > 0 || omitted > 0 {
-        tracing::warn!(no_mac, bad_known, omitted, "dhcp unknown-device run left leases or entries out");
+        tracing::warn!(no_mac, bad_known, over_cap, unscanned, dropped, "dhcp leases left out");
     }
-    (alerts, Rejected { no_mac, bad_known })
+    AlertPlan {
+        alerts,
+        rejected: Rejected { no_mac, bad_known },
+        waiting,
+        omitted,
+    }
 }
 
 

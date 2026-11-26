@@ -1,5 +1,6 @@
 use crate::error::HistoryError;
 use crate::history::LookupResult;
+use crate::row::Converted;
 use core_pg::scope::TenantScope;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -33,3 +34,12 @@ pub type AtLookupFn = Arc<dyn Fn(TenantScope, String, i64) -> LookupFuture + Sen
 
 
 pub type MacLookupFn = Arc<dyn Fn(TenantScope, String, i64, i64) -> LookupFuture + Send + Sync>;
+
+
+pub type InterruptWait = Pin<Box<dyn Future<Output = std::io::Result<()>>>>;
+
+
+pub type WaitFn = fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>;
+
+
+pub type LeaseRef<'a> = (&'a str, &'a Converted);

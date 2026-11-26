@@ -68,7 +68,7 @@ fn poll_once(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut
     }
     events
         .iter()
-        .try_for_each(|event| writeln!(out, "{}", to_json(event)?).map_err(KeaError::from))
+        .try_for_each(|converted| writeln!(out, "{}", to_json(&converted.event)?).map_err(KeaError::from))
 }
 
 

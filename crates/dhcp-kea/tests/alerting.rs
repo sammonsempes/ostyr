@@ -12,9 +12,9 @@ use core_pg::error::PgError;
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use dhcp_kea::alerting::{
-    advance_cursor, alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, next_chunk_of, peer_fields,
+    advance_cursor, alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, next_chunk_of, peer_fields, plan_alerts,
     store_unknown_device_alerts, unknown_device_alerts, unknown_device_alerts_in_order, Lookup, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS,
-    MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY, UNKNOWN_RULE_ID,
+    MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MAX_WAITING_MACS, MICROS_PER_SECOND, SECONDS_PER_DAY, UNKNOWN_RULE_ID,
 };
 use dhcp_kea::cursor::{read_cursor, write_cursor, MIGRATIONS, MIGRATION_NAMESPACE, READ_SQL as CURSOR_READ_SQL, WRITE_SQL as CURSOR_WRITE_SQL};
 use dhcp_kea::header::parse_header;
@@ -392,10 +392,10 @@ fn one_omitted_mac_still_raises_the_flood_alert() -> TestResult {
 
 async fn run_once(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<Vec<Alert>, Box<dyn std::error::Error>> {
     let lookup = alerted_in_batch(exec, scope, leases, &BTreeSet::new()).await;
-    let (alerts, _rejected) = unknown_device_alerts_in_order(scope, leases, &lookup.skip, NOW_MICROS, &lookup.scan_order);
-    store_unknown_device_alerts(exec, scope, &alerts).await?;
+    let plan = plan_alerts(scope, leases, &lookup.skip, NOW_MICROS, (&lookup.scan_order, &lookup.deferred));
+    store_unknown_device_alerts(exec, scope, &plan.alerts).await?;
     advance_cursor(exec, scope, &lookup).await;
-    Ok(alerts)
+    Ok(plan.alerts)
 }
 
 
@@ -646,10 +646,11 @@ async fn a_second_tenant_with_the_same_macs_sees_none_as_alerted() -> TestResult
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    let skipped = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await.skip;
+    let lookup = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await;
     let candidates = candidate_macs(&leases, &BTreeSet::new());
     let second_chunk: BTreeSet<String> = candidates.iter().skip(MAX_LOOKUP_MACS).cloned().collect();
-    assert_eq!(skipped, second_chunk);
+    assert!(lookup.skip.is_empty());
+    assert_eq!(lookup.deferred, second_chunk);
     Ok(())
 }
 
@@ -807,7 +808,14 @@ async fn the_scan_wraps_around_the_end_of_the_candidate_list() -> TestResult {
     assert_eq!(lookups_so_far(&store) - before, MAX_LOOKUP_CHUNKS);
     let first_mac = candidate_macs(&leases, &BTreeSet::new()).into_iter().next().ok_or("no mac")?;
     assert!(lookup.skip.contains(&first_mac));
-    assert_eq!(lookup.skip, alerted);
+    let unscanned: BTreeSet<String> = candidate_macs(&leases, &BTreeSet::new())
+        .into_iter()
+        .skip((WRAPPED_START - 1) * MAX_LOOKUP_MACS)
+        .take(MAX_LOOKUP_MACS)
+        .collect();
+    assert_eq!(lookup.deferred, unscanned);
+    assert_eq!(lookup.skip.union(&lookup.deferred).cloned().collect::<BTreeSet<String>>(), alerted);
+    assert!(lookup.skip.is_disjoint(&lookup.deferred));
     assert_eq!(
         lookup.scan_order.first().map(String::as_str),
         candidate_macs(&leases, &BTreeSet::new())
@@ -1010,5 +1018,50 @@ async fn the_cap_warning_is_emitted_once_per_capped_run_only() -> TestResult {
         text.contains("total=50003") && text.contains("scanned=10") && text.contains("start=0"),
         "{text}"
     );
+    Ok(())
+}
+
+
+const TEN_THOUSAND: usize = 10_000;
+
+
+#[tokio::test]
+async fn the_flood_count_is_every_mac_left_out_and_the_waiting_list_is_bounded() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(TEN_THOUSAND)?;
+    let lookup = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert_eq!(lookup.deferred.len(), TEN_THOUSAND - MAX_LOOKUP_MACS);
+    let plan = plan_alerts(&scope, &leases, &lookup.skip, NOW_MICROS, (&lookup.scan_order, &lookup.deferred));
+    assert_eq!(plan.omitted, TEN_THOUSAND - MAX_UNKNOWN_PER_RUN);
+    let flood = plan.alerts.last().ok_or("no flood")?;
+    assert_eq!(flood.rule_id, FLOOD_RULE_ID);
+    assert_eq!(
+        summary_of(flood)?.get("omitted").and_then(Value::as_u64),
+        Some((TEN_THOUSAND - MAX_UNKNOWN_PER_RUN) as u64)
+    );
+    assert_eq!(plan.alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
+    assert_eq!(plan.waiting.len(), MAX_WAITING_MACS);
+    let first_waiting = plan.waiting.first().and_then(mac_of);
+    assert_eq!(
+        first_waiting,
+        Some(mac_number(MAX_UNKNOWN_PER_RUN).to_ascii_uppercase().replace(':', "-"))
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unscanned_mac_is_never_alerted_unlooked_and_raises_the_flood() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let leases = many_leases(THREE_CHUNKS)?;
+    let deferred: BTreeSet<String> = candidate_macs(&leases, &BTreeSet::new()).into_iter().skip(1).collect();
+    let plan = plan_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS, (&[], &deferred));
+    assert_eq!(
+        (plan.alerts.len(), plan.waiting.len(), plan.omitted),
+        (TWO_CHUNKS, THREE_CHUNKS - 1, THREE_CHUNKS - 1)
+    );
+    assert_eq!(unknown_ids(&plan.alerts).len(), 1);
     Ok(())
 }
