@@ -147,6 +147,8 @@ pub struct ApplySettings {
     pub admin_socket: String,
     #[serde(default = "default_deadline")]
     pub deadline_seconds: u64,
+    #[serde(default)]
+    pub audit_file: Option<String>,
 }
 
 

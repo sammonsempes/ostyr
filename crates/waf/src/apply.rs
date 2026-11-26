@@ -7,12 +7,12 @@ use crate::limits::{
     ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, CADDY_PROGRAM, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS,
     ID_PREFIX, LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
     REFUSED_RESULT, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, RETIRED_PROGRAM_SETTING, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE,
-    STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS,
-    UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
+    STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK, TEMP_PREFIX, TEMP_SUFFIX, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE,
+    UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
 };
 use crate::model::{Applied, ApplySettings, CommandStatus, Delivery, Rendered};
 use crate::render::render_text;
-use crate::types::RunnerFn;
+use crate::types::{AuditProbeFn, RunnerFn};
 use core_audit::error::AuditError;
 use core_audit::model::Outcome;
 use core_config::error::ConfigError;
@@ -74,6 +74,11 @@ pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigEr
         path_text_ok(value)
             .then_some(())
             .ok_or_else(|| refuse_setting(format!("{name} is not a plain absolute path")))
+    })?;
+    settings.audit_file.iter().try_for_each(|value| {
+        path_text_ok(value)
+            .then_some(())
+            .ok_or_else(|| refuse_setting("audit_file is not a plain absolute path".to_owned()))
     })?;
     (MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS)
         .contains(&settings.deadline_seconds)
@@ -173,16 +178,17 @@ pub fn config_error(failure: WafError) -> ConfigError {
 }
 
 
-/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`) that differs from the running one is refused, never half applied.
+/// A start-only setting (`routes_file`, `out_dir`, `admin_socket`, `audit_file`) that differs from the running one is refused, never half applied.
 pub fn check_start_only(running: &ApplySettings, loaded: &ApplySettings) -> Result<(), ConfigError> {
     let fields = [
         ("routes_file", running.routes_file == loaded.routes_file),
         ("out_dir", running.out_dir == loaded.out_dir),
         ("admin_socket", running.admin_socket == loaded.admin_socket),
+        ("audit_file", running.audit_file == loaded.audit_file),
     ];
     fields.iter().try_for_each(|(name, same)| {
         same.then_some(())
-            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart waf_apply")))
+            .ok_or_else(|| refuse_setting(format!("{name} cannot change while running, restart ostyr-waf")))
     })
 }
 
@@ -290,19 +296,46 @@ pub fn check_target(directory: &OwnedFd) -> Result<(), DeliverError> {
 }
 
 
-/// Writes the staged file through the directory handle (no symlink, no FIFO open), owner-only, synced.
+/// The audit sink's own handle must be none of the names this delivery creates or replaces (device and inode, no symlink followed) and have one link.
+pub fn check_sink_apart(directory: &OwnedFd, names: &[String], probe: &AuditProbeFn) -> Result<(), DeliverError> {
+    let (device, inode, links) = probe().map_err(DeliverError::AuditSink)?;
+    (links == 1).then_some(()).ok_or(DeliverError::AuditSinkLinked)?;
+    names
+        .iter()
+        .try_for_each(|name| match statat(directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if (stat.st_dev, stat.st_ino) == (device, inode) => Err(DeliverError::AuditSinkClash),
+            Ok(_) => Ok(()),
+            Err(Errno::NOENT) => Ok(()),
+            Err(errno) => Err(DeliverError::from(errno)),
+        })
+}
+
+
+/// Unlinks a stale staged name through the held directory; a missing name is fine.
+pub fn clear_stale(directory: &OwnedFd, name: &str) -> Result<(), DeliverError> {
+    unlinkat(directory, name, AtFlags::empty()).or_else(|errno| if errno == Errno::NOENT { Ok(()) } else { Err(errno) })?;
+    Ok(())
+}
+
+
+/// Writes the staged file through the directory handle after clearing a stale name.
 pub fn stage_file(directory: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), DeliverError> {
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    stage_file_after(directory, name, bytes, clear_stale)
+}
+
+
+/// `stage_file` with the clearing injected: the file is created `O_EXCL|O_NOFOLLOW`, so an existing name or a link is never opened or truncated.
+pub fn stage_file_after(
+    directory: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+    clear: fn(&OwnedFd, &str) -> Result<(), DeliverError>,
+) -> Result<(), DeliverError> {
+    clear(directory, name)?;
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let created = openat(directory, name, flags, Mode::from_raw_mode(STAGE_MODE))?;
-    let stat = fstat(&created)?;
-    (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
-        .then_some(())
-        .ok_or(DeliverError::BadTarget)?;
     let mut file = File::from(created);
-    file.set_len(0)
-        .and_then(|()| file.write_all(bytes))
-        .and_then(|()| file.sync_all())
-        .map_err(DeliverError::Write)
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(DeliverError::Write)
 }
 
 
@@ -382,19 +415,25 @@ pub fn run_steps(
 
 
 /// Stages, validates and loads one rendered file, then makes it the final file; on any failure the staged file goes and the old one stays.
-pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverError> {
+pub fn deliver(applied: &Applied, runner: RunnerFn, probe: Option<&AuditProbeFn>) -> Result<Delivery, DeliverError> {
     let settings = &applied.settings;
     let admin = open_admin_directory(&settings.admin_socket)?;
     let handle = open_trusted_program(&applied.program, geteuid().as_raw()).map_err(DeliverError::Program)?;
     let out_dir = Path::new(&settings.out_dir);
     let directory = open_trusted_dir(out_dir, geteuid().as_raw())?;
     check_target(&directory)?;
+    let name = format!("{STAGE_PREFIX}{}{STAGE_SUFFIX}", getpid().as_raw_nonzero());
+    let temporary = format!("{TEMP_PREFIX}{}{TEMP_SUFFIX}", getpid().as_raw_nonzero());
+    let touched: Vec<String> = [FINAL_NAME.to_owned(), name.clone(), temporary]
+        .into_iter()
+        .chain(applied.ca_root.iter().map(|root| root.name.clone()))
+        .collect();
+    probe.iter().try_for_each(|sink| check_sink_apart(&directory, &touched, *sink))?;
     applied
         .ca_root
         .iter()
         .try_for_each(|root| write_ca_root(out_dir, root))
         .map_err(DeliverError::CaRoot)?;
-    let name = format!("{STAGE_PREFIX}{}{STAGE_SUFFIX}", getpid().as_raw_nonzero());
     let staged = format!("{}/{name}", settings.out_dir);
     let outcome = stage_file(&directory, &name, applied.json.as_bytes())
         .and_then(|()| run_steps(settings, (runner, &handle, &applied.program), &staged, &admin, &applied.id))
@@ -404,11 +443,11 @@ pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverE
 
 
 /// The hook of the engine: a refusal keeps the previous rendered file; an outcome that may differ from the engine state moves the epoch.
-pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Subscriber<Applied> {
+pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>, probe: Option<Arc<AuditProbeFn>>) -> Subscriber<Applied> {
     Subscriber {
         section: APPLY_SECTION.to_owned(),
         validate: Box::new(move |applied| {
-            let delivery = deliver(applied, runner);
+            let delivery = deliver(applied, runner, probe.as_deref());
             match &delivery {
                 Ok(Delivery::Late) => late.store(true, Ordering::SeqCst),
                 Err(DeliverError::Unknown { .. } | DeliverError::Publish(_)) => {
@@ -449,7 +488,13 @@ pub fn shared_sink(sink: &Arc<SharedAuditFn>) -> Box<SharedAuditFn> {
 
 /// A refusal at start as one `denied` entry with the text a reload refusal uses; an audit failure is logged and the refusal is returned.
 pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failure: ConfigError) -> ConfigError {
-    let reason = failure.to_string();
+    audit_denied(context, audit, failure.to_string());
+    failure
+}
+
+
+/// One `denied` entry with the fixed reason; an audit failure is logged.
+pub fn audit_denied(context: &ReloadContext, audit: &SharedAuditFn, reason: String) {
     error!(%reason, "start refused");
     let entry = reload_entry(
         context,
@@ -459,7 +504,13 @@ pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failu
     if let Err(audit_error) = audit(entry) {
         error!(%audit_error, "cannot audit the refused start");
     }
-    failure
+}
+
+
+/// The first delivery's failure, an unknown outcome included, as one `denied` entry before the start stops.
+pub fn audit_first_delivery_failure(context: &ReloadContext, audit: &SharedAuditFn, failure: DeliverError) -> OpenError {
+    audit_denied(context, audit, format!("the first configuration was refused: {failure}"));
+    OpenError::Deliver(failure)
 }
 
 
@@ -496,8 +547,19 @@ pub fn open_apply_audited_with_program(
     sink: Result<Box<SharedAuditFn>, AuditError>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
+    open_apply_audited_guarded(settings_file, (program, runner), (sink, None), context)
+}
+
+
+/// `open_apply_audited_with_program` with the audit sink's identity probe, which every delivery checks.
+pub fn open_apply_audited_guarded(
+    settings_file: &Path,
+    (program, runner): (&Path, RunnerFn),
+    (sink, probe): (Result<Box<SharedAuditFn>, AuditError>, Option<Arc<AuditProbeFn>>),
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
     match sink {
-        Ok(audit) => open_apply_with_program(settings_file, program, runner, audit, context),
+        Ok(audit) => open_apply_guarded(settings_file, (program, runner), (audit, probe), context),
         Err(sink_failure) => Err(match start_refusal(settings_file, program) {
             Some(refusal) => OpenError::NoSinkAndRefused {
                 sink: Box::new(sink_failure),
@@ -528,6 +590,17 @@ pub fn open_apply_with_program(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
+    open_apply_guarded(settings_file, (program, runner), (audit, None), context)
+}
+
+
+/// `open_apply_with_program` where every delivery first checks, through `probe`, that the audit sink is none of the files it creates or replaces.
+pub fn open_apply_guarded(
+    settings_file: &Path,
+    (program, runner): (&Path, RunnerFn),
+    (audit, probe): (Box<SharedAuditFn>, Option<Arc<AuditProbeFn>>),
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
     let sink: Arc<SharedAuditFn> = Arc::from(audit);
     let refused = |failure| audit_start_refusal(&context, sink.as_ref(), failure);
     let running = load_trusted_settings(settings_file, program).map_err(refused)?;
@@ -539,12 +612,13 @@ pub fn open_apply_with_program(
     let engine = open_engine(
         Box::new(move || load_applied(&running, (&loader_file, &loader_program), &loader_epoch)),
         applied_state,
-        vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
+        vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch), probe.clone())],
         late_audit(shared_sink(&sink), Arc::clone(&late), epoch),
         context.clone(),
     )
     .map_err(refused)?;
-    let delivery = deliver(&current_config(&engine), runner)?;
+    let delivery = deliver(&current_config(&engine), runner, probe.as_deref())
+        .map_err(|failure| audit_first_delivery_failure(&context, sink.as_ref(), failure))?;
     late.store(delivery == Delivery::Late, Ordering::SeqCst);
     let entry = reload_entry(
         &engine.context,

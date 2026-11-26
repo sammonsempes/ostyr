@@ -1,0 +1,20 @@
+[Unit]
+Description=Ostyr WAF routes service
+After=network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/ostyr-waf /etc/ostyr/waf/settings.yaml
+ExecReload=/usr/bin/kill -HUP $MAINPID
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=400
+UMask=0022
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
