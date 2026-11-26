@@ -2,9 +2,9 @@
 mod types;
 
 
-use core_export::ecs::EcsEvent;
 use dhcp_kea::error::{HeaderError, KeaError};
 use dhcp_kea::follow::{malformed_summary, poll, remember, remember_key, Counts, FollowState, Limits, Remembered, MAX_OPEN_HANDLES};
+use dhcp_kea::row::Converted;
 use dhcp_kea::types::SeenLeases;
 use std::fs::{create_dir, metadata, remove_file, rename, write, OpenOptions};
 use std::io::Write;
@@ -134,11 +134,11 @@ fn fresh() -> Run {
 
 
 fn step(path: &Path, run: &mut Run, limits: &Limits) -> Result<Vec<String>, KeaError> {
-    let mut events: Vec<EcsEvent> = Vec::new();
+    let mut events: Vec<Converted> = Vec::new();
     poll(path, &mut run.state, limits, &mut run.counts, &mut events)?;
     Ok(events
         .iter()
-        .filter_map(|event| event.source.as_ref().and_then(|source| source.ip.clone()))
+        .filter_map(|found| found.event.source.as_ref().and_then(|source| source.ip.clone()))
         .collect())
 }
 
@@ -486,9 +486,9 @@ fn malformed_rows_are_counted_per_kind_without_their_content() -> TestResult {
 
 
 fn actions(path: &Path, run: &mut Run) -> Result<Vec<String>, KeaError> {
-    let mut events: Vec<EcsEvent> = Vec::new();
+    let mut events: Vec<Converted> = Vec::new();
     poll(path, &mut run.state, &Limits::default(), &mut run.counts, &mut events)?;
-    Ok(events.iter().filter_map(|event| event.event.action.clone()).collect())
+    Ok(events.iter().filter_map(|found| found.event.event.action.clone()).collect())
 }
 
 
@@ -519,7 +519,7 @@ fn alternating_assigned_and_reclaimed_rows_stay_within_the_seen_cap() -> TestRes
         ..Limits::default()
     };
     let found = {
-        let mut events: Vec<EcsEvent> = Vec::new();
+        let mut events: Vec<Converted> = Vec::new();
         poll(&path, &mut run.state, &limits, &mut run.counts, &mut events)?;
         events.len()
     };
