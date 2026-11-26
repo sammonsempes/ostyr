@@ -23,5 +23,13 @@ zeroize = "1"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+script-library = { version = "0.0.0", path = "../script-library" }
+
+[dev-dependencies]
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = "0.3"
+
 [lints]
 workspace = true

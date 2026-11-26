@@ -1,7 +1,7 @@
 use crate::error::ConnectorError;
 use crate::model::{
     ConfigField, ConfigKind, Manifest, MANIFEST_NAME, MAX_ALIASES, MAX_DEFAULT_BYTES, MAX_FILE_NAME_BYTES, MAX_MANIFEST_BYTES, MAX_NAME_BYTES,
-    MAX_REPLAYED_EVENTS, MAX_REPLAY_DEPTH, MAX_SCOPE_BYTES,
+    MAX_REPLAYED_EVENTS, MAX_REPLAY_DEPTH, MAX_SCOPE_BYTES, SIGNATURE_NAME,
 };
 use core_config::parse::describe_error;
 use serde::de::DeserializeOwned;
@@ -57,6 +57,12 @@ pub fn valid_file_name(text: &str) -> bool {
 }
 
 
+/// The entry is a package file name that is neither the manifest nor the signature.
+pub fn valid_entry(text: &str) -> bool {
+    valid_file_name(text) && text != MANIFEST_NAME && text != SIGNATURE_NAME
+}
+
+
 pub fn check(condition: bool, field: &'static str) -> Result<(), ConnectorError> {
     condition.then_some(()).ok_or(ConnectorError::Invalid { field })
 }
@@ -83,6 +89,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConnectorError> {
     let field_names: Vec<&str> = manifest.config.iter().map(|field| field.name.as_str()).collect();
     check(valid_name(&manifest.name), "name")?;
     check(valid_name(&manifest.publisher), "publisher")?;
+    check(valid_entry(&manifest.entry), "entry")?;
     check(manifest.rights.iter().all(|right| valid_scope(&right.scope)), "rights.scope")?;
     check(action_names.iter().all(|name| valid_name(name)), "actions.name")?;
     check(all_distinct(&action_names), "actions.name")?;

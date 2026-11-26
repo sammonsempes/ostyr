@@ -1391,6 +1391,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "log",
  "rustix 1.1.6",
+ "script-library",
  "semver",
  "serde",
  "serde-saphyr",
@@ -1399,6 +1400,9 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
  "zeroize",
 ]
 
