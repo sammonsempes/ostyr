@@ -193,3 +193,53 @@ fn fixture_feeds_produce_the_committed_snapshots() -> TestResult {
     assert!(open_file(&fixture("absent.csv")).is_err());
     Ok(())
 }
+
+
+#[cfg(unix)]
+const TWO_GIB: u64 = 2_147_483_648;
+
+
+#[cfg(unix)]
+fn refusal(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(open_file(path).err().ok_or("the file was opened")?.to_string())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_feed_file_that_is_not_a_regular_file_within_the_cap_is_refused_by_name() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let fifo = dir.path().join("a.csv");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert_eq!(refusal(&fifo)?, intel_feeds::run::NOT_REGULAR);
+    assert_eq!(refusal(std::path::Path::new("/dev/zero"))?, intel_feeds::run::NOT_REGULAR);
+    let link = dir.path().join("zero.csv");
+    std::os::unix::fs::symlink("/dev/zero", &link)?;
+    assert_eq!(refusal(&link)?, intel_feeds::run::SYMLINK);
+    let big = dir.path().join("big.csv");
+    fs::File::create(&big)?.set_len(TWO_GIB)?;
+    assert_eq!(refusal(&big)?, intel_feeds::run::TOO_LARGE);
+    let small = dir.path().join("small.csv");
+    fs::write(&small, "192.0.2.1\n")?;
+    assert!(open_file(&small).is_ok());
+    let failing = intel_feeds::run::open_file_with(&small, |_| Err(std::io::Error::other("inspect")));
+    assert!(failing.is_err());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_file_grown_past_the_cap_after_the_size_check_is_refused_not_cut() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let grown = dir.path().join("grown.csv");
+    fs::File::create(&grown)?.set_len(intel_feeds::limits::MAX_FEED_FILE_BYTES + 1)?;
+    let refused = intel_feeds::run::read_within_cap(fs::File::open(&grown)?)
+        .err()
+        .ok_or("the grown file was read")?;
+    assert_eq!(refused.to_string(), intel_feeds::run::TOO_LARGE);
+    let small = dir.path().join("small.csv");
+    fs::write(&small, "192.0.2.1\n")?;
+    assert!(intel_feeds::run::read_within_cap(fs::File::open(&small)?).is_ok());
+    Ok(())
+}

@@ -1,9 +1,13 @@
 use crate::config::FeedConfig;
 use crate::entry::build_ioc;
 use crate::error::{EntryError, FeedError};
-use crate::formats::{parse_items, read_document, value_text};
-use crate::limits::MAX_MISP_ATTRIBUTES;
+use crate::formats::{flag_empty, json_failure, list_error, opening, parse_raw_items, read_document, root_value, value_of, value_text};
+use crate::limits::{MAX_MISP_ATTRIBUTES, MAX_MISP_OBJECTS, MAX_MISP_TAGS, MAX_OBJECT_BYTES};
 use crate::model::{Collector, Ioc, RawEntry, Tlp};
+use crate::scan::raw_elements;
+use crate::types::Tagged;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::cell::Cell;
 use std::io::BufRead;
@@ -66,11 +70,11 @@ pub fn tlp_of_tag(name: &str) -> Option<TlpReading> {
 }
 
 
-/// `tags` is the MISP `Tag` field: an array of `{"name": ...}`; any other shape is fail-closed.
+/// `tags` is the MISP `Tag` field: an array of `{"name": ...}` (over `MAX_MISP_TAGS` it reads `Red`); any other shape is fail-closed.
 pub fn tags_tlp(tags: Option<&Value>) -> TlpReading {
     match tags {
         None | Some(Value::Null) => NO_TLP,
-        Some(Value::Array(list)) => list
+        Some(Value::Array(list)) if list.len() <= MAX_MISP_TAGS => list
             .iter()
             .filter_map(|tag| tag.get("name").and_then(Value::as_str))
             .filter_map(tlp_of_tag)
@@ -186,7 +190,7 @@ pub fn attribute_iocs(
 }
 
 
-/// `unknown` counts the items whose event or attribute carried an unknown `tlp:` tag.
+/// `unknown` counts the items whose event, object or attribute carried an unknown `tlp:` tag.
 pub fn misp_item(feed: &FeedConfig, now: OffsetDateTime, event: TlpReading, unknown: &Cell<u64>, attribute: &Value) -> Result<Vec<Ioc>, EntryError> {
     let object = attribute.as_object().ok_or(EntryError::NotAnObject)?;
     if flag_fails_to_true(object, "deleted") {
@@ -202,43 +206,126 @@ pub fn misp_item(feed: &FeedConfig, now: OffsetDateTime, event: TlpReading, unkn
 }
 
 
-/// An absent or null field is empty; anything but an array is not an event.
-pub fn array_field<'a>(parent: &'a Value, name: &str) -> Result<&'a [Value], FeedError> {
-    match parent.get(name) {
-        None | Some(Value::Null) => Ok(&[]),
-        Some(Value::Array(items)) => Ok(items),
-        Some(_) => Err(FeedError::NotAnEvent),
+#[derive(Deserialize)]
+pub struct Document<'a> {
+    #[serde(default, borrow, rename = "Event")]
+    pub event: Option<&'a RawValue>,
+}
+
+
+/// The three fields read of an event and of an object; everything else is skipped unmaterialised.
+#[derive(Deserialize)]
+pub struct Parts<'a> {
+    #[serde(default, borrow, rename = "Attribute")]
+    pub attribute: Option<&'a RawValue>,
+    #[serde(default, borrow, rename = "Object")]
+    pub object: Option<&'a RawValue>,
+    #[serde(default, borrow, rename = "Tag")]
+    pub tag: Option<&'a RawValue>,
+}
+
+
+/// Every attribute of the event with its TLP floor, and the objects that could not be read.
+#[derive(Default)]
+pub struct Gathered<'a> {
+    pub items: Vec<Tagged<'a>>,
+    pub bad_objects: u64,
+}
+
+
+pub const BAD_OBJECT: &str = "bad_object";
+
+
+/// One tag: over `MAX_OBJECT_BYTES` or unreadable it reads `Red`, never a prefix.
+pub fn raw_tag_tlp(tag: &RawValue) -> TlpReading {
+    match value_of(tag.get()) {
+        Ok(value) => value.get("name").and_then(Value::as_str).and_then(tlp_of_tag).unwrap_or(NO_TLP),
+        Err(_) => BAD_TLP,
     }
 }
 
 
-/// `Event.Attribute` then each `Event.Object[].Attribute`, counted before anything is copied.
-pub fn event_attributes(event: &Value) -> Result<Vec<Value>, FeedError> {
-    let direct = array_field(event, "Attribute")?;
-    let nested = array_field(event, "Object")?
-        .iter()
-        .map(|object| array_field(object, "Attribute"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let total = direct.len() + nested.iter().map(|attributes| attributes.len()).sum::<usize>();
-    if total > MAX_MISP_ATTRIBUTES {
-        Err(FeedError::TooManyAttributes)
-    } else {
-        Ok(direct.iter().chain(nested.into_iter().flatten()).cloned().collect())
+/// The event or object `Tag` list: over `MAX_MISP_TAGS`, or not a list, it reads `Red` (`unknown_tlp`).
+pub fn raw_tags_tlp(raw: Option<&RawValue>) -> TlpReading {
+    raw.map_or(NO_TLP, |tags| {
+        raw_elements(tags, MAX_MISP_TAGS).map_or(BAD_TLP, |list| list.iter().map(|tag| raw_tag_tlp(tag)).fold(NO_TLP, strictest))
+    })
+}
+
+
+/// An absent field is empty; anything but a list is not an event.
+pub fn event_list(raw: Option<&RawValue>, cap: usize, over: FeedError) -> Result<Vec<&RawValue>, FeedError> {
+    raw.map_or(Ok(Vec::new()), |list| {
+        let opened = opening(list, '[').ok_or(FeedError::NotAnEvent)?;
+        raw_elements(opened, cap).map_err(|error| list_error(error, over))
+    })
+}
+
+
+/// One object's attributes join the list under the attribute room left; an unreadable object is counted, not fatal.
+pub fn add_object<'a>(mut gathered: Gathered<'a>, object: &'a RawValue, event: TlpReading) -> Result<Gathered<'a>, FeedError> {
+    match readable_object(object) {
+        None => Ok(Gathered {
+            bad_objects: gathered.bad_objects + 1,
+            ..gathered
+        }),
+        Some((list, reading)) => {
+            let room = MAX_MISP_ATTRIBUTES.saturating_sub(gathered.items.len());
+            let attributes = list.map_or(Ok(Vec::new()), |attributes| {
+                raw_elements(attributes, room).map_err(|error| list_error(error, FeedError::TooManyAttributes))
+            })?;
+            let floor = strictest(event, reading);
+            gathered.items.extend(attributes.into_iter().map(|attribute| (attribute, floor)));
+            Ok(gathered)
+        }
     }
 }
 
 
-/// One MISP event file; the feed's TLP is the floor, event and attribute `tlp:` tags can only raise it.
+/// An object that is a JSON object whose own text (its attributes apart) is within `MAX_OBJECT_BYTES` and whose `Attribute` is a list or absent.
+pub fn readable_object(object: &RawValue) -> Option<(Option<&RawValue>, TlpReading)> {
+    match serde_json::from_str::<Parts>(object.get()) {
+        Ok(parts) => {
+            let attribute_bytes = parts.attribute.map_or(0, |list| list.get().len());
+            let readable = object.get().starts_with('{')
+                && object.get().len().saturating_sub(attribute_bytes) <= MAX_OBJECT_BYTES
+                && parts.attribute.is_none_or(|list| list.get().starts_with('['));
+            readable.then(|| (parts.attribute, raw_tags_tlp(parts.tag)))
+        }
+        Err(_) => None,
+    }
+}
+
+
+/// The event's own attributes, then those of each object, all counted against `MAX_MISP_ATTRIBUTES` before they are listed.
+pub fn gather<'a>(event: &Parts<'a>, reading: TlpReading) -> Result<Gathered<'a>, FeedError> {
+    let direct = event_list(event.attribute, MAX_MISP_ATTRIBUTES, FeedError::TooManyAttributes)?;
+    let objects = event_list(event.object, MAX_MISP_OBJECTS, FeedError::TooManyObjects)?;
+    let start = Gathered {
+        items: direct.into_iter().map(|attribute| (attribute, reading)).collect(),
+        bad_objects: 0,
+    };
+    objects
+        .into_iter()
+        .try_fold(start, |gathered, object| add_object(gathered, object, reading))
+}
+
+
+/// One MISP event file; the feed's TLP is the floor, event, object and attribute `tlp:` tags can only raise it.
 pub fn parse_misp(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime) -> Result<Collector, FeedError> {
-    let document = read_document(reader)?;
-    let event = document
-        .get("Event")
-        .filter(|candidate| candidate.is_object())
-        .ok_or(FeedError::NotAnEvent)?;
-    let attributes = event_attributes(event)?;
-    let reading = tags_tlp(event.get("Tag"));
+    let bytes = read_document(reader)?;
+    let root = opening(root_value(&bytes)?, '{').ok_or(FeedError::NotAnEvent)?;
+    let document: Document = serde_json::from_str(root.get()).map_err(|error| json_failure(&error))?;
+    let event_text = document.event.and_then(|event| opening(event, '{')).ok_or(FeedError::NotAnEvent)?;
+    let event: Parts = serde_json::from_str(event_text.get()).map_err(|error| json_failure(&error))?;
+    let gathered = gather(&event, raw_tags_tlp(event.tag))?;
     let unknown = Cell::new(0);
-    let mut collector = parse_items(feed, &attributes, &|attribute| misp_item(feed, now, reading, &unknown, attribute));
+    let mut collector = parse_raw_items(feed, &gathered.items, &|attribute, floor| {
+        misp_item(feed, now, floor, &unknown, attribute)
+    })?;
     collector.summary.unknown_tlp = unknown.get();
-    Ok(collector)
+    if gathered.bad_objects > 0 {
+        collector.summary.skipped.insert(BAD_OBJECT, gathered.bad_objects);
+    }
+    Ok(flag_empty(collector))
 }
