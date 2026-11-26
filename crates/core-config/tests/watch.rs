@@ -8,7 +8,7 @@ mod wait;
 
 use core_config::error::WatchError;
 use core_config::reload::{reload, ReloadOutcome};
-use core_config::watch::{check_windows_path, handle_events, parent_of, watch_checked, watch_files, watch_files_counted};
+use core_config::watch::{check_windows_path, handle_events, parent_of, stop_watcher, watch_checked, watch_files, watch_files_counted};
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::{Event, EventKind};
 use notify_debouncer_full::DebouncedEvent;
@@ -184,5 +184,24 @@ fn ignored_events_are_counted_and_never_logged() -> TestResult {
     drop(watcher);
     let text = String::from_utf8(captured.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
     assert!(!text.contains("ignored"));
+    Ok(())
+}
+
+
+#[test]
+fn stop_watcher_returns_only_after_the_event_thread_is_gone() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    replace_file(&path, &module_text("30d"))?;
+    let (audit, recorded) = recording_audit();
+    let engine = Arc::new(engine_for(&path, audit, Vec::new())?);
+    let watcher = watch_files(Arc::clone(&engine), std::slice::from_ref(&path), DEBOUNCE)?;
+    replace_file(&path, &module_text("90d"))?;
+    stop_watcher(watcher);
+    thread::sleep(SETTLE);
+    replace_file(&path, &module_text("120d"))?;
+    thread::sleep(SETTLE);
+    assert_ne!(retention(&engine).as_deref(), Some("120d"));
+    assert!(entries(&recorded)?.len() <= 1);
     Ok(())
 }
