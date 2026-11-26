@@ -3719,14 +3719,17 @@ name = "k8s-inventory"
 version = "0.0.0"
 dependencies = [
  "cmdb",
+ "core-audit",
  "core-config",
  "core-pg",
  "log",
+ "pg-fake",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
  "serde_with",
+ "signal-hook",
  "socket2",
  "tempfile",
  "thiserror 2.0.21",
