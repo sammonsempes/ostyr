@@ -11,6 +11,7 @@ use crate::model::{FeedLimits, FeedReport, FeedSettings, LoadedRecord, LocalHead
 use crate::osv::parse_record;
 use flate2::bufread::DeflateDecoder;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -56,7 +57,16 @@ pub fn load_feed_reader<Source: Read>(reader: Source, settings: &FeedSettings, l
         })?;
     let mut input = bytes.as_slice();
     let state = (0..=limits.max_entries).try_fold(ScanState::default(), |state, _| scan_step(&mut input, settings, limits, state))?;
-    Ok(state.report)
+    let unmatched_ecosystems = settings
+        .ecosystems
+        .iter()
+        .filter(|name| !state.matched.contains(*name))
+        .cloned()
+        .collect();
+    Ok(FeedReport {
+        unmatched_ecosystems,
+        ..state.report
+    })
 }
 
 
@@ -113,6 +123,55 @@ pub fn retained_items(record: &OsvRecord) -> u64 {
         .map(|entry| 1 + entry.versions.len() + entry.ranges.iter().map(|range| 1 + range.events.len()).sum::<usize>())
         .sum();
     (record.aliases.len() + record.upstream.len() + affected) as u64
+}
+
+
+/// True when the setting names the entry's ecosystem; an entry without a release (`Debian`) serves every release of its family.
+pub fn ecosystem_selected(ecosystems: &[String], entry_ecosystem: &str) -> bool {
+    ecosystems
+        .iter()
+        .any(|selected| selected == entry_ecosystem || selected.split(':').next() == Some(entry_ecosystem))
+}
+
+
+/// The record with only the affected entries of the selected ecosystems; `None` when none is left. An empty selection keeps everything.
+pub fn restrict_to_ecosystems(record: OsvRecord, ecosystems: &[String]) -> Option<OsvRecord> {
+    if ecosystems.is_empty() {
+        Some(record)
+    } else {
+        let affected: Vec<_> = record
+            .affected
+            .into_iter()
+            .filter(|entry| ecosystem_selected(ecosystems, &entry.package.ecosystem))
+            .collect();
+        (!affected.is_empty()).then_some(OsvRecord { affected, ..record })
+    }
+}
+
+
+/// Adds the selected names that equal an entry's ecosystem exactly, so a name matching no entry can be reported.
+pub fn note_matched(matched: &mut BTreeSet<String>, ecosystems: &[String], record: &OsvRecord) {
+    let found: BTreeSet<&String> = record
+        .affected
+        .iter()
+        .map(|entry| &entry.package.ecosystem)
+        .filter(|ecosystem| ecosystems.contains(ecosystem))
+        .collect();
+    matched.extend(found.into_iter().cloned());
+}
+
+
+/// The record with every vector cut to its length: the feed is held for the whole run and growth slack was measured at up to twice the items.
+pub fn shrink_record(mut record: OsvRecord) -> OsvRecord {
+    record.aliases.shrink_to_fit();
+    record.upstream.shrink_to_fit();
+    record.affected.iter_mut().for_each(|entry| {
+        entry.versions.shrink_to_fit();
+        entry.ranges.iter_mut().for_each(|range| range.events.shrink_to_fit());
+        entry.ranges.shrink_to_fit();
+    });
+    record.affected.shrink_to_fit();
+    record
 }
 
 
@@ -218,18 +277,14 @@ fn scan_entry(input: &mut &[u8], settings: &FeedSettings, limits: &FeedLimits, m
         (state.total <= limits.max_total_bytes)
             .then_some(())
             .ok_or(FeedError::TotalTooLarge { max: limits.max_total_bytes })?;
-        match String::from_utf8(bytes).ok().and_then(|text| parse_record(&text).ok()) {
-            Some(record) => match licence_of(settings, &record.id).filter(|licence| settings.allowed_licences.contains(licence)) {
-                Some(licence) => {
-                    state.report.retained_items = state.report.retained_items.saturating_add(retained_items(&record));
-                    (state.report.retained_items <= limits.max_retained_items)
-                        .then_some(())
-                        .ok_or(FeedError::TooManyRetained {
-                            max: limits.max_retained_items,
-                        })?;
-                    state.report.records.push(LoadedRecord { record, licence });
-                }
-                None => state.report.dropped_by_licence += 1,
+        let parsed = String::from_utf8(bytes).ok().and_then(|text| parse_record(&text).ok());
+        parsed
+            .iter()
+            .for_each(|record| note_matched(&mut state.matched, &settings.ecosystems, record));
+        match parsed {
+            Some(record) => match restrict_to_ecosystems(record, &settings.ecosystems) {
+                Some(selected) => keep_licensed(settings, limits, &mut state.report, selected)?,
+                None => state.report.dropped_by_ecosystem += 1,
             },
             None => {
                 state.report.bad_entries += 1;
@@ -238,4 +293,25 @@ fn scan_entry(input: &mut &[u8], settings: &FeedSettings, limits: &FeedLimits, m
         }
         Ok(state)
     }
+}
+
+
+/// Counts the record's retained items after the ecosystem selection, then keeps it when its licence is allowed.
+fn keep_licensed(settings: &FeedSettings, limits: &FeedLimits, report: &mut FeedReport, record: OsvRecord) -> Result<(), FeedError> {
+    match licence_of(settings, &record.id).filter(|licence| settings.allowed_licences.contains(licence)) {
+        Some(licence) => {
+            report.retained_items = report.retained_items.saturating_add(retained_items(&record));
+            (report.retained_items <= limits.max_retained_items)
+                .then_some(())
+                .ok_or(FeedError::TooManyRetained {
+                    max: limits.max_retained_items,
+                })?;
+            report.records.push(LoadedRecord {
+                record: shrink_record(record),
+                licence,
+            });
+        }
+        None => report.dropped_by_licence += 1,
+    }
+    Ok(())
 }

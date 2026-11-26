@@ -40,8 +40,8 @@ pub type NowFn<'a> = dyn Fn() -> u64 + 'a;
 pub type StartRead = fn(&std::path::Path) -> Result<crate::service::ServiceSettings, core_config::error::ConfigError>;
 
 
-/// Ecosystem, package and record id: the key of a stored finding within one asset.
-pub type FindingKey = (String, String, String);
+/// Ecosystem, package, record id and installed version: the stored key of a finding within one asset and the version its one row holds.
+pub type FindingKey = (String, String, String, String);
 
 
 /// What the signal thread runs for each received signal.

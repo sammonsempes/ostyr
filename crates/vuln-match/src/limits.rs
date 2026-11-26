@@ -45,7 +45,26 @@ pub const RATIO_FLOOR_BYTES: u64 = 65_536;
 pub const MAX_LOGGED_NAME_CHARS: usize = 128;
 
 
-pub const MAX_RETAINED_ITEMS: u64 = 2_000_000;
+pub const MAX_RETAINED_ITEMS: u64 = 5_000_000;
+
+
+/// Memory budget of one feed load while the previous record set is alive, the archive buffer included.
+pub const MAX_FEED_MEMORY_BYTES: u64 = 2_147_483_648;
+
+
+/// Worst bytes per retained item measured live on a hostile archive (T914C c2: 2 036 592 kB over 3 rounds for 5.94 M items of 40-byte names).
+pub const FEED_BYTES_PER_ITEM: u64 = 176;
+
+
+/// Record sets alive at the peak of a reload: the loaded one and the one being built.
+pub const FEED_SETS_ALIVE: u64 = 2;
+
+
+/// Ecosystems one feed setting may name.
+pub const MAX_FEED_ECOSYSTEMS: usize = 16;
+
+
+pub const MAX_ECOSYSTEM_CHARS: usize = 64;
 
 
 pub const MAGIC_BYTES: usize = 4;
