@@ -223,8 +223,10 @@ dependencies = [
  "ecs-normalise",
  "serde",
  "serde_json",
+ "sys-windows",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

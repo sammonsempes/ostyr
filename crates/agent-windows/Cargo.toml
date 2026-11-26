@@ -13,12 +13,18 @@ ecs-normalise = { path = "../ecs-normalise" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
+core-audit = { path = "../core-audit" }
+sys-windows = { path = "../sys-windows" }
 tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
-core-audit = { path = "../core-audit" }
 tempfile = "3"
-tracing-subscriber = "0.3"
+
+[[bin]]
+name = "ostyr-agent-windows"
+path = "src/bin/ostyr-agent-windows.rs"
 
 [lints]
 workspace = true

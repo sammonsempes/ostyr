@@ -53,7 +53,7 @@ const NEW_BATCH: u32 = 7;
 const FOUR_DENIED: usize = 4;
 
 
-const SETTING_COUNT: usize = 7;
+const SETTING_COUNT: usize = 8;
 
 
 const HOSTILE_FILES: usize = 14;
