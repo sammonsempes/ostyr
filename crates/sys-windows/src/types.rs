@@ -121,6 +121,24 @@ pub enum ConsoleError {
     CloseTimeout { millis: u32 },
     #[error("the output drain thread failed during the close")]
     DrainFailed,
+    #[error("program {0:?} is not an absolute local path to an .exe without quote or slash")]
+    BadProgram(String),
+    #[error("argument {index} has a NUL")]
+    BadArgument { index: usize },
+    #[error("{what}: more than {max} entries")]
+    TooMany { what: &'static str, max: usize },
+    #[error("{what} is longer than {max_units} UTF-16 units")]
+    TooLarge { what: &'static str, max_units: usize },
+}
+
+
+/// The UTF-16, NUL terminated pieces of a job spawn, every one checked: program, command line, environment block and working directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobLaunch {
+    pub program: Vec<u16>,
+    pub command: Vec<u16>,
+    pub environment: Vec<u16>,
+    pub directory: Vec<u16>,
 }
 
 

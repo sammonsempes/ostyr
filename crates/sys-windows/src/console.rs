@@ -49,19 +49,35 @@ pub const MAX_ERROR_DIRECTORY_CHARS: usize = 64;
 pub const CUT_MARKER: &str = "...[cut]";
 
 
+/// The text of a refused path or directory for an error: cut at `MAX_ERROR_DIRECTORY_CHARS` with `CUT_MARKER`.
+pub fn shown_text(text: &str) -> String {
+    let cut = text.chars().count() > MAX_ERROR_DIRECTORY_CHARS;
+    let shown = text.chars().take(MAX_ERROR_DIRECTORY_CHARS).collect::<String>();
+    if cut {
+        format!("{shown}{CUT_MARKER}")
+    } else {
+        shown
+    }
+}
+
+
 fn bad_directory(directory: &str) -> ConsoleError {
-    let cut = directory.chars().count() > MAX_ERROR_DIRECTORY_CHARS;
-    let shown = directory.chars().take(MAX_ERROR_DIRECTORY_CHARS).collect::<String>();
-    ConsoleError::BadDirectory(if cut { format!("{shown}{CUT_MARKER}") } else { shown })
+    ConsoleError::BadDirectory(shown_text(directory))
+}
+
+
+/// The volume root (`C:`) of an absolute local path without quote, `;`, slash or NUL, or `None`.
+pub fn drive_root(path: &str) -> Option<String> {
+    let forbidden = path.contains(['"', ';', '/']) || path.chars().count() > MAX_DIRECTORY_CHARS;
+    split_volume_path(path)
+        .ok()
+        .filter(|_| !forbidden)
+        .map(|volume| volume.root.trim_end_matches('\\').to_string())
 }
 
 
 fn drive_of(directory: &str) -> Result<String, ConsoleError> {
-    let forbidden = directory.contains(['"', ';', '/']) || directory.chars().count() > MAX_DIRECTORY_CHARS;
-    let split = split_volume_path(directory).ok().filter(|_| !forbidden);
-    split
-        .map(|volume| volume.root.trim_end_matches('\\').to_string())
-        .ok_or_else(|| bad_directory(directory))
+    drive_root(directory).ok_or_else(|| bad_directory(directory))
 }
 
 
