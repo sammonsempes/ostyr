@@ -82,6 +82,7 @@ fn report(tenant: &str, title: &str) -> ComplianceReport {
             evidence_time: None,
             risks: Vec::new(),
             open_actions: Vec::new(),
+            reason: None,
         }],
         gaps: Vec::new(),
         plan: Vec::new(),

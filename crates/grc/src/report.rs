@@ -25,6 +25,8 @@ pub struct ControlRow {
     pub evidence_time: Option<i64>,
     pub risks: Vec<String>,
     pub open_actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 
@@ -131,6 +133,7 @@ fn control_row(framework: &Framework, register: &Register, result: &ControlResul
             .into_iter()
             .map(|item| item.action)
             .collect(),
+        reason: None,
     }
 }
 
