@@ -104,7 +104,10 @@ fn probe_slow(stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _
 
 
 fn probe_failing(_stop: &AtomicBool, _max_polls: u32, _attached: &mut dyn FnMut(), _deliver: &mut dyn FnMut(Drained)) -> ProbeResult {
-    Err(LoadError::ProgramLoad { errno: Some(EPERM) })
+    Err(LoadError::ProgramLoad {
+        probe: "exec",
+        errno: Some(EPERM),
+    })
 }
 
 

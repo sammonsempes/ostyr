@@ -192,3 +192,27 @@ fn the_shared_drain_reports_each_probe_by_name() -> Result<(), Box<dyn Error>> {
     assert!(found, "no record for pid {child}");
     Ok(())
 }
+
+
+const REFUSED_FILE_PROBE: &str = "file_refused";
+
+
+#[test]
+fn a_refused_file_program_leaves_exec_running_and_is_named() -> Result<(), Box<dyn Error>> {
+    let bytes = read_object(Path::new(EXEC_OBJECT_PATH))?;
+    let refused = ProbeSpec {
+        name: REFUSED_FILE_PROBE,
+        ..FILE_PROBE
+    };
+    let mut probe = prepare_probes_from_bytes(&bytes, &[EXEC_PROBE, FILE_PROBE, refused])?;
+    assert_eq!(probe.unavailable.len(), 1);
+    let lost = probe.unavailable.first().ok_or("no unavailable probe")?;
+    assert_eq!(lost.probe, REFUSED_FILE_PROBE);
+    assert!(lost.to_string().contains(REFUSED_FILE_PROBE), "{lost}");
+    assert!(matches!(lost.reason, LoadError::ProgramLoad { probe: named, .. } if named == REFUSED_FILE_PROBE));
+    ebpf_probes::loader::attach_exec_probe(&mut probe)?;
+    let child = run_true_as_nobody()?;
+    let drained = drain_exec(&mut probe, MAX_DRAIN_PER_POLL);
+    assert!(drained.records.iter().any(|record| record.pid == child), "no exec record for pid {child}");
+    Ok(())
+}

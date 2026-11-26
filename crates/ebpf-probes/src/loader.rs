@@ -5,7 +5,7 @@ use crate::btf::{read_task_offsets, require_64_bit, VMLINUX_BTF_PATH};
 use crate::drain::{
     decode_batch, finish_drain, may_proceed, poll_loop, sum_per_cpu, Batch, Decoder, Drained, EXEC_DECODER, FILE_DECODER, MAX_DRAIN_PER_POLL,
 };
-use crate::error::{attach_error, ebpf_error, program_load_error, LoadError};
+use crate::error::{attach_error, ebpf_error, program_load_error, settle_probe, split_settled, FileProbeUnavailable, LoadError};
 use crate::limiter::Limiter;
 use crate::object::{read_object, EXEC_OBJECT_PATH};
 use crate::record::{ExecRecord, FileRecord};
@@ -32,6 +32,7 @@ pub struct ProbeState {
 pub struct Probe {
     pub ebpf: Ebpf,
     pub states: Vec<ProbeState>,
+    pub unavailable: Vec<FileProbeUnavailable>,
 }
 
 
@@ -56,7 +57,7 @@ fn tracepoint_of<'a>(ebpf: &'a mut Ebpf, spec: &ProbeSpec) -> Result<&'a mut Tra
 
 
 fn take_state(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<ProbeState, LoadError> {
-    tracepoint_of(ebpf, spec)?.load().map_err(|error| program_load_error(&error))?;
+    tracepoint_of(ebpf, spec)?.load().map_err(|error| program_load_error(spec.name, &error))?;
     let ring = ebpf
         .take_map(spec.ring)
         .ok_or(LoadError::TakeMap(spec.ring))
@@ -75,6 +76,11 @@ fn take_state(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<ProbeState, LoadError
 }
 
 
+fn report_unavailable(lost: &FileProbeUnavailable) {
+    tracing::error!("{lost}");
+}
+
+
 /// Loads every program of `table` and takes its maps from bytes already judged by `read_object`, without attaching; `check_object_bytes_for` judges the same bytes once, first.
 pub fn prepare_probes_from_bytes(bytes: &[u8], table: &[ProbeSpec]) -> Result<Probe, LoadError> {
     require_64_bit(usize::BITS)?;
@@ -87,8 +93,13 @@ pub fn prepare_probes_from_bytes(bytes: &[u8], table: &[ProbeSpec]) -> Result<Pr
         .override_global("TGID_OFFSET", &tgid, true)
         .load(bytes)
         .map_err(|error| ebpf_error(&error))?;
-    let states = table.iter().map(|spec| take_state(&mut ebpf, spec)).collect::<Result<Vec<_>, _>>()?;
-    Ok(Probe { ebpf, states })
+    let settled = table
+        .iter()
+        .map(|spec| settle_probe(spec, take_state(&mut ebpf, spec)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (states, unavailable) = split_settled(settled);
+    unavailable.iter().for_each(report_unavailable);
+    Ok(Probe { ebpf, states, unavailable })
 }
 
 
@@ -101,15 +112,23 @@ pub fn prepare_exec_probe_from_bytes(bytes: &[u8]) -> Result<Probe, LoadError> {
 fn attach_state(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<(), LoadError> {
     let program = tracepoint_of(ebpf, spec)?;
     match spec.attach {
-        AttachKind::TracePoint { category, name } => program.attach(category, name).map(drop).map_err(|error| attach_error(&error)),
+        AttachKind::TracePoint { category, name } => program.attach(category, name).map(drop).map_err(|error| attach_error(spec.name, &error)),
     }
 }
 
 
-/// Attaches every loaded program; the first failure is the whole failure, and dropping the probe detaches whatever was attached.
+/// Attaches every loaded program; a failing exec probe is the whole failure, any other probe that fails to attach is dropped from the states, logged and named in `Probe.unavailable`; dropping the probe detaches whatever was attached.
 pub fn attach_probes(probe: &mut Probe) -> Result<(), LoadError> {
     let specs: Vec<ProbeSpec> = probe.states.iter().map(|state| state.spec).collect();
-    specs.iter().try_for_each(|spec| attach_state(&mut probe.ebpf, spec))
+    let settled = specs
+        .iter()
+        .map(|spec| settle_probe(spec, attach_state(&mut probe.ebpf, spec)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (_, lost) = split_settled(settled);
+    lost.iter().for_each(report_unavailable);
+    probe.states.retain(|state| !lost.iter().any(|gone| gone.probe == state.spec.name));
+    probe.unavailable.extend(lost);
+    Ok(())
 }
 
 

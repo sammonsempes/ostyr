@@ -5,9 +5,12 @@ use aya::programs::ProgramError;
 use aya::sys::SyscallError;
 use aya::EbpfError;
 use ebpf_probes::btf::Unsupported;
-use ebpf_probes::error::{attach_error, ebpf_error, errno_of, load_error_name, map_error, program_load_error, LoadError};
+use ebpf_probes::error::{
+    attach_error, ebpf_error, errno_of, load_error_name, map_error, program_load_error, settle_probe, split_settled, FileProbeUnavailable, LoadError,
+    Settled, OBJECT_PROBE,
+};
 use ebpf_probes::object::ObjectError;
-use ebpf_probes::shape::{ShapeError, DROPS_NAME, PROGRAM_NAME, RING_NAME};
+use ebpf_probes::shape::{ShapeError, DROPS_NAME, EXEC_PROBE, FILE_PROBE, PROGRAM_NAME, RING_NAME};
 use std::error::Error;
 use std::io;
 
@@ -68,18 +71,39 @@ fn each_aya_step_maps_to_its_own_fixed_variant() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(
         ebpf_error(&EbpfError::ProgramError(ProgramError::SyscallError(syscall_error("bpf", NO_ACCESS)))),
-        LoadError::ProgramLoad { errno: Some(NO_ACCESS) }
+        LoadError::ProgramLoad {
+            probe: OBJECT_PROBE,
+            errno: Some(NO_ACCESS)
+        }
     );
     assert_eq!(ebpf_error(&EbpfError::NoBTF), LoadError::Parse);
-    assert_eq!(program_load_error(&ProgramError::NotLoaded), LoadError::ProgramLoad { errno: None });
     assert_eq!(
-        program_load_error(&syscall_error("bpf", BUSY)),
-        LoadError::ProgramLoad { errno: Some(BUSY) }
+        program_load_error(FILE_PROBE.name, &ProgramError::NotLoaded),
+        LoadError::ProgramLoad {
+            probe: FILE_PROBE.name,
+            errno: None
+        }
     );
-    assert_eq!(attach_error(&ProgramError::NotAttached), LoadError::Attach { errno: None });
     assert_eq!(
-        attach_error(&ProgramError::SyscallError(syscall_error("perf", NO_ACCESS))),
-        LoadError::Attach { errno: Some(NO_ACCESS) }
+        program_load_error(EXEC_PROBE.name, &syscall_error("bpf", BUSY)),
+        LoadError::ProgramLoad {
+            probe: EXEC_PROBE.name,
+            errno: Some(BUSY)
+        }
+    );
+    assert_eq!(
+        attach_error(FILE_PROBE.name, &ProgramError::NotAttached),
+        LoadError::Attach {
+            probe: FILE_PROBE.name,
+            errno: None
+        }
+    );
+    assert_eq!(
+        attach_error(EXEC_PROBE.name, &ProgramError::SyscallError(syscall_error("perf", NO_ACCESS))),
+        LoadError::Attach {
+            probe: EXEC_PROBE.name,
+            errno: Some(NO_ACCESS)
+        }
     );
     Ok(())
 }
@@ -93,8 +117,8 @@ fn no_aya_error_text_reaches_display_debug_or_a_source() -> Result<(), Box<dyn E
     });
     let marked = [
         ebpf_error(&created),
-        program_load_error(&io::Error::other(MARKER)),
-        attach_error(&io::Error::other(MARKER)),
+        program_load_error(FILE_PROBE.name, &io::Error::other(MARKER)),
+        attach_error(FILE_PROBE.name, &io::Error::other(MARKER)),
         ebpf_error(&EbpfError::ProgramError(ProgramError::UnknownInterface {
             name: std::ffi::CString::new(MARKER)?,
         })),
@@ -116,8 +140,14 @@ fn every_variant_has_fixed_text_and_the_inner_causes_are_kept() -> Result<(), Bo
         LoadError::from(unsupported),
         LoadError::Parse,
         LoadError::MapCreate { errno: Some(1) },
-        LoadError::ProgramLoad { errno: None },
-        LoadError::Attach { errno: Some(NO_ACCESS) },
+        LoadError::ProgramLoad {
+            probe: EXEC_PROBE.name,
+            errno: None,
+        },
+        LoadError::Attach {
+            probe: EXEC_PROBE.name,
+            errno: Some(NO_ACCESS),
+        },
         LoadError::MissingProgram(PROGRAM_NAME),
         LoadError::WrongProgramType(PROGRAM_NAME),
         LoadError::TakeMap(RING_NAME),
@@ -145,8 +175,14 @@ fn every_variant_has_one_fixed_name_without_errno_or_cause() -> Result<(), Box<d
         LoadError::from(Unsupported("no task_struct")),
         LoadError::Parse,
         LoadError::MapCreate { errno: Some(1) },
-        LoadError::ProgramLoad { errno: Some(NO_ACCESS) },
-        LoadError::Attach { errno: None },
+        LoadError::ProgramLoad {
+            probe: EXEC_PROBE.name,
+            errno: Some(NO_ACCESS),
+        },
+        LoadError::Attach {
+            probe: EXEC_PROBE.name,
+            errno: None,
+        },
         LoadError::MissingProgram(PROGRAM_NAME),
         LoadError::WrongProgramType(PROGRAM_NAME),
         LoadError::TakeMap(RING_NAME),
@@ -169,5 +205,47 @@ fn every_variant_has_one_fixed_name_without_errno_or_cause() -> Result<(), Box<d
             "NotBuilt"
         ]
     );
+    Ok(())
+}
+
+
+#[test]
+fn load_and_attach_errors_name_the_probe() -> Result<(), Box<dyn Error>> {
+    let loaded = program_load_error(FILE_PROBE.name, &ProgramError::NotLoaded).to_string();
+    let attached = attach_error(FILE_PROBE.name, &ProgramError::NotAttached).to_string();
+    assert!(loaded.contains(FILE_PROBE.name), "{loaded}");
+    assert!(attached.contains(FILE_PROBE.name), "{attached}");
+    assert!(!loaded.contains(EXEC_PROBE.name) && !attached.contains(EXEC_PROBE.name));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_file_probe_is_named_and_a_failing_exec_probe_is_the_whole_failure() -> Result<(), Box<dyn Error>> {
+    let refused = program_load_error(FILE_PROBE.name, &ProgramError::NotLoaded);
+    let optional = settle_probe::<&str>(&FILE_PROBE, Err(refused))?;
+    let expected = FileProbeUnavailable {
+        probe: FILE_PROBE.name,
+        reason: refused,
+    };
+    assert_eq!(optional, Settled::Unavailable(expected));
+    assert!(expected.to_string().contains(FILE_PROBE.name));
+    let required = program_load_error(EXEC_PROBE.name, &ProgramError::NotLoaded);
+    assert_eq!(settle_probe::<&str>(&EXEC_PROBE, Err(required)), Err(required));
+    assert_eq!(settle_probe(&EXEC_PROBE, Ok("a"))?, Settled::Ready("a"));
+    assert_eq!(settle_probe(&FILE_PROBE, Ok("b"))?, Settled::Ready("b"));
+    Ok(())
+}
+
+
+#[test]
+fn settled_steps_split_into_ready_states_and_named_losses_in_order() -> Result<(), Box<dyn Error>> {
+    let lost = FileProbeUnavailable {
+        probe: FILE_PROBE.name,
+        reason: LoadError::NotBuilt,
+    };
+    let (ready, unavailable) = split_settled(vec![Settled::Ready("a"), Settled::Unavailable(lost), Settled::Ready("b")]);
+    assert_eq!(ready, ["a", "b"]);
+    assert_eq!(unavailable, [lost]);
     Ok(())
 }
