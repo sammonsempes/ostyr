@@ -8,8 +8,9 @@ use crate::copy::{
 use crate::error::ReportError;
 use crate::model::{Limits, Report, ScanScope};
 use crate::report::parse_report_mapped;
+use crate::types::GroupKillFn;
 use core_config::trusted_dir::TrustedDirError;
-use rustix::process::{kill_process, kill_process_group, Pid, Signal};
+use rustix::process::{kill_process, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
@@ -107,6 +108,7 @@ pub struct RunSettings {
     pub expired: fn(&Path) -> bool,
     pub copy: CopyLimits,
     pub before_open: fn(&Path),
+    pub group_kill: GroupKillFn,
 }
 
 
@@ -213,6 +215,7 @@ pub fn run_settings(
         expired: never_expired,
         copy: CopyLimits::default(),
         before_open: no_hook,
+        group_kill: kill_group_after_exit,
     }
 }
 
@@ -419,16 +422,29 @@ fn spawn_gitleaks(program: &Path, sandbox: &[OsString], arguments: &[OsString], 
 }
 
 
-/// Polls the child up to `ticks` times; `None` when it still runs after the last poll or when `expired` says so.
+fn exited(child: &Child) -> io::Result<bool> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    Ok(waitid(WaitId::Pid(Pid::from_child(child)), options)?.is_some())
+}
+
+
+fn reap_after_group_kill(child: &mut Child, group_kill: GroupKillFn) -> io::Result<Option<ExitStatus>> {
+    group_kill(Pid::from_child(child));
+    child.wait().map(Some)
+}
+
+
+/// Polls up to `ticks` times without reaping; on exit kills the group, then reaps; `None` on timeout or `expired`; an unwaitable child is an error.
 pub fn wait_child(child: &mut Child, ticks: u64, expired: fn(&Path) -> bool, run: &RunSettings, home: &Path) -> io::Result<Option<ExitStatus>> {
     (0..ticks)
-        .find_map(|_| match child.try_wait() {
-            Ok(None) if expired(home) => Some(Ok(None)),
-            Ok(None) => {
+        .find_map(|_| match exited(child) {
+            Ok(false) if expired(home) => Some(Ok(None)),
+            Ok(false) => {
                 thread::sleep(Duration::from_millis(run.poll_millis));
                 None
             }
-            other => Some(other),
+            Ok(true) => Some(reap_after_group_kill(child, run.group_kill)),
+            Err(error) => Some(Err(error)),
         })
         .unwrap_or(Ok(None))
 }
@@ -496,12 +512,10 @@ pub fn run_pass(program: &Path, pass: &Pass, target: &ScanTarget, limits: &Limit
     let libraries = library_dirs(&LIBRARY_DIRS);
     let sandbox = bwrap_arguments(program, &libraries, copy, original, pass_dir);
     let mut child = spawn_gitleaks(program, &sandbox, &arguments, pass_dir, run)?;
-    let pid = Pid::from_child(&child);
     let waited = wait_child(&mut child, ticks, run.expired, run, pass_dir)?;
     match waited {
         None => stop_child(&mut child, run, pass_dir).and(Err(ScanError::TimedOut)),
         Some(status) => {
-            kill_group_after_exit(pid);
             check_exit(status)?;
             check_no_ignore_file(copy)?;
             read_report(&report_path, target, limits, run.expected_uid, map_path)

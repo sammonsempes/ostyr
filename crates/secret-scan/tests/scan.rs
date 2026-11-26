@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -1208,5 +1209,64 @@ fn the_run_is_refused_unless_fuse_sys_admin_access_is_off() -> TestResult {
     assert!(check_fuse_sys_admin(&parameter).is_ok());
     assert!(matches!(check_fuse_sys_admin(env.root.path()), Err(ScanError::Io(_))));
     assert!(matches!(check_fuse_sys_admin(&env.rules.join("below-a-file")), Err(ScanError::Io(_))));
+    Ok(())
+}
+
+
+const ZOMBIE_STATE: &str = "Z";
+
+
+const STATE_FIELD: usize = 3;
+
+
+fn leader_state(pid: rustix::process::Pid) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_pid())).ok()?;
+    let after_name = stat.rsplit_once(')')?.1;
+    after_name.split_whitespace().next().map(str::to_owned)
+}
+
+
+fn kill_group_only_when_leader_is_a_zombie(pid: rustix::process::Pid) {
+    if leader_state(pid).as_deref() == Some(ZOMBIE_STATE) {
+        let killed = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        assert!(killed.is_ok(), "state field {STATE_FIELD}");
+    }
+}
+
+
+#[test]
+fn the_group_is_killed_while_the_exited_leader_is_still_a_zombie() -> TestResult {
+    let env = setup()?;
+    let pid_file = env.root.path().join("background");
+    let body = format!("sleep 4243 &\necho $! > {}\n{}", pid_file.display(), report_of(""));
+    let program = script(&env, "fake", &body)?;
+    let run = RunSettings {
+        group_kill: kill_group_only_when_leader_is_a_zombie,
+        ..settings(&env)
+    };
+    let report = scan(&env, &program, LONG_TICKS, &run)?;
+    assert!(report.findings.is_empty());
+    let pid = fs::read_to_string(&pid_file)?;
+    assert!(wait_gone(pid.trim()));
+    Ok(())
+}
+
+
+#[test]
+fn a_child_that_cannot_be_waited_on_is_an_error_not_a_pass() -> TestResult {
+    let env = setup()?;
+    let mut child = Command::new("true").spawn()?;
+    child.wait()?;
+    let result = secret_scan::scan::wait_child(&mut child, LONG_TICKS, never_expired, &settings(&env), &env.tree);
+    assert!(result.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_group_after_the_exit_is_only_logged() -> TestResult {
+    let mut child = Command::new("true").process_group(0).spawn()?;
+    child.wait()?;
+    secret_scan::scan::kill_group_after_exit(rustix::process::Pid::from_child(&child));
     Ok(())
 }
