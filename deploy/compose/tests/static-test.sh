@@ -166,6 +166,50 @@ nats_init_refuses_other_conf() {
     [[ "$outcome" -eq 0 ]]
 }
 
+init_refuses_planted_secrets() {
+    local work outcome=0 name plant user
+    local -a planted_list
+    local -a names=(nats_gateway_password nats_admin_password nats_siem_password nats_metrics_password pg_password pg_service_password)
+    local -a plants=('x",permissions:{publish:">"}},{user:q,pass:"' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 'AAAAAAAAAAAAAAAAAAAAAA"AAAAAAAAAAAAAAAAAAAA=' 'AAAAAAAAAAAAAAAAAAAAAA}AAAAAAAAAAAAAAAAAAAA=' $'AAAAAAAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAA=')
+    mkdir -p "$COMPOSE_DIR/../../target"
+    work="$(mktemp -d "$COMPOSE_DIR/../../target/planted.XXXXXX")"
+    mkdir "$work/secrets"
+    chmod 0700 "$work/secrets"
+    cp "$CH_INIT_FILE" "$work/init.sh"
+    "$work/init.sh" planted.example >"$work/first.log" 2>&1 || outcome=1
+    for user in schema ingest reader metrics; do
+        names+=("clickhouse_${user}_password")
+    done
+    for name in "${names[@]}"; do
+        cp -p "$work/secrets/$name" "$work/good"
+        planted_list=("${plants[0]}")
+        if [[ "$name" == nats_gateway_password || "$name" == clickhouse_schema_password ]]; then
+            planted_list=("${plants[@]}")
+        fi
+        for plant in "${planted_list[@]}"; do
+            printf '%s' "$plant" >"$work/secrets/$name"
+            rm -f "$work/secrets/nats.conf" "$work/secrets/clickhouse_users"
+            ! "$work/init.sh" planted.example >"$work/planted.log" 2>&1 || outcome=1
+            grep -q "error: .*/secrets/$name is not the 44 base64 characters" "$work/planted.log" || outcome=1
+            ! grep -qF -e "${plant:0:20}" "$work/planted.log" || outcome=1
+            [[ ! -e "$work/secrets/clickhouse_users" ]] || outcome=1
+            [[ "$name" == clickhouse_* || ! -e "$work/secrets/nats.conf" ]] || outcome=1
+        done
+        printf '%s\0%s' AAAAAAAAAAAAAAAAAAAAAA AAAAAAAAAAAAAAAAAAAAA >"$work/secrets/$name"
+        [[ "$name" != nats_admin_password && "$name" != clickhouse_reader_password ]] || ! "$work/init.sh" planted.example >"$work/planted.log" 2>&1 || outcome=1
+        cp "$work/good" "$work/secrets/$name"
+    done
+    "$work/init.sh" planted.example >"$work/last.log" 2>&1 || outcome=1
+    rm -rf "$work"
+    [[ "$outcome" -eq 0 ]]
+}
+
+mark_refuses_planted_password() {
+    local good=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= bad='x",permissions:{publish:">"}},{user:q,pass:"'
+    ! ADMIN_PASSWORD="$good" GATEWAY_PASSWORD="$bad" SIEM_PASSWORD="$good" METRICS_PASSWORD="$good" "$TESTS_DIR/mark-nats-passwords.sh" </dev/null >/dev/null 2>&1 \
+        && ADMIN_PASSWORD="$good" GATEWAY_PASSWORD="$good" SIEM_PASSWORD="$good" METRICS_PASSWORD="$good" "$TESTS_DIR/mark-nats-passwords.sh" </dev/null >/dev/null 2>&1
+}
+
 clickhouse_has() {
     clickhouse_service | grep -q -- "$1"
 }
@@ -711,6 +755,10 @@ expect "the ingest settings files name their own ClickHouse and NATS users" inge
 expect "the NATS consumer accounts are scoped to one durable each and have no create or purge subject" nats_consumer_accounts_are_scoped
 expect "the nats.conf written by the real init.sh equals the committed golden file" nats_conf_matches_golden
 expect "init.sh refuses an existing nats.conf that is not its own rendering, by name" nats_init_refuses_other_conf
+if [[ "${STATIC_TEST_SKIP_PLANTED:-0}" != 1 ]]; then
+    expect "init.sh refuses a planted password file whose text is not the generated format, by name, and renders nothing" init_refuses_planted_secrets
+fi
+expect "mark-nats-passwords.sh refuses a password that is not the generated format" mark_refuses_planted_password
 expect "the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets" clickhouse_is_hardened
 expect "the chschema service is hardened, runs as 65530 and holds only the CA and its password" chschema_is_hardened
 expect "both ClickHouse services use one pinned image" clickhouse_one_image

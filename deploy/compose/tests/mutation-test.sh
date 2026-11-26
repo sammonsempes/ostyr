@@ -35,6 +35,7 @@ readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
 readonly CH_USERS="ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader"
 readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
 readonly CH_NO_PAGE="ClickHouse answers only POST / and GET /ping, no web page"
+readonly PLANT_REFUSES="init.sh refuses a planted password file whose text is not the generated format, by name, and renders nothing"
 readonly CH_REFUSES="init.sh refuses a users file that differs from the rendered one"
 readonly GATEWAY_SAN="the gateway certificate names DNS:gateway only"
 readonly INIT_SERVICES="init.sh lists exactly the services of compose.yaml"
@@ -116,7 +117,7 @@ report() {
 
 static_run() {
     local name="$1" output
-    output="$(STATIC_TEST_COMPOSE_FILE="$2/$name.yaml" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+    output="$(STATIC_TEST_SKIP_PLANTED=1 STATIC_TEST_COMPOSE_FILE="$2/$name.yaml" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
     report "static $name" "$output" "${STATIC_REFUSAL[$name]}"
 }
 
@@ -126,7 +127,7 @@ stray_static_run() {
     mkdir -p "$project"
     cp "$COMPOSE_DIR/compose.yaml" "$project/compose.yaml"
     add_stray_input "$name" "$project"
-    output="$(STATIC_TEST_PROJECT_DIR="$project" STATIC_TEST_COMPOSE_FILE="$project/compose.yaml" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+    output="$(STATIC_TEST_SKIP_PLANTED=1 STATIC_TEST_PROJECT_DIR="$project" STATIC_TEST_COMPOSE_FILE="$project/compose.yaml" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
     report "static $name" "$output" "${STRAY_REFUSAL[$name]}"
 }
 
@@ -147,13 +148,16 @@ stray_parsed_run() {
 }
 
 file_static_run() {
-    local name="$1" variable="$2" source="$3" expression="$4" expected="$5" extra_keys="${6:-}" output
+    local name="$1" variable="$2" source="$3" expression="$4" expected="$5" extra_keys="${6:-}" output skip_planted=1
+    if [[ "$expected" == "$PLANT_REFUSES" ]]; then
+        skip_planted=0
+    fi
     sed "$expression" "$source" >"$scratch/$name.file"
     if cmp -s "$source" "$scratch/$name.file"; then
         printf 'FAIL file %s: the mutation changed nothing\n' "$name"
         failures=$((failures + 1))
     else
-        output="$(env "$variable=$scratch/$name.file" "STATIC_TEST_EXTRA_KEYS=$extra_keys" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+        output="$(env "$variable=$scratch/$name.file" "STATIC_TEST_EXTRA_KEYS=$extra_keys" "STATIC_TEST_SKIP_PLANTED=$skip_planted" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
         report "static $name" "$output" "$expected"
     fi
 }
@@ -167,7 +171,7 @@ config_static_run() {
         printf 'FAIL config %s: the mutation changed nothing\n' "$name"
         failures=$((failures + 1))
     else
-        output="$(STATIC_TEST_CONFIG_DIR="$scratch/config-$name" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
+        output="$(STATIC_TEST_SKIP_PLANTED=1 STATIC_TEST_CONFIG_DIR="$scratch/config-$name" "$TESTS_DIR/static-test.sh" 2>&1 || true)"
         report "static $name" "$output" "$expected"
     fi
 }
@@ -205,6 +209,7 @@ file_static_runs() {
     config_static_run siem_foreign_secret siem-ingest.yaml 's|/run/secrets/nats_siem_password|/run/secrets/nats_metrics_password|' "$INGEST_SECRETS"
     config_static_run alerts_foreign_state metric-alerts.yaml 's|/var/lib/ostyr-metric-alerts/|/var/lib/ostyr-siem/|' "$INGEST_SECRETS"
     config_static_run alerts_pg_superuser_secret metric-alerts-pg.yaml 's|/run/secrets/metricalerts_pg_password|/run/secrets/pg_password|' "$INGEST_SECRETS"
+    file_static_run base64_check_removed STATIC_TEST_INIT_FILE "$init" 's|if \[\[ ! "$content" =~ .*; then|if false; then|' "$PLANT_REFUSES"
     file_static_run users_check_removed STATIC_TEST_INIT_FILE "$init" 's|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$CH_REFUSES"
 }
 
