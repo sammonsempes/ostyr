@@ -7,10 +7,13 @@ use crate::schedule::{RunWindow, ScheduleError};
 use crate::store::FindingRow;
 use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
+use metric_alerts::fetch::FetchSettings;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use ureq::Agent;
 
 
 /// Runs one pack for one tenant on the window ending at the given unix second.
@@ -45,3 +48,15 @@ pub type FindingsFn = Arc<dyn Fn(TenantScope, FindingsQuery) -> FindingsFuture +
 
 /// Resolves when the process is told to stop (SIGINT and SIGTERM in production).
 pub type InterruptWait = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
+
+
+/// One reply row: entity and key (rarity) or entity and unix seconds (beaconing).
+pub type StatRow = (String, String);
+
+
+/// Builds the statement to send from the reader limits that are pinned in it.
+pub type StatementFn<'statement> = dyn Fn(&[(&'static str, String)]) -> String + 'statement;
+
+
+/// One run over a reader: agent, settings, key, window end and the time left.
+pub type ReaderRunFn<'run> = dyn Fn(&Agent, &FetchSettings, &str, u64, Duration) -> Result<HuntOutcome, RunError> + 'run;

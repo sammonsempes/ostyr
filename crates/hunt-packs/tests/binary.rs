@@ -12,8 +12,11 @@ use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::load::load_file as load_settings_file;
 use hunt_packs::model::HuntPack;
 use hunt_packs::packs::load_file;
-use hunt_packs::serve::{boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_one, setup_failed, start, start_from};
+use hunt_packs::serve::{
+    boxed_reload_audit, forward_interrupt, read_clock, reload_context, run_either, run_one, setup_failed, start, start_from, stat_hunt_of,
+};
 use hunt_packs::settings::HuntSettings;
+use hunt_packs::stat_model::{stat_pack, StatHunt, Statistic};
 use hunt_packs::store::GET_SQL;
 use hunt_packs::types::InterruptWait;
 use metric_alerts::fetch::FetchError;
@@ -62,6 +65,12 @@ const NEGATIVE_END: i64 = -1;
 
 
 const SOME_END: i64 = 1_700_000_000;
+
+
+const TICK_SECONDS: u64 = 10;
+
+
+const STAT_ROWS: u32 = 10;
 
 
 const SAMPLE_PACK: &str = "examples/packs/clickhouse-rare-parent-child.yaml";
@@ -498,5 +507,60 @@ fn a_reload_audit_record_carries_the_tenant_all() -> TestResult {
     engine_audit(entry)?;
     let text = fs::read_to_string(dir.path().join("audit.log"))?;
     assert!(text.contains("\"tenant\":\"all\""), "{text}");
+    Ok(())
+}
+
+
+fn stat_settings(clickhouse: PathBuf, hunt: StatHunt) -> HuntSettings {
+    HuntSettings {
+        pg_settings: "/p".into(),
+        clickhouse_settings: clickhouse,
+        packs_dir: "/d".into(),
+        audit_file: "/a/audit.log".into(),
+        tenants: vec!["acme".to_owned()],
+        tick_seconds: TICK_SECONDS,
+        grace_seconds: 0,
+        max_runs_per_tick: 1,
+        stat_hunts: vec![hunt],
+    }
+}
+
+
+fn rare_hunt() -> Result<StatHunt, Box<dyn std::error::Error>> {
+    let base = pack()?;
+    Ok(StatHunt {
+        id: "rare".to_owned(),
+        statistic: Statistic::Rarity { max_entities: 1 },
+        query: base.query,
+        schedule_seconds: base.schedule_seconds,
+        window_seconds: base.window_seconds,
+        cost: base.cost,
+        max_rows: STAT_ROWS,
+        max_matches: 0,
+    })
+}
+
+
+#[test]
+fn a_statistical_hunt_runs_through_the_statistical_path_and_a_pack_through_the_count() -> TestResult {
+    let dir = tempdir()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let clickhouse = write_clickhouse(dir.path(), listener.local_addr()?.port())?;
+    let hunt = rare_hunt()?;
+    let settings = stat_settings(clickhouse, hunt.clone());
+    assert_eq!(stat_hunt_of(&settings.stat_hunts, &stat_pack(&hunt)), Some(&hunt));
+    assert_eq!(stat_hunt_of(&settings.stat_hunts, &pack()?), None);
+    let server = reply(listener, "200 OK", "", b"h1\tbash\nh2\tbash\nh1\trare\n".to_vec());
+    let outcome = run_either(&settings, &stat_pack(&hunt), "acme", SOME_END)?;
+    let seen = server.join().map_err(|_| "the stub panicked")??;
+    assert_eq!((outcome.matches, outcome.finding, outcome.bound), (1, true, None));
+    assert!(seen.contains("SELECT * FROM ("), "{seen}");
+    let second = TcpListener::bind("127.0.0.1:0")?;
+    let counting = stat_settings(write_clickhouse(dir.path(), second.local_addr()?.port())?, hunt);
+    let count_server = reply(second, "200 OK", "", b"0\n".to_vec());
+    let counted = run_either(&counting, &pack()?, "acme", SOME_END)?;
+    let sent = count_server.join().map_err(|_| "the stub panicked")??;
+    assert_eq!((counted.matches, counted.bound), (0, None));
+    assert!(sent.contains("SELECT count() FROM ("), "{sent}");
     Ok(())
 }

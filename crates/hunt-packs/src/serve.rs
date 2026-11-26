@@ -8,9 +8,11 @@ use crate::run::{run_pack, HuntOutcome, RunError};
 use crate::schedule::due_runs;
 use crate::service::{run_service, ServiceReport, SettingsSource};
 use crate::settings::{open_hunt_from, HuntSettings, HuntSettingsError};
+use crate::stat_model::{stat_pack, StatHunt};
+use crate::stat_run::run_stat;
 use crate::store::{Param, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE};
 use crate::tick::Hooks;
-use crate::types::{InterruptWait, SleepFuture};
+use crate::types::{InterruptWait, ReaderRunFn, SleepFuture};
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_audit::tenant::AUDIT_TENANT;
 use core_config::load::load_file;
@@ -70,21 +72,44 @@ pub fn setup_failed(failure: FetchError) -> RunError {
 }
 
 
-/// One pack run: the ClickHouse settings and the key are read again, so a changed path applies live.
-pub fn run_one(clickhouse_settings: &Path, pack: &HuntPack, tenant: &str, end: i64) -> Result<HuntOutcome, RunError> {
+/// One run: the ClickHouse settings and the key are read again, so a changed path applies live; `run` gets the agent, settings, key, window end and time left.
+pub fn run_with_reader(clickhouse_settings: &Path, end: i64, run: &ReaderRunFn<'_>) -> Result<HuntOutcome, RunError> {
     let fetch_settings = load_fetch_settings(clickhouse_settings).map_err(setup_failed)?;
     let agent = agent_for(&fetch_settings).map_err(setup_failed)?;
     let password = read_key(&fetch_settings).map_err(setup_failed)?;
     let seconds = u64::try_from(end).map_err(|_| RunError::Window)?;
-    run_pack(
+    run(
         &agent,
         &fetch_settings,
         &password,
-        pack,
-        tenant,
         seconds,
         Duration::from_millis(fetch_settings.timeout_ms),
     )
+}
+
+
+/// One pack run.
+pub fn run_one(clickhouse_settings: &Path, pack: &HuntPack, tenant: &str, end: i64) -> Result<HuntOutcome, RunError> {
+    run_with_reader(clickhouse_settings, end, &|agent, settings, password, seconds, remaining| {
+        run_pack(agent, settings, password, pack, tenant, seconds, remaining)
+    })
+}
+
+
+/// The statistical hunt the pack stands for, if any: the pack must equal the hunt's own scheduling view.
+pub fn stat_hunt_of<'hunts>(hunts: &'hunts [StatHunt], pack: &HuntPack) -> Option<&'hunts StatHunt> {
+    hunts.iter().find(|hunt| stat_pack(hunt) == *pack)
+}
+
+
+/// A statistical hunt runs through `run_stat`, any other pack through `run_pack`.
+pub fn run_either(settings: &HuntSettings, pack: &HuntPack, tenant: &str, end: i64) -> Result<HuntOutcome, RunError> {
+    match stat_hunt_of(&settings.stat_hunts, pack) {
+        Some(hunt) => run_with_reader(&settings.clickhouse_settings, end, &|agent, fetch, password, seconds, remaining| {
+            run_stat(agent, fetch, password, hunt, tenant, seconds, remaining)
+        }),
+        None => run_one(&settings.clickhouse_settings, pack, tenant, end),
+    }
 }
 
 
@@ -151,7 +176,7 @@ pub async fn start_from(hunt_file: &Path, first: HuntSettings, rounds: u64, inte
     let client = connect(&load_settings(&started.pg_settings)?).await?;
     migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute(&client, scope.clone(), sql, params);
-    let mut runner = |pack: &HuntPack, tenant: &str, end: i64| run_one(&current_config(&engine).clickhouse_settings, pack, tenant, end);
+    let mut runner = |pack: &HuntPack, tenant: &str, end: i64| run_either(&current_config(&engine), pack, tenant, end);
     let mut hooks = Hooks {
         run: &mut runner,
         due: due_runs,

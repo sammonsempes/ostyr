@@ -1,8 +1,10 @@
 use crate::error::shown_id;
 use crate::model::{HuntPack, Source};
+use crate::types::StatementFn;
 use chrono::{DateTime, Datelike, Utc};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope};
+use hunt_stats::error::StatsError;
 use metric_alerts::fetch::{class_text, escape_param, FetchSettings, FORMAT_SUFFIX, PARAM_PREFIX};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
@@ -54,6 +56,7 @@ pub enum PackRefusal {
 pub struct HuntOutcome {
     pub matches: u64,
     pub finding: bool,
+    pub bound: Option<u64>,
 }
 
 
@@ -80,6 +83,10 @@ pub enum RunError {
     Body(#[source] io::Error),
     #[error("the reply is not one unsigned count")]
     Malformed,
+    #[error("the reply is not rows of the expected shape")]
+    BadRows,
+    #[error("the statistics refused the rows")]
+    Stats(#[source] StatsError),
 }
 
 
@@ -240,19 +247,27 @@ pub fn check_profile(
 }
 
 
-/// Nothing is sent for an osquery pack, a bad tenant, a bad window or a spent deadline. The tenant always comes from the caller. Settings check first, then the count, under one deadline.
-pub fn execute_pack_timed(
+/// The pack, tenant and window end of one read.
+pub struct ReadRequest<'request> {
+    pub pack: &'request HuntPack,
+    pub tenant: &'request str,
+    pub now: u64,
+}
+
+
+/// Nothing is sent for an osquery pack, a bad tenant, a bad window or a spent deadline. The tenant always comes from the caller. Settings check first, then the statement, under one deadline; a success reply is returned, a refusal or failure is an error.
+pub fn fetch_reply(
     agent: &Agent,
     settings: &FetchSettings,
     password: &str,
-    pack: &HuntPack,
-    tenant: &str,
-    now: u64,
+    request: &ReadRequest<'_>,
     budget: &dyn Fn() -> Duration,
-) -> Result<HuntOutcome, RunError> {
+    statement_of: &StatementFn<'_>,
+) -> Result<Response<Body>, RunError> {
+    let ReadRequest { pack, tenant, now } = request;
     (pack.source == Source::Clickhouse).then_some(()).ok_or(RunError::UnsupportedSource)?;
     let scope = tenant_scope(tenant).map_err(RunError::Tenant)?;
-    let window_end = window_text(now)?;
+    let window_end = window_text(*now)?;
     let window_start = window_text(now.checked_sub(pack.window_seconds).ok_or(RunError::Window)?)?;
     let limits = pack_limits(pack)?;
     (!mentions_settings(&pack.query)).then_some(()).ok_or(RunError::PackSettings)?;
@@ -262,27 +277,37 @@ pub fn execute_pack_timed(
         ("window_start", &window_start),
         ("window_end", &window_end),
     ];
-    let response = send_statement(
-        agent,
-        settings,
-        password,
-        &count_statement(&pack.query, &limits),
-        &params,
-        left_of(budget)?,
-    )?;
+    let response = send_statement(agent, settings, password, &statement_of(&limits), &params, left_of(budget)?)?;
     let code = exception_code(response.headers());
     let refusal = pack_refusal(code).filter(|_| !response.status().is_success());
     match (refusal, classify_reply(response.status(), code)) {
         (Some(refused), _) => Err(RunError::PackRefused(refused)),
         (None, Some(class)) => Err(RunError::Failed(class)),
-        (None, None) => {
-            let matches = read_count(response.into_body().into_reader())?;
-            Ok(HuntOutcome {
-                matches,
-                finding: matches > pack.baseline.max_matches,
-            })
-        }
+        (None, None) => Ok(response),
     }
+}
+
+
+/// The count of the pack's query for the tenant and window.
+pub fn execute_pack_timed(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    pack: &HuntPack,
+    tenant: &str,
+    now: u64,
+    budget: &dyn Fn() -> Duration,
+) -> Result<HuntOutcome, RunError> {
+    let request = ReadRequest { pack, tenant, now };
+    let response = fetch_reply(agent, settings, password, &request, budget, &|limits| {
+        count_statement(&pack.query, limits)
+    })?;
+    let matches = read_count(response.into_body().into_reader())?;
+    Ok(HuntOutcome {
+        matches,
+        finding: matches > pack.baseline.max_matches,
+        bound: None,
+    })
 }
 
 

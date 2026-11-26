@@ -7,8 +7,9 @@ use hunt_packs::api::FIRST_END;
 use hunt_packs::packs::{is_pack_id, MAX_ID_CHARS};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, start_cursor, CursorError, FindingPage, FindingRow,
-    Param, StateError, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS, OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
+    count_oversized, finding_reply, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, start_cursor, CursorError, FindingPage,
+    FindingRow, Param, StateError, FINDING_CONFLICT, FINDING_INSERTED, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
+    OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
@@ -84,8 +85,9 @@ fn insert_exec(store: &Rows, seen: &Seen) -> impl FnMut(&TenantScope, &'static s
                 let tenant = tenant_of(scope).to_owned();
                 let known = held
                     .iter()
-                    .any(|(owner, stored)| *owner == tenant && stored.pack_id == *pack && stored.window_end == *end);
-                if !known {
+                    .find(|(owner, stored)| *owner == tenant && stored.pack_id == *pack && stored.window_end == *end)
+                    .map(|(_, stored)| stored.matches != *matches || stored.max_matches != *baseline);
+                if known.is_none() {
                     held.push((
                         tenant,
                         FindingRow {
@@ -97,7 +99,11 @@ fn insert_exec(store: &Rows, seen: &Seen) -> impl FnMut(&TenantScope, &'static s
                         },
                     ));
                 }
-                Ok(if known { Vec::new() } else { vec![*end] })
+                Ok(match known {
+                    None => vec![FINDING_INSERTED],
+                    Some(true) => vec![FINDING_CONFLICT],
+                    Some(false) => Vec::new(),
+                })
             }
             _ => Err(PgError::InvalidTenant),
         };
@@ -140,7 +146,8 @@ fn fresh() -> (Rows, Seen) {
 #[test]
 fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(FINDING_SQL.contains("VALUES ($1, $2, $3, $4, $5, $6, now())"));
-    assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING window_end"));
+    assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING 0::bigint AS code"));
+    assert!(FINDING_SQL.contains("AND (window_start, matches, max_matches) <> ($3, $5, $6)"));
     assert!(LIST_SQL
         .contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4"));
     assert!(!LIST_SQL.contains("OFFSET"));
@@ -200,6 +207,26 @@ async fn a_finding_binds_every_value_after_the_tenant_and_a_replay_inserts_nothi
             ]
         )
     );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_different_finding_under_the_same_key_is_a_conflict_and_an_odd_reply_is_bad() -> TestResult {
+    let (store, seen) = fresh();
+    let mut exec = insert_exec(&store, &seen);
+    assert!(record_finding(&mut exec, "acme", PACK, &window(), THREE as u64, 0).await?);
+    assert!(matches!(
+        record_finding(&mut exec, "acme", PACK, &window(), THREE as u64 + 1, 0).await,
+        Err(StateError::FindingConflict)
+    ));
+    assert!(matches!(
+        record_finding(&mut exec, "acme", PACK, &window(), THREE as u64, 1).await,
+        Err(StateError::FindingConflict)
+    ));
+    assert!(matches!(finding_reply(&[FINDING_INSERTED, FINDING_CONFLICT]), Err(StateError::BadReply)));
+    assert!(matches!(finding_reply(&[THREE]), Err(StateError::BadReply)));
+    assert!(matches!(finding_reply(&[]), Ok(false)));
     Ok(())
 }
 

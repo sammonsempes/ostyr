@@ -1,6 +1,7 @@
 use crate::clock::{judge, ClockGuard, Verdict};
 use crate::packs::load_packs_partial;
 use crate::settings::{tick_limits, HuntSettings};
+use crate::stat_model::merge_stat_packs;
 use crate::store::Param;
 use crate::tick::{tick, Hooks};
 use crate::types::{ClockFn, SleepFn};
@@ -30,6 +31,7 @@ pub struct ServiceReport {
     pub refused_files: usize,
     pub refused_tenants: usize,
     pub pack_dir_failures: u64,
+    pub refused_stat_hunts: usize,
     pub tick_failures: u64,
 }
 
@@ -106,7 +108,9 @@ where
         }
         Ok(set) => {
             report.refused_files += set.refused;
-            let packs: Vec<_> = set.packs.into_iter().map(|item| item.pack).collect();
+            let file_packs: Vec<_> = set.packs.into_iter().map(|item| item.pack).collect();
+            let (packs, clashes) = merge_stat_packs(file_packs, &settings.stat_hunts);
+            report.refused_stat_hunts += clashes;
             match tick(&settings.tenants, &packs, now, &tick_limits(settings), exec, hooks).await {
                 Ok(done) => {
                     report.ticks += 1;

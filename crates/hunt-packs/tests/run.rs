@@ -157,7 +157,8 @@ fn count_is_read_and_compared_to_the_baseline() -> TestResult {
         outcome?,
         HuntOutcome {
             matches: COUNT,
-            finding: true
+            finding: true,
+            bound: None
         }
     );
     assert!(seen.starts_with("POST /?"), "{seen}");
@@ -165,7 +166,14 @@ fn count_is_read_and_compared_to_the_baseline() -> TestResult {
     assert!(seen.contains(" FORMAT TabSeparated"), "{seen}");
     assert!(!seen.contains(PASSWORD) || seen.to_lowercase().contains("x-clickhouse-key"), "{seen}");
     let (zero, _) = run_against(OK, "", b"0\n".to_vec())?;
-    assert_eq!(zero?, HuntOutcome { matches: 0, finding: false });
+    assert_eq!(
+        zero?,
+        HuntOutcome {
+            matches: 0,
+            finding: false,
+            bound: None
+        }
+    );
     Ok(())
 }
 
