@@ -1582,6 +1582,19 @@ fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and
             prompt_user: false,
             deadline: 1,
         },
+        Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS,
+        },
+        Action::Quarantine {
+            path: "/tmp/a".to_owned(),
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            size: 1,
+        },
+        Action::RestoreQuarantine {
+            entry: 1,
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        },
+        Action::Scan { path: "/tmp".to_owned() },
     ];
     unsupported.into_iter().for_each(|action| {
         assert_eq!(
@@ -1605,6 +1618,28 @@ fn the_kind_names_are_fixed_and_hold_no_field() -> TestResult {
         "kill"
     );
     assert_eq!(agent_channel::agent_app::action_kind(&Action::Isolate), "isolate");
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS
+        }),
+        "stop"
+    );
+    assert_eq!(agent_channel::agent_app::action_kind(&Action::Scan { path: "/".to_owned() }), "scan");
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::Quarantine {
+            path: String::new(),
+            sha256: String::new(),
+            size: 0
+        }),
+        "quarantine"
+    );
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::RestoreQuarantine {
+            entry: 0,
+            sha256: String::new()
+        }),
+        "restore_quarantine"
+    );
     assert_eq!(agent_channel::agent_app::action_kind(&open_shell_command(FIRST).action), "open_shell");
     Ok(())
 }
