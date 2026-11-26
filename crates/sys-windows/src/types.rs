@@ -109,4 +109,20 @@ pub enum ConsoleError {
     BadSessionLabel { max_bytes: usize },
     #[error("the console is already closed")]
     AlreadyClosed,
+    #[error("{operation} failed with code {code:#010x}")]
+    Windows { operation: &'static str, code: u32 },
+    #[error("{operation} failed: {kind:?}")]
+    Io { operation: &'static str, kind: std::io::ErrorKind },
+    #[error("{operation} returned no usable directory")]
+    DirectoryRead { operation: &'static str },
+    #[error("{bytes} input bytes exceed the {max_bytes} byte limit of one write")]
+    InputTooLarge { bytes: usize, max_bytes: usize },
+    #[error("the shell did not end within {millis} ms of the close")]
+    CloseTimeout { millis: u32 },
+    #[error("the output drain thread failed during the close")]
+    DrainFailed,
 }
+
+
+/// A step run right before the child joins its job: it gets the child's process id and returns a Windows error code to refuse the session.
+pub type AssignHook = fn(u32) -> Result<(), u32>;

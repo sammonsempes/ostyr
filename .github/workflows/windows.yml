@@ -39,6 +39,10 @@ jobs:
           -p patch-inventory -p patch-rollout
           -p secret-scan -p siem-schema -p sla-report -p software-catalog
           -p vuln-match -p sys-windows -p agent-windows
+      - name: Doc tests of sys-windows on Windows
+        shell: bash
+        timeout-minutes: 15
+        run: cargo test --locked --doc -p sys-windows
       - name: Lint sys-windows on Windows
         shell: bash
         timeout-minutes: 15
