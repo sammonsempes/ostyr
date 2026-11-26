@@ -1,3 +1,4 @@
+use crate::config::roles_file;
 use crate::error::StartupError;
 use crate::middleware::{drain_detached, rate_key};
 use crate::model::{
@@ -389,9 +390,11 @@ pub async fn run_loaded(
     let settings = build_settings(loaded)?;
     log.iter().for_each(|handle| apply_log_level(handle, &settings));
     let config = settings.config.clone();
+    let roles = roles_file(&settings.module);
     let inputs = StateInputs {
         key: settings.key.clone(),
         compromised: settings.compromised.clone(),
+        catalog: settings.catalog.clone(),
         oidc: settings.oidc.clone(),
     };
     let state: SharedState = Arc::new(build_state(&config, &inputs, extra_access, extra_documents)?);
@@ -411,7 +414,7 @@ pub async fn run_loaded(
     tracing::debug!(?extra_outcomes, "startup reload of the extra engines");
     start_first(&setup, &config, tls)?;
     let _stop_server = ServerStop(listener.clone());
-    rewatch(&setup.rewatch, watched_files(module_file, &config))?;
+    rewatch(&setup.rewatch, watched_files(module_file, &config, roles))?;
     let startup_outcome = reload(&engine);
     tracing::debug!(?startup_outcome, "startup reload");
     #[cfg(unix)]

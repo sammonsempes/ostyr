@@ -50,11 +50,40 @@ pub enum OidcDenial {
     UntrustedAudience,
     #[error("the ID token authorized party is missing or foreign")]
     BadAzp,
+    #[error("a mapped role is not in the role catalog in use")]
+    UnknownRole,
+    #[error("a mapped role requires a WebAuthn credential, which an identity provider login cannot give")]
+    WebauthnRequired,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RolesError {
+    #[error("the roles file is larger than {max} bytes")]
+    TooLarge { max: u64 },
+    #[error("the roles file is malformed ({category}, line {line}, column {column})")]
+    Syntax { category: String, line: usize, column: usize },
+    #[error("the roles file holds more than {max} roles")]
+    TooManyRoles { max: usize },
+    #[error("a role holds more than {max} permissions")]
+    TooManyPermissions { max: usize },
+    #[error("role number {index} has an invalid name")]
+    InvalidRoleName { index: usize },
+    #[error("role number {index} has an invalid permission name")]
+    InvalidPermissionName { index: usize },
+    #[error("role number {index} names a policy that does not exist")]
+    UnknownPolicy { index: usize },
+    #[error("role `{0}` is defined twice")]
+    DuplicateRole(String),
 }
 
 
 #[derive(Debug, Error)]
 pub enum AuthError {
+    #[error("roles file rejected: {0}")]
+    Roles(#[from] RolesError),
+    #[error("OIDC role map names role `{0}`, which requires a WebAuthn credential")]
+    OidcWebauthnRole(String),
     #[error("OIDC login refused: {0}")]
     Oidc(#[from] OidcDenial),
     #[error("OIDC configuration rejected: {0}")]

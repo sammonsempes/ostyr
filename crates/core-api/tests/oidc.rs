@@ -929,6 +929,7 @@ fn the_state_keeps_the_key_list_and_runtime_it_is_handed() -> TestResult {
     let inputs = StateInputs {
         key: Arc::new(read_key_file(&config.key_file)?),
         compromised: Arc::new(Default::default()),
+        catalog: Arc::new(builtin_catalog()),
         oidc: Some(runtime.clone()),
     };
     let state = build_state(&config, &inputs, Default::default(), Vec::new())?;
@@ -1237,5 +1238,20 @@ fn a_non_utf8_file_error_keeps_no_byte_of_the_file() -> TestResult {
         assert!(!text.contains("171") && !text.contains("255"), "{text}");
     }
     assert!(std::error::Error::source(&secret_error).is_none());
+    Ok(())
+}
+
+
+#[test]
+fn an_idp_group_mapped_to_a_webauthn_role_is_refused_at_load() -> TestResult {
+    let dir = tempdir()?;
+    let catalog = core_auth::rbac::load_catalog(r#"[{"name":"breakglass","permissions":["policy.webauthn_required"]}]"#.as_bytes())?;
+    let files = oidc_files_in(dir.path(), &CONFIG_TEXT.replace("[analyst]", "[breakglass]"))?;
+    assert!(matches!(
+        load_oidc(&files, &catalog),
+        Err(StartupError::Auth(AuthError::OidcWebauthnRole(name))) if name == "breakglass"
+    ));
+    let plain = oidc_files_in(dir.path(), CONFIG_TEXT)?;
+    assert!(load_oidc(&plain, &catalog).is_ok());
     Ok(())
 }

@@ -32,6 +32,9 @@ pub const SETTING_KEY_FILE: &str = "key_file";
 pub const SETTING_COMPROMISED_LIST: &str = "compromised_list";
 
 
+pub const SETTING_ROLES_FILE: &str = "roles_file";
+
+
 pub const SETTING_OIDC: &str = "oidc";
 
 
@@ -229,6 +232,12 @@ pub fn tls_files(module: &ModuleConfig) -> Result<Option<TlsFiles>, StartupError
         (None, None) => Ok(None),
         _ => Err(StartupError::IncompleteTls),
     }
+}
+
+
+/// The optional custom roles file, the one the `ostyr-auth` tool reads (a JSON array of `{name, permissions}`).
+pub fn roles_file(module: &ModuleConfig) -> Option<PathBuf> {
+    module.settings.get(SETTING_ROLES_FILE).map(PathBuf::from)
 }
 
 

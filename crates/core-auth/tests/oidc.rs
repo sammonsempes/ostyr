@@ -15,7 +15,7 @@ use core_auth::oidc::{
 };
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
-use core_auth::rbac::{builtin_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE};
+use core_auth::rbac::{builtin_catalog, load_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE, POLICY_WEBAUTHN_REQUIRED};
 use core_auth::service::{authorize, create_account, login, Context, LoginRequest, State, DUMMY_HASH};
 use core_auth::store::load_accounts;
 use core_auth::types::{CompromisedSet, PendingMap, RoleCatalog, StoreKey};
@@ -72,7 +72,7 @@ const NON_UTF8_BYTE: u8 = 255;
 const INSECURE_CASES: usize = 2;
 
 
-const REASON_COUNT: usize = 16;
+const REASON_COUNT: usize = 17;
 
 
 const GROUP_COUNT: usize = 2;
@@ -637,6 +637,64 @@ fn unmapped_user_gets_no_role_and_no_session() -> TestResult {
 
 
 #[test]
+fn a_mapped_role_absent_from_the_catalog_in_use_is_refused_and_strips_the_account() -> TestResult {
+    let mut fixture = fixture_over(Vec::new())?;
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let prepared = prepare(&fixture, &mut pending)?;
+    complete(&fixture, &mut state, &mut pending, &prepared, &spec())??;
+    assert_eq!(state.sessions.len(), 1);
+    fixture.catalog = RoleCatalog::new();
+    let prepared_again = prepare(&fixture, &mut pending)?;
+    let result = complete(&fixture, &mut state, &mut pending, &prepared_again, &spec())?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(state.sessions.is_empty());
+    assert!(state.accounts.values().all(|account| account.roles.is_empty()));
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("\"reason\":\"unknown_role\"") && text.contains("\"outcome\":\"denied\""));
+    Ok(())
+}
+
+
+#[test]
+fn a_mapped_role_requiring_webauthn_is_denied_at_settle() -> TestResult {
+    let mut fixture = fixture_over(Vec::new())?;
+    fixture
+        .catalog
+        .entry("analyst".to_owned())
+        .or_default()
+        .insert(POLICY_WEBAUTHN_REQUIRED.to_owned());
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let prepared = prepare(&fixture, &mut pending)?;
+    let result = complete(&fixture, &mut state, &mut pending, &prepared, &spec())?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(state.sessions.is_empty() && state.accounts.values().all(|account| account.roles.is_empty()));
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("\"reason\":\"webauthn_required\"") && text.contains("\"outcome\":\"denied\"") && text.contains("authz.oidc.map"));
+    Ok(())
+}
+
+
+#[test]
+fn a_role_map_naming_a_webauthn_role_is_refused_at_parse() -> TestResult {
+    let catalog = load_catalog(r#"[{"name":"breakglass","permissions":["users.manage","policy.webauthn_required"]}]"#.as_bytes())?;
+    let text = CONFIG_TEXT.replace("[analyst]", "[breakglass]");
+    assert!(matches!(
+        parse_oidc_config(&text, "oidc.yaml", &catalog),
+        Err(AuthError::OidcWebauthnRole(name)) if name == "breakglass"
+    ));
+    let beside = CONFIG_TEXT.replace("[administrator, responder]", "[responder, breakglass]");
+    assert!(matches!(
+        parse_oidc_config(&beside, "oidc.yaml", &catalog),
+        Err(AuthError::OidcWebauthnRole(_))
+    ));
+    assert!(parse_oidc_config(CONFIG_TEXT, "oidc.yaml", &catalog).is_ok());
+    Ok(())
+}
+
+
+#[test]
 fn user_without_groups_claim_is_unmapped() -> TestResult {
     let fixture = fixture_over(Vec::new())?;
     let mut state = State::default();
@@ -1004,6 +1062,7 @@ fn claims_and_groups_helpers() -> TestResult {
         OidcDenial::InsecureEndpoint,
         OidcDenial::UntrustedAudience,
         OidcDenial::BadAzp,
+        OidcDenial::UnknownRole,
     ]
     .into_iter()
     .map(denial_reason)

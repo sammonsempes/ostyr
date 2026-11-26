@@ -1,6 +1,8 @@
-use crate::error::AuthError;
+use crate::error::{AuthError, RolesError};
 use crate::types::{RoleCatalog, RoleSet};
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeSet;
 use std::io::Read;
 
@@ -75,6 +77,21 @@ pub const PERMISSION_AUDIT_EXPORT: &str = "audit.export";
 
 
 pub const POLICY_WEBAUTHN_REQUIRED: &str = "policy.webauthn_required";
+
+
+pub const POLICY_PREFIX: &str = "policy.";
+
+
+pub const MAX_ROLES_FILE_BYTES: u64 = 65_536;
+
+
+pub const MAX_CUSTOM_ROLES: usize = 64;
+
+
+pub const MAX_ROLE_PERMISSIONS: usize = 128;
+
+
+pub const MAX_ROLE_NAME_BYTES: usize = 64;
 
 
 pub const PRIVILEGED_PERMISSIONS: [&str; 4] = [
@@ -167,22 +184,104 @@ pub fn builtin_catalog() -> RoleCatalog {
 }
 
 
+/// A role or permission name: 1 to 64 bytes of `[a-z0-9._-]`, no leading `-`.
+pub fn valid_name(name: &str) -> bool {
+    (1..=MAX_ROLE_NAME_BYTES).contains(&name.len())
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+
+pub fn check_role(index: usize, role: &CustomRole) -> Result<(), RolesError> {
+    if !valid_name(&role.name) {
+        Err(RolesError::InvalidRoleName { index })
+    } else if role.permissions.len() > MAX_ROLE_PERMISSIONS {
+        Err(RolesError::TooManyPermissions { max: MAX_ROLE_PERMISSIONS })
+    } else if role.permissions.iter().any(|permission| !valid_name(permission)) {
+        Err(RolesError::InvalidPermissionName { index })
+    } else if role
+        .permissions
+        .iter()
+        .any(|permission| permission.starts_with(POLICY_PREFIX) && permission != POLICY_WEBAUTHN_REQUIRED)
+    {
+        Err(RolesError::UnknownPolicy { index })
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn add_custom_roles(catalog: &mut RoleCatalog, roles: Vec<CustomRole>) -> Result<(), AuthError> {
-    roles.into_iter().try_for_each(|role| match catalog.contains_key(&role.name) {
-        true => Err(AuthError::BuiltInRole(role.name)),
-        false => {
-            catalog.insert(role.name, role.permissions);
-            Ok(())
+    let builtin = builtin_catalog();
+    roles.into_iter().enumerate().try_for_each(|(index, role)| {
+        check_role(index, &role)?;
+        if builtin.contains_key(&role.name) {
+            Err(AuthError::BuiltInRole(role.name))
+        } else {
+            match catalog.entry(role.name) {
+                Entry::Occupied(taken) => Err(AuthError::Roles(RolesError::DuplicateRole(taken.key().clone()))),
+                Entry::Vacant(free) => {
+                    free.insert(role.permissions);
+                    Ok(())
+                }
+            }
         }
     })
 }
 
 
+/// The error of a roles document with its cause cut to a category and a position: never the text that failed.
+pub fn syntax_error(error: &serde_json::Error) -> RolesError {
+    RolesError::Syntax {
+        category: format!("{:?}", error.classify()),
+        line: error.line(),
+        column: error.column(),
+    }
+}
+
+
+/// Counts the roles and the permissions of each before the typed parse; the file is already capped, so this pass is bounded by it.
+pub fn count_roles(bytes: &[u8]) -> Result<(), RolesError> {
+    let document: Value = serde_json::from_slice(bytes).map_err(|error| syntax_error(&error))?;
+    match document.as_array() {
+        Some(roles) if roles.len() > MAX_CUSTOM_ROLES => Err(RolesError::TooManyRoles { max: MAX_CUSTOM_ROLES }),
+        Some(roles) => roles.iter().try_for_each(|role| {
+            if role
+                .get("permissions")
+                .and_then(Value::as_array)
+                .is_some_and(|permissions| permissions.len() > MAX_ROLE_PERMISSIONS)
+            {
+                Err(RolesError::TooManyPermissions { max: MAX_ROLE_PERMISSIONS })
+            } else {
+                Ok(())
+            }
+        }),
+        None => Ok(()),
+    }
+}
+
+
+/// The catalog of the roles document: read at most `MAX_ROLES_FILE_BYTES`, counted, then parsed; every refusal has fixed text.
 pub fn load_catalog<Input: Read>(input: Input) -> Result<RoleCatalog, AuthError> {
-    let roles: Vec<CustomRole> = serde_json::from_reader(input)?;
-    let mut catalog = builtin_catalog();
-    add_custom_roles(&mut catalog, roles)?;
-    Ok(catalog)
+    let mut bytes = Vec::new();
+    input.take(MAX_ROLES_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    parse_catalog(&bytes)
+}
+
+
+/// The same refusals as `load_catalog` for bytes already read (core-api digests the very bytes it parses).
+pub fn parse_catalog(bytes: &[u8]) -> Result<RoleCatalog, AuthError> {
+    if bytes.len() as u64 > MAX_ROLES_FILE_BYTES {
+        Err(AuthError::Roles(RolesError::TooLarge { max: MAX_ROLES_FILE_BYTES }))
+    } else {
+        count_roles(bytes)?;
+        let roles: Vec<CustomRole> = serde_json::from_slice(bytes).map_err(|error| syntax_error(&error))?;
+        let mut catalog = builtin_catalog();
+        add_custom_roles(&mut catalog, roles)?;
+        Ok(catalog)
+    }
 }
 
 

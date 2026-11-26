@@ -4,7 +4,7 @@ use crate::oidc::load_oidc;
 use crate::previous::{read_previous_key, record_previous, remove_stale_previous, retire_previous, ROTATION_RESUMED};
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
-use crate::server::read_public;
+use crate::server::{public_refusal, read_public};
 use crate::types::{AccessTable, ConnectionTable, SenderSlots, SenderTable};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::{open_file_log, AuditLog};
@@ -16,12 +16,13 @@ use core_auth::model::Account;
 use core_auth::password::verify_password;
 use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
-use core_auth::rbac::builtin_catalog;
+use core_auth::rbac::{builtin_catalog, parse_catalog, MAX_ROLES_FILE_BYTES};
 use core_auth::secretbox::open_secret;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store, load_store_file, read_store_bytes_locked, update_store_file};
-use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, CredentialMap, StoreKey, VerifyFn};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, CredentialMap, RoleCatalog, StoreKey, VerifyFn};
+use core_config::parse::read_bytes_capped;
 use core_config::reload::ReloadContext;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -98,12 +99,10 @@ pub fn build_state_from_files(
     extra_access: AccessTable,
     extra_documents: Vec<OpenApiDocument>,
 ) -> Result<ApiState, StartupError> {
-    let oidc = config
-        .oidc
-        .as_ref()
-        .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
-        .transpose()?;
+    let catalog = Arc::new(builtin_catalog());
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog).map(Arc::new)).transpose()?;
     let inputs = StateInputs {
+        catalog,
         key: Arc::new(read_key_file(&config.key_file)?),
         compromised: Arc::new(read_compromised(&config.compromised_list)?),
         oidc,
@@ -121,7 +120,6 @@ pub fn build_state(
 ) -> Result<ApiState, StartupError> {
     let audit = open_file_log(&config.audit_log)?;
     let (accounts, credentials) = load_sealed_store(config, &inputs.key, &audit)?;
-    let catalog = builtin_catalog();
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
@@ -138,7 +136,7 @@ pub fn build_state(
         audit,
         key: ArcSwap::new(inputs.key.clone()),
         compromised: ArcSwap::new(inputs.compromised.clone()),
-        catalog,
+        catalog: ArcSwap::new(inputs.catalog.clone()),
         random: os_random,
         clock: OffsetDateTime::now_utc,
         store_path: ArcSwap::from_pointee(config.accounts_store.clone()),
@@ -264,6 +262,18 @@ pub fn read_compromised_digested(path: &Path) -> Result<(CompromisedSet, String)
 }
 
 
+/// The catalog of the roles file and the digest of the very bytes it was parsed from; no file means the built-in catalog.
+pub fn read_catalog_digested(path: Option<&Path>) -> Result<(RoleCatalog, Option<String>), StartupError> {
+    match path {
+        Some(file) => {
+            let bytes = read_bytes_capped(file, MAX_ROLES_FILE_BYTES + 1).map_err(public_refusal)?;
+            Ok((parse_catalog(&bytes)?, Some(content_digest(&bytes))))
+        }
+        None => Ok((builtin_catalog(), None)),
+    }
+}
+
+
 pub fn current_compromised(app: &ApiState) -> Arc<CompromisedSet> {
     app.compromised.load_full()
 }
@@ -272,6 +282,7 @@ pub fn current_compromised(app: &ApiState) -> Arc<CompromisedSet> {
 pub fn auth_inputs(app: &ApiState) -> AuthInputs {
     AuthInputs {
         compromised: current_compromised(app),
+        catalog: app.catalog.load_full(),
         key: app.key.load_full(),
         identity: app.identity.load_full(),
     }
@@ -376,7 +387,7 @@ pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn
         verify,
         key: &inputs.key,
         compromised: &inputs.compromised,
-        catalog: &app.catalog,
+        catalog: &inputs.catalog,
         tenant: &inputs.identity.tenant,
         request_id,
     }
