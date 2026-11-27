@@ -1,11 +1,11 @@
 //! The `ostyr-certs` service: the local certificate scan stored for one tenant on a schedule, until the interrupt wait resolves; logs on stderr.
 
 
-use crate::error::RoundError;
+use crate::error::{InventoryStoreError, RoundError};
 use crate::model::{CertRecord, ScanOutcome, Source, SourceKind, StoreCounts, StoreLimits};
 use crate::scan::{scan, ScanSettings, MAX_DEPTH_CEILING, MAX_ROOTS};
 use crate::store::{store_records, DEFAULT_LIMITS, MIGRATIONS, MIGRATION_NAMESPACE, SOURCE_EXTRA_BYTES};
-use crate::types::{InterruptFn, InterruptWait, ServiceFuture, StopWatchFn, WaitFn};
+use crate::types::{InterruptFn, InterruptWait, ReloadSignals, ServiceFuture, StopWatchFn, WaitFn};
 use alerts::pg::pg_executor;
 use core_audit::log::{append_declared, open_file_log, AuditLog};
 use core_audit::tenant::AUDIT_TENANT;
@@ -66,6 +66,9 @@ pub const MODULE: &str = "cert-inventory";
 pub const SETTINGS_REQUEST: &str = "settings";
 
 
+pub const UNKNOWN_CLASS: &str = "store_unknown";
+
+
 /// Start-only: `tenant`, `pg_settings`, `audit_file` and `roots`. Live: the host label, the interval, the depth, the deadline and the certificate cap.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +98,8 @@ pub struct RoundGaps {
     pub private_keys_refused: usize,
     pub roots_unreached: usize,
     pub roots_refused: usize,
+    pub listing_cut: usize,
+    pub paths_omitted: usize,
     pub malformed: Vec<(&'static str, usize)>,
 }
 
@@ -309,9 +314,21 @@ impl Drop for ReloadThread {
 }
 
 
+/// Registers SIGHUP before any file is read, so a hangup during start is held until the reload thread takes it, never the default termination.
 #[cfg(unix)]
-fn keep_signals(engine: &Arc<ReloadEngine<CertSettings>>) -> io::Result<ReloadThread> {
-    let mut stream = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])?;
+pub fn arm_reload_signal() -> io::Result<ReloadSignals> {
+    signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])
+}
+
+
+#[cfg(not(unix))]
+pub fn arm_reload_signal() -> io::Result<ReloadSignals> {
+    Ok(ReloadSignals)
+}
+
+
+#[cfg(unix)]
+fn keep_signals(mut stream: ReloadSignals, engine: &Arc<ReloadEngine<CertSettings>>) -> ReloadThread {
     let handle = stream.handle();
     let shared = Arc::clone(engine);
     let worker = std::thread::spawn(move || {
@@ -320,10 +337,10 @@ fn keep_signals(engine: &Arc<ReloadEngine<CertSettings>>) -> io::Result<ReloadTh
             tracing::debug!(received, ?outcome, "reload after signal");
         });
     });
-    Ok(ReloadThread {
+    ReloadThread {
         handle,
         worker: Some(worker),
-    })
+    }
 }
 
 
@@ -332,8 +349,8 @@ pub struct NoSignals;
 
 
 #[cfg(not(unix))]
-fn keep_signals(_engine: &Arc<ReloadEngine<CertSettings>>) -> io::Result<NoSignals> {
-    Ok(NoSignals)
+fn keep_signals(_stream: ReloadSignals, _engine: &Arc<ReloadEngine<CertSettings>>) -> NoSignals {
+    NoSignals
 }
 
 
@@ -347,8 +364,9 @@ pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 
-/// The interrupt is armed first and races the connect, the migration and the waits; a round in flight always runs to its end.
+/// SIGHUP then the interrupt are armed before any file is read; the interrupt races the connect, the migration and the waits.
 pub async fn start(settings_file: &Path, rounds: u64, interrupt: InterruptFn, wait: WaitFn) -> Result<(), Box<dyn Error>> {
+    let reload_signals = arm_reload_signal()?;
     let mut interrupted = interrupt()?;
     let baseline = load_settings(settings_file)?;
     let pg_file = baseline.pg_settings.clone();
@@ -362,7 +380,7 @@ pub async fn start(settings_file: &Path, rounds: u64, interrupt: InterruptFn, wa
         boxed_reload_audit(audit_log),
     )?);
     let settings_watch = watch_files(Arc::clone(&engine), &[settings_file.to_path_buf(), pg_file], DEBOUNCE)?;
-    let _settings_signals = keep_signals(&engine)?;
+    let _settings_signals = keep_signals(reload_signals, &engine);
     let stop_watch: StopWatchFn = Box::new(move || settings_watch.stop());
     serve_then_quiesce(stop_watch, rounds, &engine, &pg, wait, interrupt, &mut interrupted).await
 }
@@ -522,6 +540,8 @@ pub fn gaps_of(outcome: &ScanOutcome, max_files: usize) -> RoundGaps {
         private_keys_refused: outcome.private_keys_refused,
         roots_unreached: outcome.roots_unreached,
         roots_refused: outcome.roots_refused,
+        listing_cut: outcome.listing_cut,
+        paths_omitted: outcome.records.iter().map(|found| found.paths_omitted).sum(),
         malformed: outcome.malformed.iter().map(|(reason, count)| (*reason, *count)).collect(),
     }
 }
@@ -539,6 +559,8 @@ pub fn gap_text(gaps: &RoundGaps) -> String {
         ("private_keys_refused", gaps.private_keys_refused),
         ("roots_unreached", gaps.roots_unreached),
         ("roots_refused", gaps.roots_refused),
+        ("listing_cut", gaps.listing_cut),
+        ("paths_omitted", gaps.paths_omitted),
     ];
     named
         .iter()
@@ -559,7 +581,48 @@ pub fn report(result: &Result<RoundReport, RoundError>) {
             info!(?counts, records, examined, scan_errors, "scan round stored");
             report_gaps(&round.gaps);
         }
-        Err(failure) => error!(%failure, "scan round failed"),
+        Err(failure) => report_failure(failure),
+    }
+}
+
+
+/// A client that stopped waiting, lost its connection, or got a reply that is not the store answer cannot say whether the statement committed.
+pub fn outcome_unknown(error: &InventoryStoreError) -> bool {
+    matches!(
+        error,
+        InventoryStoreError::Pg(PgError::ClientDeadline { .. } | PgError::Client(_)) | InventoryStoreError::BadRow { .. }
+    )
+}
+
+
+/// A fixed class of a failed round: a store that stopped waiting may have committed, so it is `UNKNOWN_CLASS`, never "failed".
+pub fn failure_class(failure: &RoundError) -> &'static str {
+    match failure {
+        RoundError::Scan(_) => "scan_task",
+        RoundError::Pg(_) => "connect",
+        RoundError::Store { source, .. } if outcome_unknown(source) => UNKNOWN_CLASS,
+        RoundError::Store { .. } => "store",
+    }
+}
+
+
+/// The index of the path whose store failed and the counts of the paths stored before it.
+pub fn progress_of(failure: &RoundError) -> (usize, StoreCounts) {
+    match failure {
+        RoundError::Store { path_index, counts, .. } => (*path_index, *counts),
+        RoundError::Scan(_) | RoundError::Pg(_) => (0, StoreCounts::default()),
+    }
+}
+
+
+/// Logs the class and the partial counts only: a connect failure holds file names and is never printed.
+pub fn report_failure(failure: &RoundError) {
+    let class = failure_class(failure);
+    let (path_index, counts) = progress_of(failure);
+    if class == UNKNOWN_CLASS {
+        error!(class, path_index, ?counts, "scan round outcome unknown, may have committed");
+    } else {
+        error!(class, path_index, ?counts, "scan round failed");
     }
 }
 
@@ -571,10 +634,10 @@ pub fn report_gaps(gaps: &RoundGaps) {
         warn!(gaps = text.as_str(), "scan gaps");
     }
     let budget = format!(
-        "max_files={} over_count={} roots_unreached={}",
-        gaps.max_files, gaps.over_count, gaps.roots_unreached
+        "max_files={} over_count={} roots_unreached={} listing_cut={} paths_omitted={}",
+        gaps.max_files, gaps.over_count, gaps.roots_unreached, gaps.listing_cut, gaps.paths_omitted
     );
-    if gaps.over_count > 0 {
+    if gaps.over_count > 0 || gaps.listing_cut > 0 || gaps.paths_omitted > 0 {
         warn!(budget = budget.as_str(), "scan budget overrun");
     }
 }
@@ -635,12 +698,20 @@ pub async fn one_round(pg: &PgSettings, scope: &TenantScope, live: &CertSettings
         ..DEFAULT_LIMITS
     };
     let mut counts = StoreCounts::default();
-    for (path, records) in &by_path(&outcome) {
+    for (path_index, (path, records)) in by_path(&outcome).iter().enumerate() {
         let source = Source {
             kind: SourceKind::Scan,
             reference: format!("{}:{}", live.host, encoded(path)),
         };
-        counts = sum_counts(counts, store_records(&exec, scope, &source, records, now, &limits).await?);
+        let stored = store_records(&exec, scope, &source, records, now, &limits).await;
+        counts = sum_counts(
+            counts,
+            stored.map_err(|cause| RoundError::Store {
+                path_index,
+                counts,
+                source: Box::new(cause),
+            })?,
+        );
     }
     Ok(RoundReport {
         records: outcome.records.len(),

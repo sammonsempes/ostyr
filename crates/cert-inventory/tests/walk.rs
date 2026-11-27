@@ -235,6 +235,7 @@ fn a_long_listing_is_cut_with_one_error() -> TestResult {
     let outcome = scan_with(&settings_for(directory.path()), no_hook, SMALL_LISTING);
     assert_eq!(outcome.errors.len(), 1);
     assert!(outcome.errors.iter().all(|line| line.contains("listing cut")));
+    assert_eq!(outcome.listing_cut, 1);
     assert!(outcome.examined < FILES_FOR_CUT);
     Ok(())
 }

@@ -37,15 +37,16 @@ pub const MIGRATIONS: [Migration; 3] = [
 pub const STORE_SQL: &str = include_str!("../migrations/store.sql");
 
 
-pub const LIST_FIRST_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text, key_type, \
+pub const LIST_FIRST_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text AS not_after_text, key_type, \
                                   COALESCE(key_bits::text, ''), self_signed::text, first_seen::text, last_seen::text FROM cert_inventory \
-                                  WHERE tenant = $1 AND not_after < $2::text::bigint ORDER BY not_after, fingerprint LIMIT $3::text::bigint";
+                                  WHERE tenant = $1 AND not_after < $2::text::bigint ORDER BY cert_inventory.not_after, cert_inventory.fingerprint LIMIT $3::text::bigint";
 
 
-pub const LIST_NEXT_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text, key_type, \
+pub const LIST_NEXT_SQL: &str =
+    "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text AS not_after_text, key_type, \
                                  COALESCE(key_bits::text, ''), self_signed::text, first_seen::text, last_seen::text FROM cert_inventory \
                                  WHERE tenant = $1 AND not_after < $2::text::bigint AND (not_after, fingerprint) > ($4::text::bigint, $5::text) \
-                                 ORDER BY not_after, fingerprint LIMIT $3::text::bigint";
+                                 ORDER BY cert_inventory.not_after, cert_inventory.fingerprint LIMIT $3::text::bigint";
 
 
 pub const GET_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text, key_type, \
