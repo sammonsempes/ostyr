@@ -20,7 +20,7 @@ pub type DecodeFn<Item> = fn(&[u8]) -> Result<Item, DecodeError>;
 pub type TimeFn<Item> = fn(&Item) -> u64;
 
 
-pub type Walked = (usize, Option<TaskStruct>);
+pub type Walked = (usize, Option<(usize, TaskStruct)>);
 
 
 pub type Member = [u32; MEMBER_WORDS];
@@ -50,3 +50,22 @@ pub type OpenFn = fn(BorrowedFd<'_>, &OsStr, OFlags) -> Result<Opened, Errno>;
 
 #[cfg(target_os = "linux")]
 pub type StatFn = fn(BorrowedFd<'_>, &OsStr) -> Result<Meta, Errno>;
+
+
+/// The type section walked once: where each wanted struct body sits.
+#[derive(Clone, Debug)]
+pub struct Parsed<'a> {
+    pub types: &'a [u8],
+    pub strings: &'a [u8],
+    pub index: Vec<usize>,
+    pub found: Vec<Option<TaskStruct>>,
+}
+
+
+/// What type a member must resolve to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rule {
+    Int(u32),
+    Pointer,
+    Struct(&'static str),
+}
