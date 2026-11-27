@@ -43,4 +43,26 @@ pub enum NdrError {
         cut: bool,
         stderr: String,
     },
+    #[error("cannot read eve.json")]
+    Eve(#[from] io::Error),
+    #[error("eve.json does not exist")]
+    EveMissing,
+    #[error("eve.json is not a regular file")]
+    EveNotRegular,
+    #[error("eve.json has more than one hard link")]
+    EveShared,
+    #[error("cannot read or write the follower state")]
+    State(#[source] io::Error),
+    #[error("the follower state is not a regular file")]
+    StateNotRegular,
+    #[error("the follower state is larger than {max_bytes} bytes")]
+    StateTooLarge { max_bytes: u64 },
+    #[error("the follower state is malformed")]
+    StateMalformed,
+    #[error("the follower state holds an impossible cursor")]
+    CursorInvalid,
+    #[error("the limits are refused: {reason}")]
+    Limits { reason: &'static str },
+    #[error("{count} files were deferred past max_files_per_tick")]
+    Deferred { count: u64 },
 }
