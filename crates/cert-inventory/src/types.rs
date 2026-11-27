@@ -27,5 +27,14 @@ pub type WaitFn = fn(std::time::Duration) -> Pin<Box<dyn Future<Output = ()>>>;
 pub type ServiceFuture<'a> = Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + 'a>>;
 
 
+/// The SIGHUP stream armed before any file is read; the reload thread takes it over once the engine exists.
+#[cfg(unix)]
+pub type ReloadSignals = signal_hook::iterator::Signals;
+
+
+#[cfg(not(unix))]
+pub struct ReloadSignals;
+
+
 /// Stops the settings file watch and joins its thread.
 pub type StopWatchFn = Box<dyn FnOnce()>;

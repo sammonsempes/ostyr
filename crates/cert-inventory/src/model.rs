@@ -110,6 +110,7 @@ pub struct ScanOutcome {
     pub private_keys_refused: usize,
     pub roots_unreached: usize,
     pub roots_refused: usize,
+    pub listing_cut: usize,
     pub errors: Vec<String>,
     pub errors_omitted: usize,
 }

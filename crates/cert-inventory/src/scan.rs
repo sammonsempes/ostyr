@@ -99,6 +99,7 @@ pub struct ScanState {
     pub private_keys_refused: usize,
     pub roots_unreached: usize,
     pub roots_refused: usize,
+    pub listing_cut: usize,
     pub errors: Vec<String>,
     pub errors_omitted: usize,
 }
@@ -164,6 +165,7 @@ pub fn scan_with(settings: &ScanSettings, before_open: fn(&Path), max_listed: us
         private_keys_refused: state.private_keys_refused,
         roots_unreached: state.roots_unreached,
         roots_refused: state.roots_refused,
+        listing_cut: state.listing_cut,
         errors: state.errors,
         errors_omitted: state.errors_omitted,
     }

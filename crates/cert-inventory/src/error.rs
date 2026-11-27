@@ -1,3 +1,4 @@
+use crate::model::StoreCounts;
 use thiserror::Error;
 use x509_parser::error::{PEMError, X509Error};
 
@@ -129,8 +130,13 @@ pub enum RoundError {
     Scan(#[from] tokio::task::JoinError),
     #[error("database: {0}")]
     Pg(#[from] core_pg::error::PgError),
-    #[error("store: {0}")]
-    Store(#[from] InventoryStoreError),
+    #[error("store of path {path_index}: {source}")]
+    Store {
+        path_index: usize,
+        counts: StoreCounts,
+        #[source]
+        source: Box<InventoryStoreError>,
+    },
 }
 
 
