@@ -23,6 +23,10 @@ pub type IdentityFn = fn(&str) -> std::io::Result<Identity>;
 pub type ExistsFn = fn(&str) -> bool;
 
 
+/// The text of a symbolic link, `None` when the path is not a link; a test double stands for a merged or a split `/usr`.
+pub type LinkFn = fn(&str) -> Option<String>;
+
+
 /// The kernel device number and the inode number of a file.
 pub type Identity = (u32, u64);
 
