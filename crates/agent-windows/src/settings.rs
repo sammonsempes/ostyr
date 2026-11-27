@@ -1,6 +1,7 @@
 use crate::defender::{DEFAULT_DEFENDER_INTERVAL_SECONDS, MIN_DEFENDER_INTERVAL_SECONDS};
 use crate::model::{Channel, KNOWN_CHANNELS, MAX_EVENTS_PER_POLL, MAX_OUTPUT_BYTES, POLL_INTERVAL_SECONDS, QUERY_DEADLINE_SECONDS};
 use crate::types::{Fingerprint, SharedObserved};
+use crate::winget::{DEFAULT_UPDATES_INTERVAL_SECONDS, MAX_UPDATES_INTERVAL_SECONDS, MIN_UPDATES_INTERVAL_SECONDS};
 use agent_channel::spool_dirs::accept_any_entries;
 use agent_channel::types::EntriesJudge;
 use core_config::error::ConfigError;
@@ -33,6 +34,7 @@ pub const NUMERIC_KEYS: &[&str] = &[
     "poll_interval_seconds",
     "batch",
     "defender_interval_seconds",
+    "updates_interval_seconds",
     "max_output_bytes",
     "deadline_seconds",
     "max_spool_bytes",
@@ -83,6 +85,7 @@ pub struct Settings {
     pub poll_interval_seconds: u64,
     pub batch: u32,
     pub defender_interval_seconds: u64,
+    pub updates_interval_seconds: u64,
     pub max_output_bytes: usize,
     pub deadline_seconds: u64,
     pub max_spool_bytes: u64,
@@ -97,6 +100,7 @@ impl Default for Settings {
             poll_interval_seconds: POLL_INTERVAL_SECONDS,
             batch: MAX_EVENTS_PER_POLL,
             defender_interval_seconds: DEFAULT_DEFENDER_INTERVAL_SECONDS,
+            updates_interval_seconds: DEFAULT_UPDATES_INTERVAL_SECONDS,
             max_output_bytes: MAX_OUTPUT_BYTES,
             deadline_seconds: QUERY_DEADLINE_SECONDS,
             max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
@@ -332,6 +336,10 @@ pub fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
             (MIN_DEFENDER_INTERVAL_SECONDS..=MAX_DEFENDER_INTERVAL_SECONDS).contains(&settings.defender_interval_seconds),
         ),
         (
+            "updates_interval_seconds",
+            (MIN_UPDATES_INTERVAL_SECONDS..=MAX_UPDATES_INTERVAL_SECONDS).contains(&settings.updates_interval_seconds),
+        ),
+        (
             "max_output_bytes",
             (MIN_OUTPUT_BYTES..=MAX_OUTPUT_BYTES).contains(&settings.max_output_bytes),
         ),
@@ -367,6 +375,7 @@ pub fn settings_state(settings: &Settings) -> ConfigState {
         ("poll_interval_seconds", settings.poll_interval_seconds.to_string()),
         ("batch", settings.batch.to_string()),
         ("defender_interval_seconds", settings.defender_interval_seconds.to_string()),
+        ("updates_interval_seconds", settings.updates_interval_seconds.to_string()),
         ("max_output_bytes", settings.max_output_bytes.to_string()),
         ("deadline_seconds", settings.deadline_seconds.to_string()),
         ("max_spool_bytes", settings.max_spool_bytes.to_string()),

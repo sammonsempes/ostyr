@@ -10,6 +10,7 @@ agent-channel = { path = "../agent-channel" }
 core-config = { path = "../core-config" }
 core-export = { path = "../core-export" }
 ecs-normalise = { path = "../ecs-normalise" }
+patch-inventory = { path = "../patch-inventory" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"

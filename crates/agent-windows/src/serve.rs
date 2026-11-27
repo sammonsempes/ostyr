@@ -4,10 +4,12 @@ use crate::cursor::{cursor_path, cursor_temporary_path};
 use crate::model::{
     PollEnv, RunRequest, KNOWN_CHANNELS, LOCK_ATTEMPTS, MAX_EVENTS_PER_POLL, MAX_OUTPUT_BYTES, QUERY_DEADLINE_SECONDS, WEVTUTIL_PATH,
 };
-use crate::round::{reload_once_per_refusal, run_round, RoundState};
+use crate::round::{reload_once_per_refusal, run_round, RoundState, WingetHooks};
 use crate::settings::{audit_file_of, check_entries, observed_load_with, open_settings_from, settings_path, validate_settings, EntryCheck};
 use crate::settings::{OpenError, Settings, SettingsError, DEFAULT_MAX_SPOOL_BYTES};
 use crate::types::{InterruptWait, Pace, RunFn, SharedObserved};
+use crate::winget_find::locate_winget;
+use crate::winget_round::current_run_id;
 use agent_channel::error::AppError;
 use agent_channel::model::DEFAULT_MAX_MESSAGE_BYTES;
 use agent_channel::spool::{suffixed, ASIDE_SUFFIX, SENDING_SUFFIX, TEMPORARY_SUFFIX};
@@ -220,7 +222,8 @@ pub fn one_round(started: &Started, env: &mut PollEnv<'_>, round: &mut RoundStat
             let polled = report.polled.len();
             let defender = report.defender;
             let defender_spool_full = report.defender_spool_full;
-            info!(polled, defender, defender_spool_full, "round done");
+            let winget = report.winget;
+            info!(polled, defender, defender_spool_full, winget, "round done");
         }
         Err(error) => {
             let category = error.to_string();
@@ -250,7 +253,10 @@ pub fn serve_rounds(started: &Started, state_dir: &Path, spool: &Path, max_round
         max_batch: MAX_EVENTS_PER_POLL,
         seen: &mut seen,
     };
-    let mut round = RoundState::default();
+    let mut round = RoundState {
+        winget: Some(production_winget()),
+        ..RoundState::default()
+    };
     let mut stopped = false;
     (0..max_rounds)
         .find_map(|_| {
@@ -258,6 +264,14 @@ pub fn serve_rounds(started: &Started, state_dir: &Path, spool: &Path, max_round
             stopped.then_some(Stop::Interrupted)
         })
         .unwrap_or(Stop::RoundCap)
+}
+
+
+pub fn production_winget() -> WingetHooks {
+    WingetHooks {
+        locate: locate_winget,
+        run_id: current_run_id,
+    }
 }
 
 

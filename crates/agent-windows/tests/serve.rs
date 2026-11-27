@@ -29,6 +29,9 @@ const OWNER_ONLY: u32 = 0o700;
 const OPEN_TO_ALL: u32 = 0o777;
 
 
+const DEFENDER_AND_WINGET_LINES: usize = 2;
+
+
 const TWO_ROUNDS: u64 = 2;
 
 
@@ -194,8 +197,9 @@ fn the_round_cap_is_a_named_error_with_its_own_exit_code() -> TestResult {
     assert!(matches!(result, Err(ServeError::RoundCap)));
     assert_eq!(exit_code(result), ExitCode::from(EXIT_ROUND_CAP));
     let spooled = fs::read_to_string(&made.spool)?;
-    assert_eq!(spooled.lines().count(), 1, "{spooled}");
+    assert_eq!(spooled.lines().count(), DEFENDER_AND_WINGET_LINES, "{spooled}");
     assert!(spooled.contains("defender_unavailable"), "{spooled}");
+    assert!(spooled.contains("windowsapps_unreadable"), "{spooled}");
     Ok(())
 }
 
@@ -226,7 +230,11 @@ fn an_interrupt_ends_the_rounds_cleanly() -> TestResult {
     assert!(result.is_ok());
     assert_eq!(exit_code(&result), ExitCode::SUCCESS);
     let spooled = fs::read_to_string(&made.spool)?;
-    assert_eq!(spooled.lines().count(), 1, "the round in flight finished its spool write: {spooled}");
+    assert_eq!(
+        spooled.lines().count(),
+        DEFENDER_AND_WINGET_LINES,
+        "the round in flight finished its spool write: {spooled}"
+    );
     Ok(())
 }
 

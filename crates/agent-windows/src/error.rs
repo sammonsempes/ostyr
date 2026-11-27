@@ -14,6 +14,8 @@ pub enum RunError {
     Reader,
     #[error("cannot create the output pipe")]
     Pipe(#[source] io::Error),
+    #[error("the job run failed")]
+    Job(#[source] sys_windows::types::ConsoleError),
 }
 
 

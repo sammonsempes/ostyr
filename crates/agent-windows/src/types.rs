@@ -37,3 +37,7 @@ pub type Pace = fn(u64) -> std::time::Duration;
 
 /// Resolves when the process is asked to stop.
 pub type InterruptWait = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>>>>;
+
+
+/// Lists a directory for the winget lookup: entries with their directory flag.
+pub type ListFn = fn(&std::path::Path) -> std::io::Result<Vec<crate::winget_find::Entry>>;

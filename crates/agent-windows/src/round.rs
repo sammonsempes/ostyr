@@ -4,6 +4,8 @@ use crate::error::PollError;
 use crate::model::{ChannelState, PollEnv, PollTotals};
 use crate::room::{fits, pending_bytes, refused_bytes};
 use crate::settings::{channels_of, observation, Observed, Settings};
+use crate::winget_find::{FindError, Located};
+use crate::winget_round::spool_winget;
 use agent_channel::spool::{append_locked, pause_between_lock_attempts};
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use std::collections::BTreeMap;
@@ -17,6 +19,17 @@ pub struct RoundState {
     pub channels: BTreeMap<&'static str, ChannelState>,
     pub defender_waited: Option<u64>,
     pub defender_blocked: bool,
+    pub winget: Option<WingetHooks>,
+    pub winget_waited: Option<u64>,
+    pub winget_blocked: bool,
+}
+
+
+/// The winget lookup and the run id source; `None` in `RoundState` disables the winget run.
+#[derive(Debug, Clone, Copy)]
+pub struct WingetHooks {
+    pub locate: fn() -> Result<Located, FindError>,
+    pub run_id: fn() -> u64,
 }
 
 
@@ -25,6 +38,7 @@ pub struct RoundReport {
     pub polled: Vec<(&'static str, Vec<PollTotals>)>,
     pub defender: bool,
     pub defender_spool_full: u64,
+    pub winget: bool,
 }
 
 
@@ -120,12 +134,36 @@ pub fn run_round(
         Some(DefenderStep::NoRoom) => round.defender_waited,
         _ => Some(next_waited(round.defender_waited, ran, snapshot.poll_interval_seconds)),
     };
+    let winget = run_winget_step(env, round, &snapshot)?;
     wait(snapshot.poll_interval_seconds);
     Ok(RoundReport {
+        winget,
         polled,
         defender: ran,
         defender_spool_full: u64::from(step.is_some_and(|found| found != DefenderStep::Appended)),
     })
+}
+
+
+/// The winget run of the round, when it is enabled and due; its wait is kept like the defender's. `true` when it ran.
+pub fn run_winget_step(env: &mut PollEnv<'_>, round: &mut RoundState, snapshot: &Settings) -> Result<bool, PollError> {
+    match round.winget {
+        Some(hooks) if defender_due(round.winget_waited, snapshot.updates_interval_seconds) => {
+            let step = spool_winget(env, &hooks, &mut round.winget_blocked)?;
+            let ran = step != DefenderStep::NoRoom;
+            round.winget_waited = if ran {
+                Some(next_waited(round.winget_waited, true, snapshot.poll_interval_seconds))
+            } else {
+                round.winget_waited
+            };
+            Ok(ran)
+        }
+        Some(_) => {
+            round.winget_waited = Some(next_waited(round.winget_waited, false, snapshot.poll_interval_seconds));
+            Ok(false)
+        }
+        None => Ok(false),
+    }
 }
 
 
