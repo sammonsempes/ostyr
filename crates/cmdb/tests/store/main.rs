@@ -905,6 +905,24 @@ fn the_conflict_status_migration_adds_the_status_and_the_duplicate_index() -> Te
 }
 
 
+#[test]
+fn the_events_write_skips_a_repeat_on_the_unique_constraint() -> TestResult {
+    assert!(APPLY_SQL.contains("ON CONFLICT ON CONSTRAINT cmdb_events_once DO NOTHING"));
+    Ok(())
+}
+
+
+#[test]
+fn the_events_migration_adds_the_unique_constraint() -> TestResult {
+    let migration = MIGRATIONS
+        .iter()
+        .find(|entry| entry.version.starts_with("007"))
+        .ok_or("no 007 migration")?;
+    assert!(migration.sql.contains("UNIQUE NULLS NOT DISTINCT (tenant, asset, kind, lifecycle)"));
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn an_overwrite_by_the_source_of_truth_at_the_cap_still_records_its_conflict() -> TestResult {
     let db = Db::default();
