@@ -1,6 +1,6 @@
 use crate::canon::canonicalise;
 use crate::config::FeedConfig;
-use crate::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_IDENTIFIER_BYTES, MAX_READ_ROWS, MAX_ROWS_PER_BATCH};
+use crate::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_IDENTIFIER_BYTES, MAX_LOGGED_FEED_NAMES, MAX_READ_ROWS, MAX_ROWS_PER_BATCH};
 use crate::model::Ioc;
 use crate::types::TtlDefaults;
 use serde_json::json;
@@ -8,6 +8,24 @@ use siem_ingest::reader_profile::pin_clause;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tracing::warn;
+
+
+pub const COUNT_ROWS: u64 = 2;
+
+
+pub const ROW_OVERHEAD: u64 = 197;
+
+
+pub const BYTES_CLAMP: u64 = u32::MAX as u64;
+
+
+pub const QUOTES: u64 = 2;
+
+
+pub const SHORT_ESCAPE: u64 = 2;
+
+
+pub const UNICODE_ESCAPE: u64 = 6;
 
 
 #[derive(Debug, Error)]
@@ -127,15 +145,93 @@ pub fn checked_column_ddl(database: &str, table: &str) -> Result<String, StoreEr
 }
 
 
+/// The one `FROM … FINAL WHERE` of the read and of the writer's key query: what the reader counts, the writer counts.
+pub fn read_source(database: &str, table: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
+         AND `checked` = 1 AND `expires_at` > toDateTime({{now:UInt32}})",
+        qualified(database, table)?
+    ))
+}
+
+
 /// One tenant's live network and domain IOCs, one more than the cap so the reader can tell a truncated list from a full one; the pins are in its `SETTINGS` clause.
 pub fn read_statement(database: &str, table: &str) -> Result<String, StoreError> {
     let pins = pin_clause(&[], MAX_READ_ROWS as u64 + 1);
     Ok(format!(
         "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
-         FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
-         AND `checked` = 1 AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
+         {} ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
+        read_source(database, table)?
+    ))
+}
+
+
+/// The keys the read would return, on the same source, for the writer's budget.
+pub fn keys_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    let pins = pin_clause(&[], MAX_READ_ROWS as u64 + 1);
+    Ok(format!(
+        "SELECT `ioc_type`, `value` {} LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
+        read_source(database, table)?
+    ))
+}
+
+
+/// The tenant's live rows of every type, one number.
+pub fn count_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    let pins = pin_clause(&[], COUNT_ROWS);
+    Ok(format!(
+        "SELECT toUInt32(count()) AS `live` FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `expires_at` > toDateTime({{now:UInt32}}) \
+         LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
         qualified(database, table)?
     ))
+}
+
+
+/// The feeds holding the most live rows of the tenant, whatever the settings say today.
+pub fn top_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    let pins = pin_clause(&[], MAX_LOGGED_FEED_NAMES as u64 + 1);
+    Ok(format!(
+        "SELECT `feed`, toUInt32(count()) AS `live` FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `expires_at` > toDateTime({{now:UInt32}}) \
+         GROUP BY `feed` ORDER BY `live` DESC, `feed` LIMIT {MAX_LOGGED_FEED_NAMES}{pins} FORMAT JSONEachRow",
+        qualified(database, table)?
+    ))
+}
+
+
+/// The bytes the read reply would hold for the same rows: the JSON size of the three strings plus a fixed overhead per row, clamped to a `UInt32`.
+pub fn bytes_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    let pins = pin_clause(&[], COUNT_ROWS);
+    Ok(format!(
+        "SELECT toUInt32(least(sum(length(toJSONString(`value`)) + length(toJSONString(`feed`)) + length(toJSONString(`feed_version`)) \
+         + {ROW_OVERHEAD}), {BYTES_CLAMP})) AS `bytes` {} LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow",
+        read_source(database, table)?
+    ))
+}
+
+
+/// The size of a string as ClickHouse writes it in `JSONEachRow`: quotes included, `/` escaped, control characters as `\u00XX`; never below the real size.
+pub fn json_len(text: &str) -> u64 {
+    text.chars().fold(QUOTES, |total, character| {
+        total
+            + match character {
+                '"' | '\\' | '/' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => SHORT_ESCAPE,
+                control if control < ' ' => UNICODE_ESCAPE,
+                '\u{2028}' | '\u{2029}' => UNICODE_ESCAPE,
+                other => other.len_utf8() as u64,
+            }
+    })
+}
+
+
+/// The bytes of one read row, the line end included: the budget and the writer both count with it.
+pub fn row_bytes(value: &str, feed: &str, version: &str) -> u64 {
+    json_len(value) + json_len(feed) + json_len(version) + ROW_OVERHEAD
+}
+
+
+/// What replacing a row already counted can add: its feed and version, whatever the old ones were.
+pub fn replacement_bytes(feed: &str, version: &str) -> u64 {
+    json_len(feed) + json_len(version)
 }
 
 

@@ -239,11 +239,10 @@ fn a_document_that_is_not_an_event_is_refused() -> TestResult {
         r#"{"Event": []}"#,
         r#"{"Event": {"Attribute": {}}}"#,
         r#"{"Event": {"Object": "x"}}"#,
-        r#"{"Event": {"Object": [{"Attribute": 3}]}}"#,
     ]
     .iter()
     .for_each(|text| assert!(matches!(parse_text(&config, text), Err(FeedError::NotAnEvent)), "{text}"));
-    assert!(matches!(parse_text(&config, "{"), Err(FeedError::Json(_))));
+    assert!(matches!(parse_text(&config, "{"), Err(FeedError::Json { .. })));
     Ok(())
 }
 

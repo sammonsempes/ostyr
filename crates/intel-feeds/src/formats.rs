@@ -1,14 +1,17 @@
 use crate::config::{FeedConfig, FeedFormat, Mapping};
 use crate::entry::build_ioc;
 use crate::error::{reason_key, EntryError, FeedError};
-use crate::limits::{MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS};
+use crate::limits::{MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ITEMS, MAX_FEED_IOCS, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS, MAX_STIX_OBJECTS};
 use crate::lines::numbered_lines;
-use crate::misp::parse_misp;
+use crate::misp::{parse_misp, NO_TLP};
 use crate::model::{Collector, FeedSummary, Ioc, RawEntry, SkipSample};
 use crate::sample::bounded_text;
+use crate::scan::{raw_elements, ScanError};
 use crate::stix::parse_pattern;
-use crate::types::{ItemHandler, LineHandler};
+use crate::types::{ItemHandler, LineHandler, Tagged};
 use csv::StringRecord;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::io::{BufRead, Read};
 use time::OffsetDateTime;
@@ -54,6 +57,9 @@ pub const COMMENT_PREFIX: char = '#';
 
 
 pub const STIX_INDICATOR: &str = "indicator";
+
+
+pub const EMPTY_DOCUMENT: &str = "empty_document";
 
 
 pub fn named(value: &str) -> Option<String> {
@@ -137,6 +143,20 @@ pub fn record(collector: &mut Collector, line: u64, outcome: Result<Vec<Ioc>, En
 }
 
 
+/// `record` after the count: an outcome that would take the feed over `MAX_FEED_IOCS` fails the feed before its IOCs are kept.
+pub fn record_bounded(collector: &mut Collector, line: u64, outcome: Result<Vec<Ioc>, EntryError>) -> Result<(), FeedError> {
+    let over = outcome
+        .as_ref()
+        .is_ok_and(|iocs| collector.iocs.len().saturating_add(iocs.len()) > MAX_FEED_IOCS);
+    if over {
+        Err(FeedError::TooManyIocs)
+    } else {
+        record(collector, line, outcome);
+        Ok(())
+    }
+}
+
+
 pub fn ignorable(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.is_empty() || trimmed.starts_with(COMMENT_PREFIX)
@@ -159,10 +179,9 @@ pub fn line_outcome(feed: &FeedConfig, now: OffsetDateTime, handler: &mut LineHa
 pub fn parse_lines(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime, handler: &mut LineHandler) -> Result<Collector, FeedError> {
     let mut collector = new_collector(feed);
     numbered_lines(reader).try_for_each(|line| {
-        line.map(|numbered| {
-            let outcome = numbered.text.and_then(|text| line_outcome(feed, now, handler, &text));
-            record(&mut collector, numbered.number, outcome);
-        })
+        let numbered = line?;
+        let outcome = numbered.text.and_then(|text| line_outcome(feed, now, handler, &text));
+        record_bounded(&mut collector, numbered.number, outcome)
     })?;
     Ok(collector)
 }
@@ -238,28 +257,84 @@ pub fn parse_crowdsec(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDa
 }
 
 
-pub fn read_document(reader: &mut dyn BufRead) -> Result<Value, FeedError> {
+/// The document's bytes, at most `MAX_DOCUMENT_BYTES`; nothing is parsed here.
+pub fn read_document(reader: &mut dyn BufRead) -> Result<Vec<u8>, FeedError> {
     let mut bytes = Vec::new();
     Read::take(&mut *reader, MAX_DOCUMENT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > MAX_DOCUMENT_BYTES {
         Err(FeedError::DocumentTooLarge)
     } else {
-        serde_json::from_slice(&bytes).map_err(FeedError::Json)
+        Ok(bytes)
     }
 }
 
 
-/// Items are numbered from 1 in the skip reports; an item over `MAX_OBJECT_BYTES` is skipped unread.
-pub fn parse_items(feed: &FeedConfig, items: &[Value], handler: &ItemHandler) -> Collector {
-    items.iter().zip(1..).fold(new_collector(feed), |mut collector, (item, number)| {
-        let outcome = if item.to_string().len() > MAX_OBJECT_BYTES {
-            Err(EntryError::ObjectTooLarge)
-        } else {
-            handler(item)
-        };
-        record(&mut collector, number, outcome);
-        collector
-    })
+/// Category, line and column only: serde's own text repeats the offending value, which is feed text.
+pub fn json_failure(error: &serde_json::Error) -> FeedError {
+    FeedError::Json {
+        category: error.classify(),
+        line: error.line(),
+        column: error.column(),
+    }
+}
+
+
+/// A scan error as a feed error; `over` is the named failure of the list that was too long.
+pub fn list_error(error: ScanError, over: FeedError) -> FeedError {
+    match error {
+        ScanError::TooMany => over,
+        ScanError::Json { category, line, column } => FeedError::Json { category, line, column },
+    }
+}
+
+
+/// The whole document as raw text, syntax checked and nothing materialised.
+pub fn root_value(bytes: &[u8]) -> Result<&RawValue, FeedError> {
+    serde_json::from_slice(bytes).map_err(|error| json_failure(&error))
+}
+
+
+/// `Some` only when the raw value opens with `open` (`[` or `{`).
+pub fn opening(raw: &RawValue, open: char) -> Option<&RawValue> {
+    raw.get().starts_with(open).then_some(raw)
+}
+
+
+/// One element, at most `MAX_OBJECT_BYTES` of text, parsed alone.
+pub fn value_of(text: &str) -> Result<Value, EntryError> {
+    if text.len() > MAX_OBJECT_BYTES {
+        Err(EntryError::ObjectTooLarge)
+    } else {
+        serde_json::from_str(text).map_err(|_not_json| EntryError::NotAnObject)
+    }
+}
+
+
+/// Items are numbered from 1 in the skip reports and handed to `handler` with their TLP floor; each is parsed alone and dropped after its handler.
+pub fn parse_raw_items(feed: &FeedConfig, items: &[Tagged], handler: &ItemHandler) -> Result<Collector, FeedError> {
+    items
+        .iter()
+        .zip(1..)
+        .try_fold(new_collector(feed), |mut collector, ((item, level), number)| {
+            let outcome = value_of(item.get()).and_then(|value| handler(&value, *level));
+            record_bounded(&mut collector, number, outcome).map(|()| collector)
+        })
+}
+
+
+/// The items with no TLP floor of their own.
+pub fn untagged<'a>(items: &[&'a RawValue]) -> Vec<Tagged<'a>> {
+    items.iter().map(|item| (*item, NO_TLP)).collect()
+}
+
+
+/// A document that yielded no IOC and no skip says so: never a silent empty round.
+pub fn flag_empty(mut collector: Collector) -> Collector {
+    let summary = &collector.summary;
+    if collector.iocs.is_empty() && summary.skipped.is_empty() && summary.unsupported == 0 {
+        collector.summary.warning = Some(EMPTY_DOCUMENT);
+    }
+    collector
 }
 
 
@@ -302,16 +377,27 @@ pub fn indicator_iocs(feed: &FeedConfig, now: OffsetDateTime, object: &Value) ->
 
 
 pub fn parse_json_list(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime) -> Result<Collector, FeedError> {
-    let document = read_document(reader)?;
-    let items = document.as_array().ok_or(FeedError::NotAnArray)?;
-    Ok(parse_items(feed, items, &|item| json_item(feed, now, item)))
+    let bytes = read_document(reader)?;
+    let root = opening(root_value(&bytes)?, '[').ok_or(FeedError::NotAnArray)?;
+    let items = raw_elements(root, MAX_DOCUMENT_ITEMS).map_err(|error| list_error(error, FeedError::TooManyObjects))?;
+    parse_raw_items(feed, &untagged(&items), &|item, _level| json_item(feed, now, item)).map(flag_empty)
+}
+
+
+#[derive(Deserialize)]
+pub struct Bundle<'a> {
+    #[serde(default, borrow)]
+    pub objects: Option<&'a RawValue>,
 }
 
 
 pub fn parse_stix(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTime) -> Result<Collector, FeedError> {
-    let bundle = read_document(reader)?;
-    let objects = bundle.get("objects").and_then(Value::as_array).ok_or(FeedError::NotABundle)?;
-    Ok(parse_items(feed, objects, &|object| indicator_iocs(feed, now, object)))
+    let bytes = read_document(reader)?;
+    let root = opening(root_value(&bytes)?, '{').ok_or(FeedError::NotABundle)?;
+    let bundle: Bundle = serde_json::from_str(root.get()).map_err(|error| json_failure(&error))?;
+    let objects = bundle.objects.and_then(|list| opening(list, '[')).ok_or(FeedError::NotABundle)?;
+    let items = raw_elements(objects, MAX_STIX_OBJECTS).map_err(|error| list_error(error, FeedError::TooManyObjects))?;
+    parse_raw_items(feed, &untagged(&items), &|object, _level| indicator_iocs(feed, now, object)).map(flag_empty)
 }
 
 
