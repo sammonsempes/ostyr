@@ -100,6 +100,67 @@ fn page_line(dir: &Path) -> String {
 }
 
 
+const SECOND_LINE: usize = 1;
+
+
+const THIRD_LINE: usize = 2;
+
+
+const DIGEST: &str = "abababababababababababababababababababababababababababababababab";
+
+
+fn traces_lines(dir: &Path, with_tls: bool) -> Result<String, TestError> {
+    fs::write(
+        dir.join("traces.yaml"),
+        format!(
+            "url: http://127.0.0.1:1\nuser: ostyr\npassword_file: {}\ndatabase: ostyr\ntable: trace_spans\n",
+            dir.join("pg.pass").display()
+        ),
+    )?;
+    fs::write(dir.join("sampling.yaml"), "default_ratio: 1.0\n")?;
+    fs::write(
+        dir.join("senders.yaml"),
+        format!("senders:\n  - name: collector\n    token_sha256: {DIGEST}\n"),
+    )?;
+    let tls = if with_tls {
+        let pair = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
+        fs::write(dir.join("server.pem"), pair.cert.pem())?;
+        private_file(&dir.join("server.key"), pair.signing_key.serialize_pem().as_bytes())?;
+        format!(
+            "  tls_certificate: {}\n  tls_key: {}\n",
+            dir.join("server.pem").display(),
+            dir.join("server.key").display()
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "  traces.settings_file: {}\n  traces.sampling_file: {}\n  otlp.senders_file: {}\n{tls}",
+        dir.join("traces.yaml").display(),
+        dir.join("sampling.yaml").display(),
+        dir.join("senders.yaml").display()
+    ))
+}
+
+
+fn serve_tls_then_interrupt(module_file: &Path) -> TestResult {
+    let mut child = Command::new(PROGRAM)
+        .arg(module_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut reader = BufReader::new(child.stdout.take().ok_or("no stdout")?);
+    let address = address_of(&mut reader)?;
+    assert!(TcpStream::connect(address).is_ok());
+    interrupt(&child)?;
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest)?;
+    assert!(child.wait()?.success(), "{rest}");
+    Ok(())
+}
+
+
 fn run_to_end(arguments: &[&Path]) -> Result<Output, TestError> {
     Ok(Command::new(PROGRAM).args(arguments).stdin(Stdio::null()).output()?)
 }
@@ -353,4 +414,55 @@ async fn a_module_file_without_a_tenant_serves_the_default_tenant() -> TestResul
     let text = fs::read_to_string(&module_file)?;
     fs::write(&module_file, text.replace("tenant: acme\n", ""))?;
     tokio::task::block_in_place(|| serve_then_interrupt(&module_file))
+}
+
+
+#[test]
+fn traces_without_each_of_its_keys_names_the_key() -> TestResult {
+    let dir = tempdir()?;
+    let module_file = write_site(dir.path(), CLOSED_PORT, "", "traces", "")?;
+    refused_with(&run_to_end(&[&module_file])?, "traces.settings_file")?;
+    let full = traces_lines(dir.path(), true)?;
+    let lines: Vec<&str> = full.lines().collect();
+    for (kept, missing) in [(SECOND_LINE, "traces.sampling_file"), (THIRD_LINE, "otlp.senders_file")] {
+        let extra: String = lines.iter().take(kept).map(|line| format!("{line}\n")).collect();
+        let partial = write_site(dir.path(), CLOSED_PORT, "", "traces", &extra)?;
+        refused_with(&run_to_end(&[&partial])?, missing)?;
+    }
+    Ok(())
+}
+
+
+#[test]
+fn traces_without_tls_is_refused_even_on_loopback() -> TestResult {
+    let dir = tempdir()?;
+    let extra = traces_lines(dir.path(), false)?;
+    let module_file = write_site(dir.path(), CLOSED_PORT, "", "traces", &extra)?;
+    refused_with(&run_to_end(&[&module_file])?, "tls_certificate")
+}
+
+
+#[test]
+fn an_invalid_senders_file_fails_the_start_without_naming_a_digest() -> TestResult {
+    let dir = tempdir()?;
+    let extra = traces_lines(dir.path(), true)?;
+    let module_file = write_site(dir.path(), CLOSED_PORT, "", "traces", &extra)?;
+    fs::write(
+        dir.path().join("senders.yaml"),
+        format!("senders:\n  - name: collector\n    token_sha256: {}\n", DIGEST.to_uppercase()),
+    )?;
+    let output = run_to_end(&[&module_file])?;
+    refused_with(&output, "senders[0].token_sha256")?;
+    assert!(!String::from_utf8(output.stderr)?.contains(&DIGEST.to_uppercase()));
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_binary_serves_traces_over_tls_and_exits_cleanly_on_the_interrupt() -> TestResult {
+    let dir = tempdir()?;
+    let (fake, ca_pem) = fake_with(accepting()).await?;
+    let extra = traces_lines(dir.path(), true)?;
+    let module_file = write_site(dir.path(), fake.port, &ca_pem, "traces", &extra)?;
+    tokio::task::block_in_place(|| serve_tls_then_interrupt(&module_file))
 }

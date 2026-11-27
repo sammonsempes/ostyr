@@ -9,4 +9,6 @@ mod permits;
 mod serving;
 mod single_read;
 mod status;
+#[cfg(unix)]
+mod traces;
 mod types;

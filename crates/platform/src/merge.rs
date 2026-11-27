@@ -1,6 +1,9 @@
 use crate::error::PlatformError;
 use crate::model::Module;
 use crate::permits::{counted, permits_of};
+use crate::traces::{
+    traces_access, traces_document, traces_router, TracesRuntime, SETTING_SENDERS_FILE, SETTING_TRACES_SAMPLING, SETTING_TRACES_SETTINGS,
+};
 use crate::types::{MigrationPlan, PageLoader, Parts, Permits};
 use alerts::settings::SETTING_PG;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
@@ -11,6 +14,7 @@ use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE a
 use cloud_posture::store::{MIGRATIONS as POSTURE_MIGRATIONS, MIGRATION_NAMESPACE as POSTURE_NAMESPACE};
 use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAMESPACE};
 use compliance::store::{MIGRATIONS as COMPLIANCE_MIGRATIONS, MIGRATION_NAMESPACE as COMPLIANCE_NAMESPACE};
+use core_api::config::{SETTING_TLS_CERTIFICATE, SETTING_TLS_KEY};
 use core_api::reload::TENANT_START_ONLY;
 use core_api::routes::core_access;
 use core_api::types::{AccessTable, SharedState};
@@ -51,15 +55,28 @@ pub const SETTING_WEIGHTS_FILE: &str = "risk.weights_file";
 pub const SETTING_PAGE_FILE: &str = "status.page_file";
 
 
-pub const BASE_START_ONLY: [&str; 4] = [SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE, SETTING_PAGE_FILE];
+pub const BASE_START_ONLY: [&str; 7] = [
+    SETTING_PG,
+    SETTING_MODULES,
+    SETTING_WEIGHTS_FILE,
+    SETTING_PAGE_FILE,
+    SETTING_TRACES_SETTINGS,
+    SETTING_TRACES_SAMPLING,
+    SETTING_SENDERS_FILE,
+];
 
 
-/// The start-only entries: the settings read at start, and the file `tenant` too while the status page is served (the page tenant was checked against it).
-pub fn start_only_keys(page_selected: bool) -> Vec<&'static str> {
+/// The TLS settings, start-only while `traces` is served: a live edit cannot take the transport away from a token.
+pub const TLS_START_ONLY: [&str; 2] = [SETTING_TLS_CERTIFICATE, SETTING_TLS_KEY];
+
+
+/// The start-only entries: the settings read at start, the file `tenant` while the status page is served (the page tenant was checked against it), and the TLS settings while traces are served.
+pub fn start_only_keys(page_selected: bool, traces_selected: bool) -> Vec<&'static str> {
     BASE_START_ONLY
         .iter()
         .copied()
         .chain(page_selected.then_some(TENANT_START_ONLY))
+        .chain(traces_selected.then_some(TLS_START_ONLY).into_iter().flatten())
         .collect()
 }
 
@@ -133,6 +150,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "grc" => Some(Module::Grc),
         "attack_paths" => Some(Module::AttackPaths),
         "playbooks" => Some(Module::Playbooks),
+        "traces" => Some(Module::Traces),
         _ => None,
     }
 }
@@ -247,6 +265,7 @@ pub fn module_router(
     permits: &Arc<Semaphore>,
     weights: Option<&Arc<ReloadEngine<Weights>>>,
     page: Option<&Arc<PageServices>>,
+    traces: Option<&TracesRuntime>,
 ) -> Result<Router<SharedState>, PlatformError> {
     match module {
         Module::Alerts => {
@@ -299,6 +318,7 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Traces => traces.ok_or(PlatformError::MissingTracesRuntime).map(|held| traces_router(held.clone())),
         Module::Status => page.ok_or(PlatformError::MissingPageFile).map(|held| {
             status_page::api::status_router(status_page::backend::pg_backend(
                 Arc::clone(engine),
@@ -338,6 +358,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Grc => grc::api::grc_access(),
         Module::AttackPaths => attack_paths::api::attack_paths_access(),
         Module::Playbooks => response_playbooks::api::playbooks_access(),
+        Module::Traces => traces_access(),
     }
 }
 
@@ -364,6 +385,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Grc => grc::api::grc_document(),
         Module::AttackPaths => attack_paths::api::attack_paths_document(),
         Module::Playbooks => response_playbooks::api::playbooks_document(),
+        Module::Traces => traces_document(),
     }
 }
 
@@ -375,11 +397,12 @@ pub fn module_parts(
     permits: &Permits,
     weights: Option<&Arc<ReloadEngine<Weights>>>,
     page: Option<&Arc<PageServices>>,
+    traces: Option<&TracesRuntime>,
 ) -> Result<Parts, PlatformError> {
     let access = merge_access(modules.iter().map(|module| module_access(*module)).collect())?;
     let router = modules.iter().try_fold(Router::new(), |merged, module| {
         let held = permits_of(permits, *module)?;
-        module_router(*module, engine, held, weights, page).map(|part| merged.merge(counted(part, *module)))
+        module_router(*module, engine, held, weights, page, traces).map(|part| merged.merge(counted(part, *module)))
     })?;
     Ok((router, access, modules.iter().map(|module| module_document(*module)).collect()))
 }

@@ -92,7 +92,7 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), TestError> {
 }
 
 
-fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
+pub fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
     let key_file = dir.path().join("store.key");
     fs::write(&key_file, [KEY_FILL; KEY_BYTES])?;
     set_mode(&key_file, OWNER_ONLY)?;
@@ -206,7 +206,7 @@ fn prepared(modules: &str, permits: &Permits) -> Result<(TempDir, ApiConfig, Par
     let page = page_file_of(&loaded.settings, &selected)?
         .map(|file| load_page_services(&file))
         .transpose()?;
-    let parts = module_parts(&selected, &engine, permits, weights.as_ref(), page.as_ref())?;
+    let parts = module_parts(&selected, &engine, permits, weights.as_ref(), page.as_ref(), None)?;
     Ok((dir, config, parts))
 }
 
@@ -219,7 +219,14 @@ pub fn unweighted_parts(modules: &str) -> Result<Result<Parts, PlatformError>, T
     fs::write(&module_file, module_text(modules, &pg_file))?;
     let selected = modules_of(&core_config::load::load_module(&module_file)?.settings)?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
-    Ok(module_parts(&selected, &Arc::new(opened), &module_semaphores(&selected), None, None))
+    Ok(module_parts(
+        &selected,
+        &Arc::new(opened),
+        &module_semaphores(&selected),
+        None,
+        None,
+        None,
+    ))
 }
 
 

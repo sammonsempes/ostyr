@@ -16,4 +16,5 @@ pub enum Module {
     Grc,
     AttackPaths,
     Playbooks,
+    Traces,
 }

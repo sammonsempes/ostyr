@@ -13,8 +13,11 @@ opentelemetry-proto = { version = "0.33", default-features = false, features = [
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 thiserror = "2"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

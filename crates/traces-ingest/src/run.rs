@@ -2,12 +2,13 @@ use crate::decode::decode_traces;
 use crate::insert::{insert_statement, stream_spans};
 use crate::model::Refusal;
 use crate::sampling::Sampling;
-use crate::settings::{load_traces_settings, to_metrics_settings};
-use crate::types::{Dropped, RefusedCounts};
+use crate::settings::{load_traces_settings, to_metrics_settings, TracesSettings};
+use crate::types::{AdmittedFn, Dropped, RefusedCounts};
 use metrics_ingest::insert::{Batch, EncodeError};
 use metrics_ingest::send::{statement_sender, SendError};
 use metrics_ingest::settings::{LoadError, SettingsError};
 use metrics_ingest::types::ElapsedFn;
+use siem_ingest::error::InsertClass;
 use std::io::{self, Write};
 use std::path::Path;
 use thiserror::Error;
@@ -37,10 +38,22 @@ pub struct RunReport {
     pub batches_planned: usize,
     pub batches_sent: usize,
     pub failed_batch: Option<usize>,
+    pub unsent_rows: usize,
+    pub failure: Option<InsertClass>,
+    pub revoked: bool,
 }
 
 
-/// Decodes for the authenticated `tenant`, encodes and sends; nothing touches the password or the network when no batch is left.
+/// The class of a refused batch, when the sender reports one.
+pub fn class_of(error: &SendError) -> Option<InsertClass> {
+    match error {
+        SendError::Failed(class) => Some(*class),
+        _ => None,
+    }
+}
+
+
+/// Decodes for the authenticated `tenant`, encodes and sends; the settings file is read once for this run.
 pub fn run_insert(
     settings_path: &Path,
     request: &[u8],
@@ -50,25 +63,47 @@ pub fn run_insert(
     elapsed: &ElapsedFn,
 ) -> Result<RunReport, RunError> {
     let traces = load_traces_settings(settings_path)?;
+    run_insert_with(&traces, request, tenant, sampling, now_nanos, elapsed, &|| true)
+}
+
+
+/// As `run_insert` on one settings snapshot; `admitted` is asked before every batch, and a refusal sends nothing more.
+pub fn run_insert_with(
+    traces: &TracesSettings,
+    request: &[u8],
+    tenant: &str,
+    sampling: &Sampling,
+    now_nanos: u64,
+    elapsed: &ElapsedFn,
+    admitted: &AdmittedFn,
+) -> Result<RunReport, RunError> {
     let statement = insert_statement(&traces.database, &traces.table)?;
     let outcome = decode_traces(request, tenant, &traces.limits, sampling, now_nanos);
     let row_count = outcome.rows.len();
-    let settings = to_metrics_settings(&traces);
+    let settings = to_metrics_settings(traces);
     let mut link = None;
     let mut planned = 0;
     let mut sent = 0;
     let mut failed = None;
+    let mut failure = None;
+    let mut revoked = false;
+    let mut unsent_rows = 0;
     let mut emit = |batch: Batch| {
         planned += 1;
+        if failed.is_none() && !admitted() {
+            revoked = true;
+            failed = Some(sent);
+        }
         let delivered = failed.is_none()
             && match link.get_or_insert_with(|| statement_sender(&settings, statement.clone(), elapsed)) {
-                Ok(send) => send(&batch.body).is_ok(),
+                Ok(send) => send(&batch.body).map_err(|error| failure = class_of(&error)).is_ok(),
                 Err(_) => false,
             };
         if delivered {
             sent += 1;
-        } else if failed.is_none() {
-            failed = Some(sent);
+        } else {
+            unsent_rows += batch.rows;
+            failed.get_or_insert(sent);
         }
     };
     let refused = stream_spans(outcome.rows, &traces.limits, now_nanos, &mut emit)?;
@@ -83,6 +118,9 @@ pub fn run_insert(
         batches_planned: planned,
         batches_sent: sent,
         failed_batch: failed,
+        unsent_rows,
+        failure,
+        revoked,
     })
 }
 
