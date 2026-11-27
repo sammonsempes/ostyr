@@ -60,10 +60,10 @@ ensure_base_images() {
     local image resolved
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
-        if ! "$LAB_DIR/images/build.sh" --check "${image%.qcow2}"; then
+        if ! "$LAB_DIR/images/build.sh" --check "${image%.qcow2}" 9>&- 8>&-; then
             exec 8>>"$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
             acquire_lock 8 "$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
-            "$LAB_DIR/images/build.sh" "${image%.qcow2}"
+            "$LAB_DIR/images/build.sh" "${image%.qcow2}" 9>&- 8>&-
             exec 8>&-
         fi
         resolved="$(newest_base "${image%.qcow2}")"
@@ -160,7 +160,7 @@ run_tofu "$task_id" apply -input=false -auto-approve -no-color -state="$lab_stat
 
 flock -u 9
 
-if [[ "$egress" == "proxy" ]]; then proxy_start "$task_id" "192.168.$subnet_octet.1"; fi
+if [[ "$egress" == "proxy" ]]; then proxy_start "$task_id" "192.168.$subnet_octet.1" 9>&- 8>&-; fi
 
 vms="$(run_tofu "$task_id" output -raw -state="$lab_state/lab.tfstate" vms)"
 printf '%s\n' "$vms" >"$lab_state/vms.txt"
@@ -172,5 +172,5 @@ done <"$lab_state/vms.txt"
 
 setup_script="$LAB_DIR/profiles/$profile.setup.sh"
 if [[ -f "$setup_script" ]]; then
-    "$setup_script" "$lab_state" "$(lab_prefix "$task_id")"
+    "$setup_script" "$lab_state" "$(lab_prefix "$task_id")" 9>&- 8>&-
 fi
