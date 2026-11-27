@@ -606,6 +606,7 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "libc",
  "pg-fake",
  "rcgen",
  "serde",

@@ -82,14 +82,23 @@ fn a_tag_naming_no_node_is_refused() -> TestResult {
 fn the_tag_file_is_loaded_strictly() -> TestResult {
     let dir = tempdir()?;
     let good = dir.path().join("good.yaml");
-    fs::write(&good, "critical:\n  - file\n")?;
+    fs::write(&good, "critical:\n  - file\ncomplete: true\n")?;
     assert_eq!(load_tags(&good)?.critical, vec!["file".to_string()]);
     let empty = dir.path().join("empty.yaml");
-    fs::write(&empty, "{}\n")?;
+    fs::write(&empty, "complete: true\n")?;
     assert!(load_tags(&empty)?.critical.is_empty());
     let unknown = dir.path().join("unknown.yaml");
-    fs::write(&unknown, "critical: []\nimportant: [a]\n")?;
+    fs::write(&unknown, "critical: []\nimportant: [a]\ncomplete: true\n")?;
     assert!(matches!(load_tags(&unknown), Err(TagsError::Config(_))));
+    let cut = dir.path().join("cut.yaml");
+    fs::write(&cut, "critical:\n  - file\n")?;
+    assert!(matches!(load_tags(&cut), Err(TagsError::Incomplete)));
+    fs::write(&cut, "critical:\n  - file\ncomplete: true")?;
+    assert!(matches!(load_tags(&cut), Err(TagsError::Incomplete)));
+    fs::write(&cut, "critical: []\nxcomplete: true\n")?;
+    assert!(matches!(load_tags(&cut), Err(TagsError::Incomplete)));
+    fs::write(&cut, "complete: true\ncomplete: true\n")?;
+    assert!(matches!(load_tags(&cut), Err(TagsError::Config(_))));
     assert!(matches!(load_tags(&dir.path().join("missing.yaml")), Err(TagsError::Config(_))));
     Ok(())
 }

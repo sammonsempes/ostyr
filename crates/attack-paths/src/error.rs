@@ -1,3 +1,4 @@
+use ad_posture::error::SnapshotError;
 use core_config::error::ConfigError;
 use core_pg::error::PgError;
 use thiserror::Error;
@@ -37,6 +38,10 @@ pub enum TagsError {
     UnknownNode { index: usize },
     #[error("tag {index}: it names a DN that more than one entry holds, so the node cannot be told apart")]
     AmbiguousNode { index: usize },
+    #[error("the tag file changed while it was read")]
+    Changed,
+    #[error("the tag file does not end with the line `complete: true`, so it may have been cut")]
+    Incomplete,
 }
 
 
@@ -77,4 +82,26 @@ pub enum PathsError {
     Graph(#[from] GraphError),
     #[error(transparent)]
     Limits(#[from] LimitsError),
+}
+
+
+/// Why one tenant produced no report in a round; the other tenants of the round still run.
+#[derive(Debug, Error)]
+pub enum TenantError {
+    #[error(transparent)]
+    File(#[from] ConfigError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("the snapshot is over its bound {bound}: {observed} observed, the limit is {limit}")]
+    SnapshotBound { bound: &'static str, observed: u64, limit: u64 },
+    #[error(transparent)]
+    Tags(#[from] TagsError),
+    #[error(transparent)]
+    Paths(#[from] PathsError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("the snapshot changed while it was read")]
+    SnapshotChanged,
+    #[error("the blocking task failed")]
+    Join(#[from] tokio::task::JoinError),
 }

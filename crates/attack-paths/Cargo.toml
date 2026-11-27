@@ -19,14 +19,18 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "signal", "macros"] }
 tracing = "0.1"
+tracing-subscriber = "0.3"
 utoipa = { version = "5", features = ["axum_extras"] }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+libc = "0.2"
 
 [dev-dependencies]
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-signal-hook = "0.4.6"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
 tokio-postgres = "0.7"

@@ -1,9 +1,14 @@
 use crate::error::TagsError;
+use crate::input::{is_unchanged, open_stamped, run_mid_read, untouched};
 use crate::model::{Graph, NodeKind, Tags, MAX_TAGS};
+use crate::types::MidRead;
 use crate::types::{ApplyResult, TagsResult};
-use core_config::load::load_file;
+use core_config::parse::{parse_document, read_text};
 use std::collections::BTreeSet;
 use std::path::Path;
+
+
+pub const TRAILER: &str = "complete: true\n";
 
 
 pub fn kind_is_critical(kind: NodeKind) -> bool {
@@ -16,8 +21,26 @@ pub fn kind_is_critical(kind: NodeKind) -> bool {
 
 /// Strict manual tag file: an unknown key is refused and the list is bounded.
 pub fn load_tags(path: &Path) -> TagsResult {
-    let tags: Tags = load_file(path)?;
+    load_tags_with(path, untouched)
+}
+
+
+/// Reads through one handle opened without following a symlink; a stamp that differs after the read refuses the file, so a half-written list is never used.
+pub fn load_tags_with(path: &Path, mid_read: MidRead) -> TagsResult {
+    let name = path.display().to_string();
+    let (mut handle, before) = open_stamped(path, &name)?;
+    let text = read_text(&mut handle, &name)?;
+    run_mid_read(mid_read, path, &name)?;
+    is_unchanged(&handle, &before, &name)?.then_some(()).ok_or(TagsError::Changed)?;
+    let body = strip_trailer(&text).ok_or(TagsError::Incomplete)?;
+    let tags: Tags = parse_document(body, &name)?;
     check_tags(tags)
+}
+
+
+/// The text before the closing line `complete: true`, which must be the last line and end with a newline; `None` for a file cut anywhere else.
+pub fn strip_trailer(text: &str) -> Option<&str> {
+    text.strip_suffix(TRAILER).filter(|body| body.is_empty() || body.ends_with('\n'))
 }
 
 

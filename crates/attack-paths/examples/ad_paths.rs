@@ -1,4 +1,4 @@
-//! Usage: `ad_paths <snapshot.json> [tags.yaml]`: users and workstations are the entry points; critical nodes are domain controllers and the tags.
+//! Usage: `ad_paths <snapshot.json> [tags.yaml]`: users and workstations are the entry points; critical nodes are domain controllers and the tags (the tag file ends with the line `complete: true`).
 use ad_posture::limits::Limits as SnapshotLimits;
 use ad_posture::snapshot::read_snapshot;
 use attack_paths::ad::{apply_ad_tags, graph_from_snapshot};
