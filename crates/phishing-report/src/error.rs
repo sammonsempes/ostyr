@@ -9,6 +9,8 @@ pub enum TriageError {
     Unparsable,
     #[error("the isolated parse ran out of memory")]
     ChildMemory,
+    #[error("the isolated child cannot be waited on")]
+    ChildUnwaitable,
     #[error("the isolated parse passed its deadline")]
     ChildDeadline,
     #[error("the isolated parse failed")]
