@@ -50,7 +50,14 @@ pub fn signal_waiter(signals: &[c_int]) -> io::Result<(Box<WaitFn<'static>>, Sig
         });
     });
     let wait = move |interval: Duration| !matches!(receiver.recv_timeout(interval), Err(RecvTimeoutError::Timeout));
-    Ok((Box::new(wait), SignalGuard { handle }))
+    Ok((
+        Box::new(wait),
+        SignalGuard {
+            handle,
+            thread: None,
+            in_flight: Arc::default(),
+        },
+    ))
 }
 
 
