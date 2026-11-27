@@ -8,10 +8,33 @@ Written for whoever writes the unit file.
 
 ## How long it can take
 
-One round is bounded, so the stop is bounded, by the sum of:
+One round is bounded, and so is the stop, but the bound is far above any real round. The worst case of one round is:
 
-- the fetch: `timeout_ms` of the fetch settings, 300 000 ms at most (the run deadline across every list);
-- the connection: `connect_timeout_secs` of the pg settings (default 5);
-- the sync: every statement is cut at `statement_timeout_secs` (default 30, at most 3600); a page of 100 observations runs a few statements and retries a version conflict up to 10 times; the number of pages is the number of observations divided by 100, at most `max_assets` plus `max_child_rows` observations.
+TimeoutStopSec >= timeout_ms / 1000 + connect_timeout_secs + pages x 2 x max_attempts x statements x (2 x statement_timeout_secs + 5)
 
-A healthy round ends in seconds. Set `TimeoutStopSec` above the worst case you accept, never below `timeout_ms / 1000 + connect_timeout_secs + statement_timeout_secs`; with the defaults `TimeoutStopSec=600` covers a round of a few dozen pages. A unit that kills the service earlier turns a stop into a cut round and can leave a partly synced CMDB, which the next round completes (a failed round logs `partly synced: pages=N created=... updated=...`).
+- `timeout_ms / 1000`: the fetch, one deadline across every list (default 60 000 ms, at most 300 000).
+- `connect_timeout_secs`: the pg connection (default 5).
+- pages = 2 x max_total_items / 100, rounded up: pods and nodes are two lists of at most `max_total_items` each (default 20 000, ceiling 200 000), and the sync applies 100 observations a page.
+- 2 x max_attempts: a page is retried on a version conflict up to `max_attempts` times (3; the store's ceiling of 10 is not reachable from the settings), and a page refused at a cap runs once more without creations.
+- statements = (max_assets / page_size + 1) + 2 x (max_child_rows / page_size + 1) + 1, with page_size 500: each attempt reloads the whole tenant (assets, keys, attributes, by pages of 500) then applies the page in one statement.
+- 2 x statement_timeout_secs + 5: one statement is cut by the server at `statement_timeout_secs` per protocol message (two windows) and by the client 5 s later (default 30, at most 3600).
+
+At the defaults (400 pages, max_attempts 3, 824 statements, 30 s) the bound is 128544065 s. At the ceilings (4000 pages, statement_timeout_secs 3600, max_attempts 3 and max_assets and max_child_rows at their defaults) the bound is 142486083900 s.
+
+Both are far above an hour, so no short `TimeoutStopSec` is safe for the worst case. Set `TimeoutStopSec=infinity` and stop a stuck unit by hand. Residual: a database that answers every statement just before its cut keeps a stop waiting for as long as it does; an operator who then sends `SIGKILL` (`systemctl kill`) cuts a round mid-statement, a statement already sent may still commit, and the next round completes the sync (a failed round logs `partly synced: pages=N created=... updated=...` or `the CMDB may hold the failed page or not`).
+
+## How long the start can take
+
+A stop asked while the service starts waits for the start (the interrupt is looked at between rounds, so the first round is then skipped): the migrations of the CMDB store run before the first round and a stop never cuts them. The worst case of the start is:
+
+start >= connect_timeout_secs + (migrations + 4) x (2 x statement_timeout_secs + 5) + (max(statement_timeout_secs, MIGRATION_DEADLINE 3600) + 5) + migrations x (migrations + 1) x (max(statement_timeout_secs, MIGRATION_DEADLINE 3600) + 5)
+
+migrations = 6 (the embedded CMDB migrations)
+
+- `connect_timeout_secs`: the pg connection (default 5).
+- (migrations + 4) reads: the isolation, shape and search-path reads, the applied-versions read, and one more applied-versions read per retry, each cut like a round statement.
+- the bootstrap script (it waits for the migration lock, cut at the larger of `statement_timeout_secs` and MIGRATION_DEADLINE, plus the 5 s query margin), then at most migrations + 1 passes of at most `migrations` migrations (a unique violation is retried once per migration, and only when another process made progress), each migration cut at the larger of `statement_timeout_secs` and MIGRATION_DEADLINE (3600 s), plus the 5 s migration margin.
+
+At the defaults (connect_timeout_secs 5, statement_timeout_secs 30) the start bound is 155670 s. At the ceilings (both 3600) the start bound is 230665 s.
+
+Both are far above an hour, so the advice is the same: `TimeoutStopSec=infinity`. In practice the start is seconds, and a start that waits long is waiting for another process's migration lock.
