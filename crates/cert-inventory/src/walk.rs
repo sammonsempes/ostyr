@@ -145,6 +145,7 @@ pub fn scan_root(settings: &ScanSettings, root: &Path, before_open: fn(&Path), m
                 .try_for_each(|_| step(settings, &mut stack, before_open, state))
                 .is_break();
             if !finished {
+                state.listing_cut += 1;
                 record_error(state, format!("listing cut at {max_listed} entries: {}", cut_path(root)));
             }
         }
