@@ -279,12 +279,10 @@ pub fn fixture() -> Result<Fixture, TestError> {
         calls: Mutex::new(Vec::new()),
         mode: Mutex::new(Mode::Answer),
     });
-    let mut built = build_state_from_files(&config, oncall_access(), vec![oncall_document()])?;
-    built
-        .catalog
-        .entry(ANALYST.to_owned())
-        .or_default()
-        .insert(PERMISSION_ONCALL_READ.to_owned());
+    let built = build_state_from_files(&config, oncall_access(), vec![oncall_document()])?;
+    let mut catalog = (*built.catalog.load_full()).clone();
+    catalog.entry(ANALYST.to_owned()).or_default().insert(PERMISSION_ONCALL_READ.to_owned());
+    built.catalog.store(Arc::new(catalog));
     let state: SharedState = Arc::new(built);
     let audit_path = config.audit_log.clone();
     let router = build_router(Arc::clone(&state), oncall_router(backend_of(&script)));

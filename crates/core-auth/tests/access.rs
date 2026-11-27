@@ -2,7 +2,7 @@
 mod types;
 
 
-use core_auth::error::AuthError;
+use core_auth::error::{AuthError, RolesError};
 use core_auth::limiter::{
     account_key, clear_failures, locked_until, record_failure, source_key, ACCOUNT_MAX_FAILURES, FAILURE_WINDOW_SECONDS, LOCKOUT_SECONDS,
     SOURCE_MAX_FAILURES,
@@ -10,7 +10,8 @@ use core_auth::limiter::{
 use core_auth::model::Account;
 use core_auth::random::os_random;
 use core_auth::rbac::{
-    builtin_catalog, check_roles, is_allowed, load_catalog, permission_set, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE,
+    add_custom_roles, builtin_catalog, check_roles, is_allowed, load_catalog, parse_catalog, permission_set, requires_mfa, CustomRole,
+    MAX_CUSTOM_ROLES, MAX_ROLES_FILE_BYTES, MAX_ROLE_NAME_BYTES, MAX_ROLE_PERMISSIONS, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE,
     PERMISSION_ATTACK_PATHS_READ, PERMISSION_AUDIT_READ, PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ,
     PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ, PERMISSION_GRC_READ, PERMISSION_ONCALL_ACKNOWLEDGE, PERMISSION_ONCALL_READ,
     PERMISSION_PLAYBOOKS_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_ROLES_MANAGE, PERMISSION_STATUS_WRITE, PERMISSION_USERS_MANAGE,
@@ -203,12 +204,156 @@ fn custom_roles_cannot_redefine_built_ins() -> TestResult {
 
 
 #[test]
-fn malformed_role_data_is_refused() -> TestResult {
-    assert!(matches!(load_catalog("[{".as_bytes()), Err(AuthError::Format(_))));
+fn malformed_role_data_is_refused_with_fixed_text() -> TestResult {
+    let marker = "SECRET-MARKER";
+    let broken = load_catalog("[{".as_bytes());
+    assert!(matches!(broken, Err(AuthError::Roles(RolesError::Syntax { .. }))));
+    let wrong_type = load_catalog(format!(r#"[{{"name":"{marker}","permissions":"{marker}"}}]"#).as_bytes());
+    let extra = load_catalog(format!(r#"[{{"name":"x","permissions":[],"{marker}":1}}]"#).as_bytes());
+    [wrong_type, extra].iter().for_each(|result| {
+        assert!(matches!(result, Err(AuthError::Roles(RolesError::Syntax { .. }))));
+        let shown = format!("{result:?}");
+        assert!(!shown.contains(marker), "{shown}");
+    });
+    let error = broken.err().ok_or("no error")?;
+    let cause = std::error::Error::source(&error).ok_or("no cause")?;
+    assert!(cause.source().is_none());
+    assert!(matches!(load_catalog("{}".as_bytes()), Err(AuthError::Roles(RolesError::Syntax { .. }))));
+    Ok(())
+}
+
+
+fn permissions_text(count: usize) -> String {
+    (0..count).map(|index| format!("\"p{index}\"")).collect::<Vec<_>>().join(",")
+}
+
+
+fn roles_text(count: usize) -> String {
+    let roles: Vec<String> = (0..count).map(|index| format!(r#"{{"name":"r{index}","permissions":[]}}"#)).collect();
+    format!("[{}]", roles.join(","))
+}
+
+
+const SECOND_LINE: usize = 2;
+
+
+const THIRD_LINE: usize = 3;
+
+
+#[test]
+fn the_roles_file_is_printable_ascii_without_any_escape() -> TestResult {
+    let cases: Vec<(&[u8], usize)> = vec![
+        (br#"[{"name":"v","permissions":["events\u002eread"]}]"#, 1),
+        (br#"[{"name":"v\"w","permissions":[]}]"#, 1),
+        ("[\n{\"name\":\"v\u{e9}\",\"permissions\":[]}]".as_bytes(), SECOND_LINE),
+        (b"[]\r\n", 1),
+        (b"[\n\n\r]", THIRD_LINE),
+        (b"[\t]", 1),
+    ];
+    cases.iter().try_for_each(|(text, line)| -> TestResult {
+        assert!(matches!(
+            load_catalog(*text),
+            Err(AuthError::Roles(RolesError::ForbiddenByte { line: found })) if found == *line
+        ));
+        assert!(matches!(parse_catalog(text), Err(AuthError::Roles(RolesError::ForbiddenByte { .. }))));
+        Ok(())
+    })?;
+    assert!(load_catalog(b"[\n{\"name\":\"v\",\"permissions\":[\"a.b\"]}\n]\n".as_slice()).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn the_roles_file_is_capped_in_size_roles_and_permissions() -> TestResult {
+    let oversize = format!("[{}]", " ".repeat(usize::try_from(MAX_ROLES_FILE_BYTES)?));
     assert!(matches!(
-        load_catalog(r#"[{"name":"x","permissions":[],"extra":1}]"#.as_bytes()),
-        Err(AuthError::Format(_))
+        load_catalog(oversize.as_bytes()),
+        Err(AuthError::Roles(RolesError::TooLarge { .. }))
     ));
+    let many_roles = roles_text(MAX_CUSTOM_ROLES + 1);
+    assert!(matches!(
+        load_catalog(many_roles.as_bytes()),
+        Err(AuthError::Roles(RolesError::TooManyRoles { .. }))
+    ));
+    let full_roles = roles_text(MAX_CUSTOM_ROLES);
+    assert_eq!(load_catalog(full_roles.as_bytes())?.len(), builtin_catalog().len() + MAX_CUSTOM_ROLES);
+    let many_permissions = format!(r#"[{{"name":"big","permissions":[{}]}}]"#, permissions_text(MAX_ROLE_PERMISSIONS + 1));
+    assert!(matches!(
+        load_catalog(many_permissions.as_bytes()),
+        Err(AuthError::Roles(RolesError::TooManyPermissions { .. }))
+    ));
+    let full_permissions = format!(r#"[{{"name":"big","permissions":[{}]}}]"#, permissions_text(MAX_ROLE_PERMISSIONS));
+    load_catalog(full_permissions.as_bytes())?;
+    let direct = vec![CustomRole {
+        name: "big".to_owned(),
+        permissions: (0..=MAX_ROLE_PERMISSIONS).map(|index| format!("p{index}")).collect(),
+    }];
+    assert!(matches!(
+        add_custom_roles(&mut builtin_catalog(), direct),
+        Err(AuthError::Roles(RolesError::TooManyPermissions { .. }))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn names_follow_the_ascii_grammar() -> TestResult {
+    let long = "a".repeat(MAX_ROLE_NAME_BYTES + 1);
+    let longest = "a".repeat(MAX_ROLE_NAME_BYTES);
+    ["", "-x", "Admin", "admin\u{200b}istrator", "a b", "\u{ff41}", long.as_str()]
+        .iter()
+        .for_each(|name| {
+            let text = serde_json::json!([{"name": name, "permissions": []}]).to_string();
+            assert!(
+                matches!(
+                    load_catalog(text.as_bytes()),
+                    Err(AuthError::Roles(
+                        RolesError::InvalidRoleName { index: 0 } | RolesError::ForbiddenByte { line: 1 }
+                    ))
+                ),
+                "{name:?}"
+            );
+        });
+    ["a", "a-b.c_d9", longest.as_str()].iter().for_each(|name| {
+        let text = serde_json::json!([{"name": name, "permissions": []}]).to_string();
+        assert!(load_catalog(text.as_bytes()).is_ok(), "{name:?}");
+    });
+    ["", "-x", "Events.Read", "events read", long.as_str()].iter().for_each(|permission| {
+        let text = serde_json::json!([{"name": "ok", "permissions": [permission]}]).to_string();
+        assert!(
+            matches!(
+                load_catalog(text.as_bytes()),
+                Err(AuthError::Roles(RolesError::InvalidPermissionName { index: 0 }))
+            ),
+            "{permission:?}"
+        );
+    });
+    Ok(())
+}
+
+
+#[test]
+fn only_the_known_policy_is_accepted() -> TestResult {
+    let typo = r#"[{"name":"ok","permissions":["events.read"]},{"name":"strict","permissions":["policy.webauthn_requried"]}]"#;
+    assert!(matches!(
+        load_catalog(typo.as_bytes()),
+        Err(AuthError::Roles(RolesError::UnknownPolicy { index: 1 }))
+    ));
+    let other = r#"[{"name":"strict","permissions":["policy.other"]}]"#;
+    assert!(matches!(
+        load_catalog(other.as_bytes()),
+        Err(AuthError::Roles(RolesError::UnknownPolicy { .. }))
+    ));
+    let good = format!(r#"[{{"name":"strict","permissions":["{POLICY_WEBAUTHN_REQUIRED}"]}}]"#);
+    assert!(load_catalog(good.as_bytes()).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_custom_role_has_its_own_error() -> TestResult {
+    let text = r#"[{"name":"ops","permissions":[]},{"name":"ops","permissions":[]}]"#;
+    assert!(matches!(load_catalog(text.as_bytes()), Err(AuthError::Roles(RolesError::DuplicateRole(name))) if name == "ops"));
     Ok(())
 }
 

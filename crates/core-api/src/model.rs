@@ -47,7 +47,7 @@ pub struct ApiState {
     pub audit: AuditLog<File>,
     pub key: ArcSwap<StoreKey>,
     pub compromised: ArcSwap<CompromisedSet>,
-    pub catalog: RoleCatalog,
+    pub catalog: ArcSwap<RoleCatalog>,
     pub random: RandomFn,
     pub clock: Clock,
     pub store_path: ArcSwap<PathBuf>,
@@ -110,6 +110,7 @@ pub struct ApiIdentity {
 pub struct StateInputs {
     pub key: Arc<StoreKey>,
     pub compromised: Arc<CompromisedSet>,
+    pub catalog: Arc<RoleCatalog>,
     pub oidc: Option<Arc<OidcRuntime>>,
 }
 
@@ -117,6 +118,7 @@ pub struct StateInputs {
 /// What one authentication step reads: taken together so it never mixes the old key with the new tenant.
 pub struct AuthInputs {
     pub compromised: Arc<CompromisedSet>,
+    pub catalog: Arc<RoleCatalog>,
     pub key: Arc<StoreKey>,
     pub identity: Arc<ApiIdentity>,
 }
@@ -239,6 +241,7 @@ pub struct ApiSettings {
     pub tls: Option<Arc<ServerConfig>>,
     pub oidc: Option<Arc<OidcRuntime>>,
     pub compromised: Arc<CompromisedSet>,
+    pub catalog: Arc<RoleCatalog>,
     pub key: Arc<StoreKey>,
     pub fingerprints: BTreeMap<String, String>,
     pub forwarders: Arc<Vec<IpNet>>,
@@ -317,6 +320,8 @@ pub struct Decision {
     pub error: Option<ApiError>,
     /// The identity in force in the critical section that validated the session; `None` when no session was validated.
     pub identity: Option<Arc<ApiIdentity>>,
+    /// The audited reason of a refusal that the status alone does not tell.
+    pub reason: Option<&'static str>,
 }
 
 
@@ -331,6 +336,7 @@ pub struct Exchange {
     pub forwarded_by: Option<String>,
     pub status: StatusCode,
     pub identity: Arc<ApiIdentity>,
+    pub reason: Option<&'static str>,
 }
 
 
