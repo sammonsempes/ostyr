@@ -20,6 +20,8 @@ pub const NOT_AFTER: u64 = 2_000;
 pub const VALID_MANIFEST: &str = "name: example-sync
 version: 1.2.3
 publisher: acme
+entry: main.py
+runtime: python3
 rights:
   - scope: devices:inventory
     access: read

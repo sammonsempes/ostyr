@@ -72,6 +72,33 @@ pub enum ConnectorError {
     #[cfg(target_os = "linux")]
     #[error(transparent)]
     WorkDir(#[from] core_config::trusted_dir::TrustedDirError),
+    #[error("the entry point is not a file of the signed package")]
+    MissingEntry,
+    #[error("the entry point cannot run: {reason}")]
+    UnsupportedEntry { reason: &'static str },
+    #[error("the request is larger than {max} bytes")]
+    RequestTooLarge { max: usize },
+    #[error("`{action}` is not an action of the manifest")]
+    UnknownAction { action: String },
+    #[error("the run could not start: {0}")]
+    Launch(#[source] io::Error),
+    #[error("a pipe or a cgroup file of the run failed: {0}")]
+    Pipe(#[source] io::Error),
+    #[error("the connector did not end before the deadline")]
+    RunTimeout,
+    #[error("the connector exited with {code:?}")]
+    RunFailed { code: Option<i32> },
+    #[error("the reply is larger than {max} bytes")]
+    ReplyTooLarge { max: usize },
+    #[error("the reply exceeds the bound on {bound}")]
+    ReplyBound { bound: &'static str },
+    #[error("the reply does not follow the reply grammar")]
+    MalformedReply,
+    #[error("the run cgroup still held processes after the kill rounds")]
+    KillFailed,
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Script(#[from] script_library::error::ScriptError),
     #[error("usage: {0}")]
     Usage(&'static str),
 }

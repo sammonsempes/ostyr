@@ -140,6 +140,11 @@ pub fn check_package(package: &Package, keys: &TrustedKeys, now: u64) -> Result<
     (manifest.publisher == key.publisher)
         .then_some(())
         .ok_or(ConnectorError::WrongPublisher)?;
+    package
+        .files
+        .contains_key(&manifest.entry)
+        .then_some(())
+        .ok_or(ConnectorError::MissingEntry)?;
     Ok(Verified {
         manifest,
         files: package.files.clone(),
@@ -154,7 +159,12 @@ pub fn verify_package(directory: &Path, keys: &TrustedKeys, now: u64) -> Result<
 
 /// The signature file text for an already read package; a manifest that does not validate is never signed.
 pub fn sign_package(package: &Package, key_id: &str, key: &SigningKey) -> Result<String, ConnectorError> {
-    parse_manifest(&package.manifest)?;
+    let manifest = parse_manifest(&package.manifest)?;
+    package
+        .files
+        .contains_key(&manifest.entry)
+        .then_some(())
+        .ok_or(ConnectorError::MissingEntry)?;
     let document = signed_document(&package.files);
     let signature = key.sign(document.as_bytes());
     Ok(format!("key {key_id}\nsignature {}\n{document}", HEXLOWER.encode(&signature.to_bytes())))
