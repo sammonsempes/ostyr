@@ -60,9 +60,53 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
         "reboot" => parse_reboot(&text),
         "open_shell" => parse_open_shell(&text),
         "kill" => parse_kill(&text),
+        "stop" => Ok(Action::Stop {
+            resume_after_seconds: u32::try_from(parse_digits(&text)?).map_err(|_| CliError::Number)?,
+        }),
+        "quarantine" => parse_quarantine(&text),
+        "restore_quarantine" => parse_restore_quarantine(&text),
+        "scan" => Ok(Action::Scan { path: text }),
         other => Err(CliError::UnknownAction(other.to_owned())),
     }
 }
+
+
+/// ASCII digits only (no sign, no space); an overflow is `Number` too.
+pub fn parse_digits(text: &str) -> Result<u64, CliError> {
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        text.parse().map_err(|_| CliError::Number)
+    } else {
+        Err(CliError::Number)
+    }
+}
+
+
+/// `<sha256>,<size>,<path>`; the path is last and taken whole.
+pub fn parse_quarantine(text: &str) -> Result<Action, CliError> {
+    match text.splitn(QUARANTINE_FIELDS, ',').collect::<Vec<&str>>().as_slice() {
+        [sha256, size, path] => Ok(Action::Quarantine {
+            path: (*path).to_owned(),
+            sha256: (*sha256).to_owned(),
+            size: parse_digits(size)?,
+        }),
+        _ => Err(CliError::Parameter("quarantine takes <sha256>,<size>,<path>")),
+    }
+}
+
+
+/// `<entry>,<sha256>`.
+pub fn parse_restore_quarantine(text: &str) -> Result<Action, CliError> {
+    match text.split(',').collect::<Vec<&str>>().as_slice() {
+        [entry, sha256] => Ok(Action::RestoreQuarantine {
+            entry: parse_digits(entry)?,
+            sha256: (*sha256).to_owned(),
+        }),
+        _ => Err(CliError::Parameter("restore_quarantine takes <entry>,<sha256>")),
+    }
+}
+
+
+pub const QUARANTINE_FIELDS: usize = 3;
 
 
 /// `<pid>,<start-ticks>,<boot-id>`.

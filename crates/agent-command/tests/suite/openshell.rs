@@ -346,6 +346,19 @@ fn every_action_name_maps_to_exactly_one_variant() -> TestResult {
             deadline: 0,
         },
         open_shell(),
+        Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS,
+        },
+        Action::Quarantine {
+            path: "/tmp/a".to_owned(),
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            size: 1,
+        },
+        Action::RestoreQuarantine {
+            entry: 1,
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        },
+        Action::Scan { path: "/tmp".to_owned() },
     ];
     assert_eq!(actions.len(), ACTION_NAMES.len());
     ACTION_NAMES.iter().for_each(|name| {

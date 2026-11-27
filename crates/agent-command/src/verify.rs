@@ -55,7 +55,11 @@ pub fn action_is_sensitive(action: &Action) -> bool {
         | Action::ChangePolicy { .. }
         | Action::InstallUpdates { .. }
         | Action::Reboot { .. }
-        | Action::OpenShell { .. } => true,
+        | Action::OpenShell { .. }
+        | Action::Stop { .. }
+        | Action::Quarantine { .. }
+        | Action::RestoreQuarantine { .. }
+        | Action::Scan { .. } => true,
     }
 }
 
@@ -73,6 +77,10 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::InstallUpdates { .. } => "install_updates",
         Action::Reboot { .. } => "reboot",
         Action::OpenShell { .. } => "open_shell",
+        Action::Stop { .. } => "stop",
+        Action::Quarantine { .. } => "quarantine",
+        Action::RestoreQuarantine { .. } => "restore_quarantine",
+        Action::Scan { .. } => "scan",
     }
 }
 

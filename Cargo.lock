@@ -144,10 +144,12 @@ dependencies = [
  "postcard",
  "proptest",
  "serde",
+ "status-page",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "unicode-general-category",
 ]
 
 [[package]]
