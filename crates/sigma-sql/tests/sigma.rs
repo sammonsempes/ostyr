@@ -117,9 +117,23 @@ fn custom_options_pick_table_and_id_column() -> TestResult {
     let options = SqlOptions {
         table: "edr_events".to_string(),
         id_column: "id".to_string(),
+        projection: None,
     };
     let sql = compile_rule(&with_condition("Image: a", "selection"), &mapping()?, &options)?;
     assert!(sql.starts_with("SELECT `id` FROM `edr_events` WHERE "));
+    Ok(())
+}
+
+
+#[test]
+fn a_projection_replaces_the_id_column_and_the_condition_stays_whole() -> TestResult {
+    let options = SqlOptions {
+        projection: Some("`a` AS `x`, `b`".to_string()),
+        ..SqlOptions::default()
+    };
+    let sql = compile_rule(&with_condition("Image: a", "selection"), &mapping()?, &options)?;
+    assert!(sql.starts_with("SELECT `a` AS `x`, `b` FROM `events` WHERE "));
+    assert!(!sql.contains("SELECT `event.id`"));
     Ok(())
 }
 
@@ -129,10 +143,12 @@ fn bad_identifiers_in_options_are_refused() -> TestResult {
     let bad_table = SqlOptions {
         table: "events; DROP".to_string(),
         id_column: "id".to_string(),
+        projection: None,
     };
     let bad_id = SqlOptions {
         table: "events".to_string(),
         id_column: "i`d".to_string(),
+        projection: None,
     };
     let text = with_condition("Image: a", "selection");
     assert!(matches!(compile_rule(&text, &mapping()?, &bad_table), Err(SigmaError::BadIdentifier(_))));
