@@ -46,6 +46,8 @@ pub enum FeedError {
     NoAllowedLicences,
     #[error("entry {name:?} uses an unsupported compression method")]
     UnsupportedMethod { name: String },
+    #[error("directory entry {name:?} carries data")]
+    DirectoryEntryWithData { name: String },
     #[error("unsafe entry name {name:?}")]
     UnsafeName { name: String },
     #[error("entry {name:?} exceeds {max} uncompressed bytes")]

@@ -14,6 +14,7 @@ use vuln_match::store::{ASSET_SQL, REBUILD_SQL, SCAN_SQL};
 pub struct FakeStore {
     pub open: Mutex<BTreeMap<String, BTreeSet<String>>>,
     pub scans: Mutex<Vec<(String, String, usize)>>,
+    pub versions: Mutex<BTreeMap<String, String>>,
     pub alerts: Mutex<BTreeSet<String>>,
     pub tenants: Mutex<BTreeSet<String>>,
     pub rebuilds: Mutex<usize>,
@@ -52,7 +53,22 @@ pub fn answer(store: &FakeStore, scope: &TenantScope, sql: &'static str, params:
                 .filter(|doc| store.no_room_package != Some(text_of(doc, "package")))
                 .map(|doc| format!("{}/{}/{}", text_of(doc, "ecosystem"), text_of(doc, "package"), text_of(doc, "record_id")))
                 .collect();
-            let no_room = docs.len() - keys.len();
+            let admitted: Vec<&Value> = docs.iter().filter(|doc| store.no_room_package != Some(text_of(doc, "package"))).collect();
+            let no_room = docs.len() - admitted.len();
+            let duplicates = admitted.len() - keys.len();
+            let mut versions = store.versions.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+            versions.retain(|key, _| !key.starts_with(&format!("{first}|")));
+            admitted.iter().for_each(|doc| {
+                let key = format!(
+                    "{first}|{}/{}/{}",
+                    text_of(doc, "ecosystem"),
+                    text_of(doc, "package"),
+                    text_of(doc, "record_id")
+                );
+                let version = text_of(doc, "installed_version").to_owned();
+                let kept = versions.get(&key).filter(|held| **held < version).cloned().unwrap_or(version);
+                versions.insert(key, kept);
+            });
             let mut open = store.open.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
             let resolved = open
                 .insert(first.to_owned(), keys.clone())
@@ -68,7 +84,7 @@ pub fn answer(store: &FakeStore, scope: &TenantScope, sql: &'static str, params:
                 resolved.to_string(),
                 no_room.to_string(),
                 "0".into(),
-                "0".into(),
+                duplicates.to_string(),
                 "0".into(),
             ]
             .to_vec()])
@@ -78,6 +94,7 @@ pub fn answer(store: &FakeStore, scope: &TenantScope, sql: &'static str, params:
             Err(PgError::InvalidTenant)
         } else {
             let open = store.open.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+            let versions = store.versions.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
             Ok(open
                 .get(first)
                 .into_iter()
@@ -85,7 +102,8 @@ pub fn answer(store: &FakeStore, scope: &TenantScope, sql: &'static str, params:
                 .map(|key| {
                     let parts: Vec<&str> = key.split('/').collect();
                     let text = |index: usize| parts.get(index).map_or(String::new(), |part| (*part).to_owned());
-                    [first.to_owned(), text(0), text(1), text(RECORD_PART), "1".to_owned(), String::new()]
+                    let version = versions.get(&format!("{first}|{key}")).map_or("1".to_owned(), Clone::clone);
+                    [first.to_owned(), text(0), text(1), text(RECORD_PART), version, String::new()]
                         .into_iter()
                         .chain(["0", "0.5", "true", "1", "1", "1"].map(str::to_owned))
                         .collect()
