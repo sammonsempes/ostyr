@@ -35,6 +35,7 @@ readonly SKIPS=(
     "sys-windows|a_parent_keeping_its_inherited_creator_owner_grant_is_refused_by_name|C:\\ is user-owned and icacls is missing"
     "sys-windows|a_locked_parent_owned_by_the_process_user_is_refused_by_name|C:\\ is user-owned and icacls is missing"
     "sys-windows|an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory|C:\\ is user-owned and icacls is missing"
+    "sys-windows|a_microsoft_file_is_judged_on_its_primary_signer_and_a_pinned_root|Wine has no Microsoft-signed executable"
     "sys-windows|the_shell_runs_inside_a_job_with_the_fixed_limits|Wine reports no job limits"
     "sys-windows|grandchildren_are_gone_after_the_close|tasklist is missing under Wine"
     "sys-windows|the_job_carries_the_kill_on_close_limit_and_no_breakaway|Wine reports no job limits"
