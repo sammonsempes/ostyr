@@ -99,7 +99,7 @@ const FAILED_CODE: i32 = 2;
 const WARNING_CODE: i32 = 1;
 
 
-const GONE_ATTEMPTS: usize = 100;
+const GONE_ATTEMPTS: usize = 6000;
 
 
 const GONE_POLL: Duration = Duration::from_millis(50);
@@ -597,11 +597,14 @@ fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn 
             repository: REPOSITORY_NAME,
             state: &setup.state,
         },
-        &Limits::default(),
-        IMPATIENT,
+        &Limits {
+            max_bytes: TINY_CAP,
+            ..Limits::default()
+        },
+        PATIENT,
         rustix::process::geteuid().as_raw(),
     );
-    assert!(matches!(outcome, Err(BorgError::Timeout)));
+    assert!(matches!(outcome, Err(BorgError::Oversized)));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
     let gone = (0..GONE_ATTEMPTS).any(|_| {
         std::thread::sleep(GONE_POLL);

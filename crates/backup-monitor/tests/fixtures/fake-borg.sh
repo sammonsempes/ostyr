@@ -11,6 +11,6 @@ sleep) sleep 60 ;;
 big) head -c 5000 /dev/zero ;;
 fail) echo "passphrase hunter2 in stderr" >&2; exit 2 ;;
 warn) cat "$dir/list.json"; exit 1 ;;
-hold) sleep 60 & echo $! > "$dir/grandchild"; exit 0 ;;
+hold) sleep 60 & echo $! > "$dir/grandchild"; head -c 5000 /dev/zero; exit 0 ;;
 *) cat "$dir/list.json" ;;
 esac
