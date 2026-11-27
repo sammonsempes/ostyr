@@ -308,7 +308,14 @@ pub async fn run_round_with(exec: Executor<'_, '_>, declarations: &Declarations,
     let mut summary = RoundSummary::default();
     for framework in &declarations.frameworks {
         let name = framework.framework.as_str();
-        match framework_round(exec, declarations, framework, (&gathered.values, gathered.beyond_cap > 0, now)).await {
+        match framework_round(
+            exec,
+            declarations,
+            framework,
+            (&gathered.values, gathered.beyond_cap > 0 || gathered.scan_cut, now),
+        )
+        .await
+        {
             Ok((outcome, changed, no_evidence)) => {
                 let (label, id) = match outcome {
                     StoreOutcome::Stored { id } => ("stored", id),
