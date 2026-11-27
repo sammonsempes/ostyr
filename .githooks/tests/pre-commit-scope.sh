@@ -117,7 +117,18 @@ mkdir -p crates/leaf/tests
 echo '{}' >crates/leaf/tests/snap.json
 git add -A
 git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@example.com commit -q -m snap
-check "package fixture" "scope full workspace (crates/leaf/tests/snap.json changes the whole workspace)" "" crates/leaf/tests/snap.json
+check "package fixture" "scope 1 packages: leaf" "" crates/leaf/tests/snap.json
+expect_log "package fixture gate" '^tool .*cov.json .* crates/leaf$'
+echo doc >crates/leaf/README.md
+echo "echo hi" >crates/leaf/tests/live.sh
+mkdir -p crates/user/tests crates/leaf/shared
+echo 'const F: &str = include_str!("../../leaf/shared/x.yaml");' >crates/user/tests/read.rs
+echo "a: 1" >crates/leaf/shared/x.yaml
+git add -A
+git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@example.com commit -q -m more
+check "package readme" "scope 1 packages: leaf" "" crates/leaf/README.md
+check "package live script" "scope 1 packages: leaf" "" crates/leaf/tests/live.sh
+check "fixture read by another package" "scope full workspace (crates/leaf/shared/x.yaml changes the whole workspace)" "" crates/leaf/shared/x.yaml
 check "empty staged set" "scope full workspace (no staged path)" ""
 check "forced full" "scope full workspace (GATE_SCOPE=full)" full crates/leaf/src/lib.rs
 expect_no_log "forced full" ' -p '
