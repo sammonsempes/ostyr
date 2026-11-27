@@ -340,6 +340,10 @@ fn the_members_and_the_populated_flag_are_read_strictly() -> TestResult {
     std::fs::write(empty.join("cgroup.procs"), "x\n")?;
     assert!(matches!(read_pids(&session), Err(CgroupError::Malformed)));
     std::fs::write(empty.join("cgroup.procs"), "0\n")?;
+    assert!(read_pids(&session)?.is_empty());
+    std::fs::write(empty.join("cgroup.procs"), "11\n0\n12\n")?;
+    assert_eq!(read_pids(&session)?.len(), TWO);
+    std::fs::write(empty.join("cgroup.procs"), "00\n")?;
     assert!(matches!(read_pids(&session), Err(CgroupError::Malformed)));
     std::fs::write(empty.join("cgroup.procs"), "1\n".repeat(MAX_SCANNED_PROCESSES + 1))?;
     assert!(matches!(read_pids(&session), Err(CgroupError::TooManyProcesses)));
@@ -778,6 +782,8 @@ fn a_group_listed_as_pid_and_as_thread_is_signalled_once() -> TestResult {
     std::fs::write(directory.path().join("root/agent/shell-a/cgroup.threads"), "x\n")?;
     assert!(matches!(member_groups(&plan, &session), Err(CgroupError::Malformed)));
     assert!(matches!(read_tids(&session), Err(CgroupError::Malformed)));
+    std::fs::write(directory.path().join("root/agent/shell-a/cgroup.threads"), "0\n7\n")?;
+    assert_eq!(read_tids(&session)?.len(), 1);
     let many = "1\n".repeat(MAX_SCANNED_PROCESSES + 1);
     std::fs::write(directory.path().join("root/agent/shell-a/cgroup.threads"), many)?;
     assert!(matches!(read_tids(&session), Err(CgroupError::TooManyProcesses)));
