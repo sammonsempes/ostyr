@@ -5,8 +5,8 @@ use linux_fim::classify::content_line;
 use linux_fim::limits::{MAX_PATH_BYTES, UNRESOLVED_NAME};
 use linux_fim::model::{FileEvidence, FimEvent, PackageOps, PackageVerdict, ToolOutput};
 use linux_fim::package::{
-    algo_name, annotate, entries_of, exit_code, manager_of, os_exists, os_identity, os_run, owners_of, parse_line, path_is_exact, run_checked,
-    run_first, run_tool, subject_of, token_ok, verdict_for, RpmLine, DPKG_DIVERT, DPKG_QUERY, DPKG_STATUS, RPM,
+    algo_name, annotate, entries_of, exit_code, manager_of, os_exists, os_identity, os_link, os_run, owners_of, parse_line, path_is_exact,
+    run_checked, run_first, run_tool, subject_of, token_ok, verdict_for, RpmLine, DPKG_DIVERT, DPKG_QUERY, DPKG_STATUS, RPM,
 };
 use linux_fim::policy::{kernel_device, policy_names};
 use rustix::process::geteuid;
@@ -42,6 +42,9 @@ const OTHER_INODE: u64 = 2;
 
 
 const OVER_TOKEN: usize = 129;
+
+
+const BIN_PREFIX_BYTES: usize = 6;
 
 
 const THREE_OWNERS: usize = 3;
@@ -172,11 +175,61 @@ fn on_nothing(_path: &str) -> bool {
 }
 
 
+fn merged_links(path: &str) -> Option<String> {
+    match path {
+        "/bin" => Some("usr/bin".to_string()),
+        "/sbin" => Some("usr/sbin".to_string()),
+        "/lib" => Some("usr/lib".to_string()),
+        _ => None,
+    }
+}
+
+
+fn split_links(_path: &str) -> Option<String> {
+    None
+}
+
+
+fn wrong_link(path: &str) -> Option<String> {
+    Some(format!("elsewhere{path}"))
+}
+
+
+fn traversing_link(_path: &str) -> Option<String> {
+    Some("usr/bin/../../etc".to_string())
+}
+
+
+fn trailing_slash_link(_path: &str) -> Option<String> {
+    Some("usr/bin/".to_string())
+}
+
+
+fn absolute_link(_path: &str) -> Option<String> {
+    Some("/usr/bin".to_string())
+}
+
+
+fn extended_link(_path: &str) -> Option<String> {
+    Some("usr/binx".to_string())
+}
+
+
+fn multilib_links(path: &str) -> Option<String> {
+    match path {
+        "/lib32" => Some("usr/lib32".to_string()),
+        "/libx32" => Some("usr/libx32".to_string()),
+        _ => None,
+    }
+}
+
+
 fn rpm_ops() -> PackageOps {
     PackageOps {
         run: scripted,
         identity: same_identity,
         exists: on_rpm,
+        link: merged_links,
     }
 }
 
@@ -655,5 +708,111 @@ fn the_real_identity_and_existence_checks_read_the_file_system() -> TestResult {
     assert!(os_exists(text));
     assert!(!os_exists("/nonexistent/f"));
     assert!(!os_exists("/dev/null/f"));
+    Ok(())
+}
+
+
+#[test]
+fn a_usrmerge_alias_of_an_unowned_path_gets_the_owners_verdict() -> TestResult {
+    let long = format!("/bin/{}", "a".repeat(MAX_PATH_BYTES - BIN_PREFIX_BYTES));
+    assert!(matches!(
+        verdict_for("/bin/aliasmatch", &evidence("/bin/aliasmatch"), &aliased_ops()),
+        PackageVerdict::Match { .. }
+    ));
+    assert!(matches!(
+        verdict_for("/usr/bin/aliasmatch", &evidence("/usr/bin/aliasmatch"), &aliased_ops()),
+        PackageVerdict::Match { .. }
+    ));
+    let owning_long = PackageOps {
+        run: long_alias_run,
+        ..aliased_ops()
+    };
+    assert_eq!(verdict_for(&long, &evidence(&long), &owning_long), PackageVerdict::Unowned);
+    Ok(())
+}
+
+
+fn aliased_run(tool: &str, args: &[&str]) -> io::Result<ToolOutput> {
+    let last = args.last().copied().unwrap_or("");
+    match (tool, last) {
+        (RPM, "/usr/bin/aliasmatch" | "/usr/opt/aliasmatch" | "/usr/lib32/aliasmatch" | "/usr/libx32/aliasmatch") => reply(0, &plain(last)),
+        (RPM, _) => reply(1, &format!("file {last} is not owned by any package\n")),
+        _ => scripted(tool, args),
+    }
+}
+
+
+fn long_alias_run(tool: &str, args: &[&str]) -> io::Result<ToolOutput> {
+    let last = args.last().copied().unwrap_or("");
+    match (tool, last.starts_with("/usr/bin/aaaa")) {
+        (RPM, true) => reply(0, &plain(last)),
+        _ => aliased_run(tool, args),
+    }
+}
+
+
+fn aliased_ops() -> PackageOps {
+    PackageOps {
+        run: aliased_run,
+        ..rpm_ops()
+    }
+}
+
+
+#[test]
+fn an_alias_is_used_only_where_the_system_links_it() -> TestResult {
+    for link in [
+        split_links,
+        wrong_link,
+        traversing_link,
+        trailing_slash_link,
+        absolute_link,
+        extended_link,
+    ] {
+        let ops = PackageOps { link, ..aliased_ops() };
+        assert_eq!(
+            verdict_for("/bin/aliasmatch", &evidence("/bin/aliasmatch"), &ops),
+            PackageVerdict::Unowned
+        );
+    }
+    let outside = verdict_for("/opt/aliasmatch", &evidence("/opt/aliasmatch"), &aliased_ops());
+    assert_eq!(outside, PackageVerdict::Unowned);
+    let owned = verdict_for("/usr/bin/aliasmatch", &evidence("/usr/bin/aliasmatch"), &aliased_ops());
+    assert!(matches!(owned, PackageVerdict::Match { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn the_multilib_directories_are_aliased_to_their_usr_twins() -> TestResult {
+    let ops = PackageOps {
+        link: multilib_links,
+        ..aliased_ops()
+    };
+    for path in ["/lib32/aliasmatch", "/libx32/aliasmatch"] {
+        assert!(matches!(verdict_for(path, &evidence(path), &ops), PackageVerdict::Match { .. }));
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_dpkg_alias_is_judged_with_its_own_diversion_check() -> TestResult {
+    let verdict = verdict_for("/usr/bin/dpkgowned", &evidence("/usr/bin/dpkgowned"), &dpkg_ops());
+    assert!(matches!(verdict, PackageVerdict::UnverifiableDigest { .. }));
+    let unowned = verdict_for("/bin/dpkgunowned", &evidence("/bin/dpkgunowned"), &dpkg_ops());
+    assert_eq!(unowned, PackageVerdict::Unowned);
+    Ok(())
+}
+
+
+#[test]
+fn the_real_link_reader_gives_the_text_or_nothing() -> TestResult {
+    assert_eq!(os_link("/nonexistent/link"), None);
+    assert_eq!(os_link("/etc/passwd"), None);
+    let root = tree()?;
+    let target = root.path().join("target");
+    std::os::unix::fs::symlink("usr/bin", &target)?;
+    assert_eq!(os_link(target.to_str().ok_or("path")?), Some("usr/bin".to_string()));
     Ok(())
 }
