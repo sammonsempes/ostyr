@@ -8,7 +8,7 @@ use core_audit::log::{genesis_log, AuditLog};
 use core_audit::model::Outcome;
 use core_audit::verify::verify;
 use core_auth::error::AuthError;
-use core_auth::limiter::{ACCOUNT_MAX_FAILURES, LOCKOUT_SECONDS, SOURCE_MAX_FAILURES};
+use core_auth::limiter::{account_key, ACCOUNT_MAX_FAILURES, LOCKOUT_SECONDS, SOURCE_MAX_FAILURES};
 use core_auth::password::{verify_password, ARGON2_ITERATIONS, ARGON2_MEMORY_KIB, ARGON2_PARALLELISM};
 use core_auth::random::os_random;
 use core_auth::rbac::{
@@ -496,6 +496,25 @@ fn custom_privileged_role_requires_mfa_without_the_administrator_name() -> TestR
         roles(&["viewer"]),
     )?;
     login(&mut state, &ctx, at(PLUS_TWO)?, &request("vera", GOOD_PASSWORD, None, SOURCE))?;
+    Ok(())
+}
+
+
+#[test]
+fn a_login_holding_a_role_absent_from_the_catalog_in_use_is_refused_and_counted() -> TestResult {
+    let mut fixture = fixture();
+    fixture.catalog = load_catalog(r#"[{"name":"viewer","permissions":["events.read"]}]"#.as_bytes())?;
+    let (mut state, _) = with_user(&fixture, "vera", &["viewer"])?;
+    fixture.catalog = builtin_catalog();
+    let sessions_before = state.sessions.len();
+    let ctx = context(&fixture);
+    assert!(matches!(
+        login(&mut state, &ctx, at(1)?, &request("vera", GOOD_PASSWORD, None, SOURCE)),
+        Err(AuthError::InvalidCredentials)
+    ));
+    assert_eq!(state.sessions.len(), sessions_before);
+    assert!(state.attempts.contains_key(&account_key("vera")));
+    assert!(audit_text(&fixture)?.contains("\"reason\":\"unknown_role\""));
     Ok(())
 }
 

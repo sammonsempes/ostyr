@@ -1317,6 +1317,78 @@ fn make_external(state: &mut State, name: &str) -> SoftResult<()> {
 }
 
 
+const UNKNOWN_ROLE_REFUSALS: usize = 3;
+
+
+fn give_unknown_role(state: &mut State, user: &str) {
+    state
+        .accounts
+        .get_mut(user)
+        .into_iter()
+        .for_each(|account| account.roles = roles(&["ghost"]));
+}
+
+
+#[test]
+fn an_account_holding_a_role_absent_from_the_catalog_gets_no_challenge_and_no_assertion_login() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let alice = token_for(&fx, &mut world, "alice", PLUS_ONE)?;
+    let mut soft = soft_passkey();
+    let credential = register(&fx, &mut world.state, &mut soft, (&alice, "alice", "laptop"), PLUS_TWO)?;
+    let (challenge, options) = webauthn_login_start(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &request("alice", GOOD_PASSWORD, SOURCE),
+    )?;
+    let response = assert_with(&mut soft, &origin(ORIGIN)?, options)?;
+    let sessions_before = world.state.sessions.len();
+    give_unknown_role(&mut world.state, "alice");
+    let assertion = Assertion {
+        challenge_id: challenge,
+        response,
+        source: SOURCE.to_owned(),
+    };
+    assert!(invalid(webauthn_login_finish(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &assertion
+    )));
+    let held = world.state.challenges.len();
+    assert!(invalid(webauthn_login_start(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &request("alice", GOOD_PASSWORD, SOURCE)
+    )));
+    assert_eq!(world.state.challenges.len(), held);
+    let (second_challenge, second_options) = passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_THREE)?, SOURCE)?;
+    let handle = BASE64URL_NOPAD.encode(user_uuid("alice").as_bytes());
+    let second_response = discoverable_assertion(&mut soft, &origin(ORIGIN)?, second_options, (&credential, Some(&handle)))?;
+    let second = Assertion {
+        challenge_id: second_challenge,
+        response: second_response,
+        source: SOURCE.to_owned(),
+    };
+    assert!(invalid(webauthn_login_finish(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &second
+    )));
+    assert_eq!(world.state.sessions.len(), sessions_before);
+    assert_eq!(audit_text(&fx)?.matches("\"reason\":\"unknown_role\"").count(), UNKNOWN_ROLE_REFUSALS);
+    Ok(())
+}
+
+
 #[test]
 fn assertions_for_an_account_that_became_external_are_refused() -> TestResult {
     let fx = fixture()?;

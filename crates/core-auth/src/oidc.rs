@@ -1,7 +1,7 @@
 use crate::error::{AuthError, OidcDenial};
 use crate::model::{Account, PendingLogin};
 use crate::random::random_array;
-use crate::rbac::{check_roles, requires_mfa};
+use crate::rbac::{check_roles, requires_mfa, webauthn_required};
 use crate::service::{check_username, join_roles, record, Context, State, ACTION_LOGIN, ANONYMOUS_ACTOR, OIDC_PREFIX};
 use crate::session::{create_session, hash_token, revoke_user_sessions};
 use crate::types::{GroupRoleMap, HttpFn, OidcClient, Parameters, PendingMap, RandomFn, ResolveFn, RoleCatalog, RoleSet};
@@ -149,6 +149,13 @@ pub fn parse_oidc_config(text: &str, file: &str, catalog: &RoleCatalog) -> Resul
     require_https(&config.issuer)?;
     require_https(&config.redirect_url)?;
     config.role_map.values().try_for_each(|roles| check_roles(catalog, roles))?;
+    config.role_map.values().flatten().try_for_each(|role| {
+        if webauthn_required(catalog, &RoleSet::from([role.clone()])) {
+            Err(AuthError::OidcWebauthnRole(role.clone()))
+        } else {
+            Ok(())
+        }
+    })?;
     Ok(config)
 }
 
@@ -331,6 +338,8 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::InsecureEndpoint => "insecure_endpoint",
         OidcDenial::UntrustedAudience => "untrusted_audience",
         OidcDenial::BadAzp => "bad_azp",
+        OidcDenial::UnknownRole => "unknown_role",
+        OidcDenial::WebauthnRequired => "webauthn_required",
     }
 }
 
@@ -480,7 +489,10 @@ pub fn audit_denial<Output: Write>(
     denial: OidcDenial,
     source: &str,
 ) -> Result<(), AuthError> {
-    let outcome = if matches!(denial, OidcDenial::Unmapped | OidcDenial::MfaMissing) {
+    let outcome = if matches!(
+        denial,
+        OidcDenial::Unmapped | OidcDenial::MfaMissing | OidcDenial::UnknownRole | OidcDenial::WebauthnRequired
+    ) {
         Outcome::Denied
     } else {
         Outcome::Failure
@@ -578,6 +590,26 @@ pub fn settle_identity<Output: Write>(
         let mapping = [("roles", join_roles(&roles)), ("groups", identity.groups.len().to_string())];
         if roles.is_empty() {
             Err(deny_external(state, context, now, &username, OidcDenial::Unmapped, &mapping, callback)?)
+        } else if check_roles(context.catalog, &roles).is_err() {
+            Err(deny_external(
+                state,
+                context,
+                now,
+                &username,
+                OidcDenial::UnknownRole,
+                &mapping,
+                callback,
+            )?)
+        } else if webauthn_required(context.catalog, &roles) {
+            Err(deny_external(
+                state,
+                context,
+                now,
+                &username,
+                OidcDenial::WebauthnRequired,
+                &mapping,
+                callback,
+            )?)
         } else if requires_mfa(context.catalog, &roles) && !mfa_satisfied(oidc.config, identity) {
             Err(deny_external(state, context, now, &username, OidcDenial::MfaMissing, &mapping, callback)?)
         } else {

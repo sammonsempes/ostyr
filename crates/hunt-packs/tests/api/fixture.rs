@@ -263,7 +263,11 @@ pub fn fixture_with(permits: usize, backend: impl FnOnce(&Arc<Db>) -> FindingsFn
     seed_accounts(&config)?;
     let db = Arc::new(Db::default());
     let semaphore = Arc::new(Semaphore::new(permits));
-    let state: SharedState = Arc::new(build_state_from_files(&config, hunts_access(), vec![hunts_document()])?);
+    let built = build_state_from_files(&config, hunts_access(), vec![hunts_document()])?;
+    let mut catalog = (*built.catalog.load_full()).clone();
+    catalog.entry(NOBODY.to_owned()).or_default();
+    built.catalog.store(Arc::new(catalog));
+    let state: SharedState = Arc::new(built);
     let router = build_router(state, hunts_router(permit_backend(Arc::clone(&semaphore), backend(&db))));
     Ok(Fixture {
         _dir: dir,

@@ -1,20 +1,23 @@
-use crate::config::{api_config, forwarders};
+use crate::config::{api_config, forwarders, roles_file};
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
 use crate::oidc::{fingerprint_salt, load_oidc};
 use crate::previous::{record_entry, record_previous, retire_previous, write_previous_key, PREVIOUS_KEY_SAVED};
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
-use crate::state::{check_store_key, clear_store_cache, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
+use crate::state::{
+    check_store_key, clear_store_cache, lock_auth, previous_key_path, read_catalog_digested, read_compromised_digested, unopened_secrets,
+};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::{append_declared, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
-use core_auth::rbac::builtin_catalog;
 use core_auth::secretbox::{open_secret, seal_secret};
+use core_auth::service::State;
+use core_auth::session::revoke_user_sessions;
 use core_auth::store::{load_store, load_store_file, read_store_locked, update_store_file};
-use core_auth::types::{AccountMap, CredentialMap, RandomFn, StoreKey};
+use core_auth::types::{AccountMap, CredentialMap, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
@@ -26,7 +29,7 @@ use data_encoding::HEXLOWER;
 use same_file::Handle;
 use secrecy::{ExposeSecret, SecretSlice};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +58,9 @@ pub const FINGERPRINT_COMPROMISED: &str = "file.compromised_list";
 pub const FINGERPRINT_OIDC: &str = "file.oidc";
 
 
+pub const FINGERPRINT_ROLES: &str = "file.roles";
+
+
 pub const FINGERPRINT_KEY: &str = "file.key_file";
 
 
@@ -80,11 +86,8 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
     let trusted = forwarders(&module)?;
     check_transport(config.address, config.tls.as_ref())?;
     let loaded_tls = config.tls.as_ref().map(load_tls).transpose()?;
-    let oidc = config
-        .oidc
-        .as_ref()
-        .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
-        .transpose()?;
+    let (catalog, roles_digest) = read_catalog_digested(roles_file(&module).as_deref())?;
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog).map(Arc::new)).transpose()?;
     let (list, list_digest) = read_compromised_digested(&config.compromised_list)?;
     let key = Arc::new(read_key_file(&config.key_file)?);
     let key_digest = key_fingerprint(&key)?;
@@ -95,8 +98,10 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         ]
     });
     let oidc_digest = oidc.iter().map(|runtime| (FINGERPRINT_OIDC.to_owned(), runtime.fingerprint.clone()));
+    let roles_fingerprint = roles_digest.into_iter().map(|digest| (FINGERPRINT_ROLES.to_owned(), digest));
     let fingerprints = tls_digests
         .chain(oidc_digest)
+        .chain(roles_fingerprint)
         .chain([
             (FINGERPRINT_COMPROMISED.to_owned(), list_digest),
             (FINGERPRINT_KEY.to_owned(), key_digest),
@@ -108,6 +113,7 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         tls: loaded_tls.map(|loaded| Arc::new(loaded.config)),
         oidc,
         compromised: Arc::new(list),
+        catalog: Arc::new(catalog),
         key,
         fingerprints,
         forwarders: Arc::new(trusted),
@@ -147,7 +153,7 @@ pub fn settings_state(settings: &ApiSettings) -> ConfigState {
 
 
 /// The module file and every file it points at: a change to any of them reloads.
-pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
+pub fn watched_files(module_file: &Path, config: &ApiConfig, roles: Option<PathBuf>) -> Vec<PathBuf> {
     let tls = config.tls.iter().flat_map(|files| [files.certificate.clone(), files.key.clone()]);
     let oidc = config
         .oidc
@@ -160,6 +166,7 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
         PathBuf::from(&config.key_file),
     ]
     .into_iter()
+    .chain(roles)
     .chain(tls)
     .chain(oidc)
     .collect()
@@ -275,6 +282,56 @@ pub fn apply_oidc(state: &SharedState, settings: &ApiSettings) {
     let current = state.oidc.load_full();
     if current.as_deref().map(|runtime| &runtime.fingerprint) != settings.oidc.as_deref().map(|runtime| &runtime.fingerprint) {
         state.oidc.store(settings.oidc.clone());
+    }
+}
+
+
+/// The permissions the roles grant under a catalog and the roles it does not know: what a session of the account can do.
+pub fn role_effect<'a>(catalog: &'a RoleCatalog, roles: &'a RoleSet) -> (BTreeSet<&'a String>, BTreeSet<&'a String>) {
+    (
+        roles.iter().filter_map(|role| catalog.get(role)).flatten().collect(),
+        roles.iter().filter(|role| !catalog.contains_key(*role)).collect(),
+    )
+}
+
+
+/// Ends every session whose account is gone or whose roles grant something else under the new catalog; returns how many accounts lost sessions.
+pub fn revoke_changed_roles(auth: &mut State, previous: &RoleCatalog, next: &RoleCatalog) -> usize {
+    let owners: BTreeSet<String> = auth.sessions.values().map(|session| session.user.clone()).collect();
+    let changed: Vec<String> = owners
+        .into_iter()
+        .filter(|user| {
+            auth.accounts
+                .get(user)
+                .is_none_or(|account| role_effect(previous, &account.roles) != role_effect(next, &account.roles))
+        })
+        .collect();
+    changed.iter().for_each(|user| {
+        revoke_user_sessions(&mut auth.sessions, user);
+    });
+    changed.len()
+}
+
+
+/// The catalog and the OIDC runtime swap together under the auth lock, so a login settling or a request authorising sees the old pair or the new one.
+pub fn switch_authorisation(state: &SharedState, context: &ReloadContext, settings: &ApiSettings) {
+    let mut auth = lock_auth(state);
+    let previous = state.catalog.swap(Arc::clone(&settings.catalog));
+    apply_oidc(state, settings);
+    let revoked = revoke_changed_roles(&mut auth, &previous, &settings.catalog);
+    drop(auth);
+    if revoked > 0 {
+        let changed = format!("roles_reloaded: the sessions of {revoked} account(s) were revoked");
+        append_declared(
+            &state.audit,
+            current_entry(
+                state,
+                reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", changed)]),
+            ),
+            &RELOAD_DECLARED_KEYS,
+        )
+        .map(|_| ())
+        .unwrap_or_else(|error| tracing::error!(%error, "cannot record the session revocation"));
     }
 }
 
@@ -611,7 +668,8 @@ pub fn rewatch(rewatch: &Rewatch, files: Vec<PathBuf>) -> Result<(), StartupErro
 
 /// Watches the files of the new configuration; a failure is logged and the old watch stays.
 pub fn follow_files(slot: &Rewatch, module_file: &Path, settings: &ApiSettings) {
-    rewatch(slot, watched_files(module_file, &settings.config)).unwrap_or_else(|error| tracing::error!(%error, "cannot follow the watched files"));
+    rewatch(slot, watched_files(module_file, &settings.config, roles_file(&settings.module)))
+        .unwrap_or_else(|error| tracing::error!(%error, "cannot follow the watched files"));
 }
 
 
@@ -625,7 +683,8 @@ pub fn subscribers(
     log: Option<LogLevelHandle>,
     start_only: BTreeMap<&'static str, Option<String>>,
 ) -> Vec<Subscriber<ApiSettings>> {
-    let (for_limits, for_oidc, for_list, for_forwarders) = (state.clone(), state.clone(), state.clone(), state.clone());
+    let (for_limits, for_list, for_forwarders) = (state.clone(), state.clone(), state.clone());
+    let (for_roles, roles_context) = (state.clone(), context.clone());
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (store_context, identity_context, key_context) = (context.clone(), context.clone(), context.clone());
     let (key_state, key_apply_state, identity_state) = (state.clone(), state.clone(), state.clone());
@@ -664,7 +723,9 @@ pub fn subscribers(
         section("forwarders", move |settings| {
             for_forwarders.forwarders.store(Arc::clone(&settings.forwarders))
         }),
-        section("oidc", move |settings| apply_oidc(&for_oidc, settings)),
+        section("authorisation", move |settings| {
+            switch_authorisation(&for_roles, &roles_context, settings)
+        }),
         section("compromised", move |settings| {
             for_list.compromised.store(Arc::clone(&settings.compromised))
         }),

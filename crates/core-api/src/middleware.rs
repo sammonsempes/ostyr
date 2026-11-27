@@ -27,6 +27,7 @@ use core_auth::random::random_array;
 use core_auth::service::{authorize, ANONYMOUS_ACTOR};
 use core_auth::session::{revoke_session, validate_session};
 use core_auth::types::{RandomFn, RoleCatalog};
+use core_auth::webauthn::holds_unknown_role;
 use core_config::reload::{bounded_text, bounded_value};
 use data_encoding::HEXLOWER;
 use http_body_util::LengthLimitError;
@@ -84,7 +85,10 @@ pub const SENDER_ACTOR_PREFIX: &str = "sender:";
 pub const ACTION_REQUEST: &str = "api.request";
 
 
-pub const REQUEST_DECLARED_KEYS: [&str; 3] = ["source", "status", "forwarded_by"];
+pub const REQUEST_DECLARED_KEYS: [&str; 4] = ["source", "status", "forwarded_by", "reason"];
+
+
+pub const REASON_UNKNOWN_ROLE: &str = "unknown_role";
 
 
 pub const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
@@ -350,6 +354,7 @@ pub fn admit(actor: &str, session: Option<Authenticated>) -> Decision {
         session,
         error: None,
         identity: None,
+        reason: None,
     }
 }
 
@@ -360,6 +365,7 @@ pub fn deny(actor: &str, error: ApiError) -> Decision {
         session: None,
         error: Some(error),
         identity: None,
+        reason: None,
     }
 }
 
@@ -381,7 +387,22 @@ pub fn check_requirement(
 }
 
 
+/// A session whose account holds a role the catalog in use lacks: refused with the audited reason, never served with the remaining permissions.
+pub fn deny_unknown_role(user: &str) -> Decision {
+    Decision {
+        reason: Some(REASON_UNKNOWN_ROLE),
+        ..deny(user, ApiError::Unauthorized)
+    }
+}
+
+
 pub fn authenticate(app: &ApiState, requirement: Option<&Requirement>, token: String, now: OffsetDateTime) -> Decision {
+    authenticate_under(app, &app.catalog.load_full(), requirement, token, now)
+}
+
+
+/// `authenticate` under one catalog snapshot, used for the unknown-role check and the permission check alike.
+pub fn authenticate_under(app: &ApiState, catalog: &RoleCatalog, requirement: Option<&Requirement>, token: String, now: OffsetDateTime) -> Decision {
     let mut auth = lock_auth(app);
     match validate_session(&mut auth.sessions, &token, now) {
         Err(_) => deny(ANONYMOUS_ACTOR, ApiError::Unauthorized),
@@ -391,8 +412,12 @@ pub fn authenticate(app: &ApiState, requirement: Option<&Requirement>, token: St
                 revoke_session(&mut auth.sessions, &token);
                 deny(&user, ApiError::Unauthorized)
             }
+            Ok(()) if holds_unknown_role(&auth.accounts, catalog, &user) => {
+                revoke_session(&mut auth.sessions, &token);
+                deny_unknown_role(&user)
+            }
             Ok(()) => {
-                let allowed = check_requirement(&mut auth, &app.catalog, requirement, &token, now);
+                let allowed = check_requirement(&mut auth, catalog, requirement, &token, now);
                 Decision {
                     actor: user.clone(),
                     session: allowed.is_ok().then(|| Authenticated {
@@ -401,6 +426,7 @@ pub fn authenticate(app: &ApiState, requirement: Option<&Requirement>, token: St
                     }),
                     error: allowed.err(),
                     identity: Some(app.identity.load_full()),
+                    reason: None,
                 }
             }
         },
@@ -457,6 +483,7 @@ pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditEr
                 ]
                 .into_iter()
                 .chain(exchange.forwarded_by.iter().map(|by| ("forwarded_by".to_owned(), bounded_value(by))))
+                .chain(exchange.reason.iter().map(|reason| ("reason".to_owned(), (*reason).to_owned())))
                 .collect(),
             },
             &REQUEST_DECLARED_KEYS,
@@ -714,6 +741,7 @@ pub async fn guard(
         forwarded_by: forwarded_by.map(|by| by.to_string()),
         status: StatusCode::OK,
         identity: identity.clone(),
+        reason: decision.reason,
     };
     let mut answered = match decision.error {
         Some(error) => audit_response(&app, template, error_response(&error)),

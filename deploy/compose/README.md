@@ -34,6 +34,10 @@ unset passphrase
 
 The output carries the TOTP secret to enrol in an authenticator. Other commands (`create`, `enrol`, `roles`) are listed by the tool's usage text.
 
+## Custom roles
+
+`config/module.yaml` has no `roles_file` setting by default: the service and `ostyr-auth` use the built-in roles only, and `tests/lab-accounts.sh` creates the four built-in roles without a roles file. To add roles, write a JSON array of `{"name", "permissions"}` (printable ASCII, no backslash, at most 64 KiB, 64 roles, 128 permissions per role; `policy.webauthn_required` is the only `policy.*` name) beside `compromised.txt`, set `settings.roles_file` in `module.yaml` (applied live, a refused file keeps the old roles), and pass the same file to `ostyr-auth` as its sixth argument, after the WebAuthn configuration file. An account that holds a role the running file lacks is refused at login and its open sessions end, so edit both processes' file together. An administrator needs TOTP or a passkey for a role granting a privileged permission, and a role with the policy needs a passkey, which this service has no route for: such a login is refused.
+
 ## Agent path
 
 Three more services carry the event path of an endpoint agent: `relay` (the only one with a published port, `7443`), `gateway` (`ostyr-event-gateway`, reachable from the relay only) and `nats` (NATS 2.15.2 with JetStream on the named volume `natsdata`, TLS, no published port, no monitoring port). An agent connects to `<host>:7443` with mutual TLS 1.3; the relay copies the bytes to the gateway (`172.29.63.11`), which checks the client certificate against `secrets/agent_ca.crt` and `config/revoked.yaml` and publishes each batch to `events.<tenant>`. `init.sh` also makes one proof agent certificate for tenant `default` and agent `lab-agent` (`secrets/agent.crt` and `secrets/agent.key`, signed by a throwaway agent CA whose key is deleted): replace `secrets/agent_ca.crt` with your own agent CA, restart `gateway`, and delete `agent.*` for real agents. An agent verifies the gateway with `secrets/ca.crt` and the name `gateway`.

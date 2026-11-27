@@ -25,8 +25,9 @@ use core_api::previous::{
 };
 use core_api::reload::{
     accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
-    replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_identity, switch_key, switch_store,
-    watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY, TENANT_START_ONLY,
+    replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_authorisation, switch_identity, switch_key,
+    switch_store, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_ROLES, FINGERPRINT_TLS_CERTIFICATE,
+    FINGERPRINT_TLS_KEY, TENANT_START_ONLY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -118,6 +119,9 @@ const WITH_CA_FILES: usize = 8;
 
 
 const TWO_RECORDS: usize = 2;
+
+
+const REFUSED_ROLES_RELOADS: usize = 3;
 
 
 const LISTED_FORWARDERS: usize = 2;
@@ -251,6 +255,7 @@ fn live_starting(dir: TempDir, extra: &str, log: Option<LogLevelHandle>, start_o
     let inputs = StateInputs {
         key: settings.key.clone(),
         compromised: settings.compromised.clone(),
+        catalog: settings.catalog.clone(),
         oidc: settings.oidc.clone(),
     };
     let state: SharedState = Arc::new(build_state(&settings.config, &inputs, extra_access(), Vec::new())?);
@@ -267,7 +272,7 @@ fn live_starting(dir: TempDir, extra: &str, log: Option<LogLevelHandle>, start_o
     let config = settings.config.clone();
     let engine = open_reload(&state, settings, &module_file, setup.clone(), log, start_only)?;
     *setup.rewatch.watching.lock().map_err(|_| "poisoned")? = Some(Watching {
-        files: watched_files(&module_file, &config),
+        files: watched_files(&module_file, &config, None),
         guard: Box::new(()),
     });
     start_first(&setup, &config, tls.clone())?;
@@ -575,7 +580,7 @@ fn the_first_load_is_handed_over_then_the_file_is_read() -> TestResult {
 fn every_file_the_module_points_at_is_watched() -> TestResult {
     let dir = tempdir()?;
     let plain = build_settings(module_in(dir.path(), "")?)?;
-    assert_eq!(watched_files(&dir.path().join("module.yaml"), &plain.config).len(), PLAIN_FILES);
+    assert_eq!(watched_files(&dir.path().join("module.yaml"), &plain.config, None).len(), PLAIN_FILES);
     write_pki(dir.path(), &pki()?)?;
     let oidc_yaml = dir.path().join("oidc.yaml");
     fs::write(&oidc_yaml, OIDC_TEXT)?;
@@ -587,13 +592,16 @@ fn every_file_the_module_points_at_is_watched() -> TestResult {
         dir.path().join("oidc.secret").display()
     );
     let without_ca = build_settings(module_in(dir.path(), &base)?)?;
-    assert_eq!(watched_files(&dir.path().join("module.yaml"), &without_ca.config).len(), WITHOUT_CA_FILES);
+    assert_eq!(
+        watched_files(&dir.path().join("module.yaml"), &without_ca.config, None).len(),
+        WITHOUT_CA_FILES
+    );
     fs::write(dir.path().join("ca.pem"), pki()?.certificate)?;
     let with_ca = build_settings(module_in(
         dir.path(),
         &format!("{base}  oidc_ca_file: {}\n", dir.path().join("ca.pem").display()),
     )?)?;
-    assert_eq!(watched_files(&dir.path().join("module.yaml"), &with_ca.config).len(), WITH_CA_FILES);
+    assert_eq!(watched_files(&dir.path().join("module.yaml"), &with_ca.config, None).len(), WITH_CA_FILES);
     assert!(with_ca.fingerprints.contains_key(FINGERPRINT_OIDC));
     Ok(())
 }
@@ -720,6 +728,221 @@ fn a_new_compromised_list_applies_and_a_missing_one_is_refused() -> TestResult {
     fs::remove_file(running.dir.path().join("compromised.txt"))?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
     assert!(running.state.compromised.load().contains("differentpassword"));
+    Ok(())
+}
+
+
+const BREAKGLASS_ROLES: &str = r#"[{"name":"breakglass","permissions":["policy.webauthn_required","events.read"]}]"#;
+
+
+const VIEWER_ROLES: &str = r#"[{"name":"viewer","permissions":["events.read"]}]"#;
+
+
+#[test]
+fn a_roles_file_is_swapped_live_and_a_bad_one_keeps_the_old_catalog() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, BREAKGLASS_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    assert!(running.state.catalog.load().contains_key("breakglass"));
+    assert!(running.state.catalog.load().contains_key("administrator"));
+    fs::write(&roles, VIEWER_ROLES)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert!(running.state.catalog.load().contains_key("viewer"));
+    assert!(!running.state.catalog.load().contains_key("breakglass"));
+    fs::write(&roles, "not json")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    fs::write(&roles, r#"[{"name":"reader","permissions":[]}]"#)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    fs::remove_file(&roles)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    assert!(running.state.catalog.load().contains_key("viewer"));
+    let denied = audit_records(running.dir.path())?
+        .iter()
+        .filter(|record| field(record, "outcome") == "denied")
+        .count();
+    assert_eq!(denied, REFUSED_ROLES_RELOADS);
+    Ok(())
+}
+
+
+#[test]
+fn dropping_the_roles_setting_returns_to_the_built_in_catalog_and_the_file_is_watched() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, BREAKGLASS_ROLES)?;
+    let extra = format!("  roles_file: {}\n", roles.display());
+    let settings = build_settings(module_in(dir.path(), &extra)?)?;
+    assert!(settings.fingerprints.contains_key(FINGERPRINT_ROLES));
+    assert_eq!(FINGERPRINT_ROLES, "file.roles");
+    assert!(watched_files(&dir.path().join("module.yaml"), &settings.config, Some(roles.clone())).contains(&roles));
+    let running = live_with(tempdir()?, "", None)?;
+    assert!(!running.state.catalog.load().contains_key("breakglass"));
+    let other = tempdir()?;
+    let plain = build_settings(module_in(other.path(), "")?)?;
+    assert!(!plain.fingerprints.contains_key(FINGERPRINT_ROLES));
+    Ok(())
+}
+
+
+const MAX_ROLES_PROBE: usize = 65;
+
+
+const LABEL_CHARS: usize = 80;
+
+
+const GIANT_ROLES_BYTES: usize = 16_777_216;
+
+
+fn refused_roles_text(text: &str) -> Result<bool, TestError> {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    fs::write(&roles, text)?;
+    let refused = matches!(reload(&running.engine), ReloadOutcome::Refused { .. });
+    Ok(refused && running.state.catalog.load().contains_key("viewer"))
+}
+
+
+#[test]
+fn a_roles_file_over_the_caps_or_the_grammar_is_refused_and_the_old_catalog_kept() -> TestResult {
+    let many = format!(
+        "[{}]",
+        (0..MAX_ROLES_PROBE)
+            .map(|index| format!(r#"{{"name":"r{index}","permissions":[]}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let huge = format!("[{}]", " ".repeat(usize::try_from(core_auth::rbac::MAX_ROLES_FILE_BYTES)? + 1));
+    let giant = format!("[{}]", " ".repeat(GIANT_ROLES_BYTES));
+    [
+        r#"[{"name":"strict","permissions":["policy.webauthn_requried"]}]"#,
+        r#"[{"name":"ops","permissions":[]},{"name":"ops","permissions":[]}]"#,
+        r#"[{"name":"-x","permissions":[]}]"#,
+        r#"[{"name":"","permissions":[]}]"#,
+        "[{\"name\":\"admin\u{200b}istrator\",\"permissions\":[]}]",
+        many.as_str(),
+        huge.as_str(),
+        giant.as_str(),
+    ]
+    .iter()
+    .try_for_each(|text| {
+        assert!(refused_roles_text(text)?, "{}", text.chars().take(LABEL_CHARS).collect::<String>());
+        Ok::<(), TestError>(())
+    })?;
+    Ok(())
+}
+
+
+fn open_session(running: &Live, user: &str, roles: &[&str]) -> TestResult {
+    let mut auth = running.state.auth.lock().map_err(|_| "poisoned")?;
+    auth.accounts.insert(
+        user.to_owned(),
+        core_auth::model::Account {
+            username: user.to_owned(),
+            password_hash: "!external".to_owned(),
+            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+            totp: None,
+            sessions_valid_after: None,
+        },
+    );
+    core_auth::session::create_session(&mut auth.sessions, user, time::OffsetDateTime::now_utc(), core_auth::random::os_random)?;
+    Ok(())
+}
+
+
+fn open_sessions(running: &Live) -> Result<Vec<String>, TestError> {
+    let auth = running.state.auth.lock().map_err(|_| "poisoned")?;
+    Ok(auth.sessions.values().map(|session| session.user.clone()).collect())
+}
+
+
+#[test]
+fn a_roles_reload_revokes_the_sessions_whose_grants_changed_and_audits_it() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    open_session(&running, "vera", &["viewer"])?;
+    open_session(&running, "bob", &["reader"])?;
+    open_session(&running, "dave", &["viewer", "reader"])?;
+    fs::write(
+        &roles,
+        r#"[{"name":"viewer","permissions":["events.read"]},{"name":"extra","permissions":[]}]"#,
+    )?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    let mut kept = open_sessions(&running)?;
+    kept.sort();
+    assert_eq!(kept, ["bob", "dave", "vera"]);
+    fs::write(
+        &roles,
+        r#"[{"name":"viewer","permissions":["events.read","alerts.read","policy.webauthn_required"]}]"#,
+    )?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(open_sessions(&running)?, ["bob"]);
+    let recorded: Vec<String> = audit_records(running.dir.path())?
+        .iter()
+        .map(|record| diff_of(record).to_owned())
+        .collect();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|diff| diff.contains("roles_reloaded") && diff.contains("2 account"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_roles_reload_revokes_sessions_of_a_dropped_role_and_of_an_unknown_account() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    open_session(&running, "vera", &["viewer"])?;
+    open_session(&running, "bob", &["reader"])?;
+    running.state.auth.lock().map_err(|_| "poisoned")?.accounts.remove("bob");
+    fs::write(&roles, "[]")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert!(open_sessions(&running)?.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_revocation_with_a_failing_audit_still_revokes_and_is_only_logged() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    open_session(&running, "vera", &["viewer"])?;
+    fs::write(&roles, "[]")?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    running.state.audit.state.lock().map_err(|_| "poisoned")?.poisoned = true;
+    switch_authorisation(&running.state, &test_context(), &settings);
+    assert!(open_sessions(&running)?.is_empty());
+    assert!(!running.state.catalog.load().contains_key("viewer"));
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_that_leaves_the_roles_alone_revokes_nothing_and_swaps_the_catalog_with_the_oidc_runtime() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    open_session(&running, "vera", &["viewer"])?;
+    rewrite(&running, &format!("  roles_file: {}\n  log_level: warn\n", roles.display()))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(open_sessions(&running)?, ["vera"]);
+    assert!(running.state.catalog.load().contains_key("viewer"));
+    assert!(audit_records(running.dir.path())?
+        .iter()
+        .all(|record| !diff_of(record).contains("roles_reloaded")));
     Ok(())
 }
 
@@ -1284,7 +1507,7 @@ fn the_file_watch_needs_its_engine_and_reports_unwatchable_directories() -> Test
     assert!(matches!(rewatch(&running.setup.rewatch, missing), Err(StartupError::Watch(_))));
     let settings = build_settings(load_module(&running.module_file)?)?;
     follow_files(&empty, &running.module_file, &settings);
-    assert!(rewatch(&running.setup.rewatch, watched_files(&running.module_file, &settings.config)).is_ok());
+    assert!(rewatch(&running.setup.rewatch, watched_files(&running.module_file, &settings.config, None)).is_ok());
     Ok(())
 }
 
@@ -1942,7 +2165,7 @@ fn a_key_rewritten_in_place_is_rotated_and_the_same_bytes_are_not() -> TestResul
 fn the_key_file_is_watched() -> TestResult {
     let running = live("")?;
     let settings = build_settings(load_module(&running.module_file)?)?;
-    assert!(watched_files(&running.module_file, &settings.config).contains(&running.dir.path().join("store.key")));
+    assert!(watched_files(&running.module_file, &settings.config, None).contains(&running.dir.path().join("store.key")));
     Ok(())
 }
 
@@ -2088,6 +2311,7 @@ fn a_store_with_one_unreadable_secret_among_readable_ones_is_refused_at_startup_
     let inputs = StateInputs {
         key: settings.key.clone(),
         compromised: settings.compromised.clone(),
+        catalog: settings.catalog.clone(),
         oidc: settings.oidc.clone(),
     };
     let refused = build_state(&settings.config, &inputs, extra_access(), Vec::new())
@@ -2110,6 +2334,7 @@ fn a_key_that_does_not_decrypt_the_store_is_refused_at_startup_naming_the_previo
     let inputs = StateInputs {
         key: settings.key.clone(),
         compromised: settings.compromised.clone(),
+        catalog: settings.catalog.clone(),
         oidc: settings.oidc.clone(),
     };
     let refused = build_state(&settings.config, &inputs, extra_access(), Vec::new())
@@ -2343,6 +2568,7 @@ fn restarted(running: &Live) -> Result<ApiState, StartupError> {
     let inputs = StateInputs {
         key: settings.key.clone(),
         compromised: settings.compromised.clone(),
+        catalog: settings.catalog.clone(),
         oidc: settings.oidc.clone(),
     };
     build_state(&settings.config, &inputs, extra_access(), Vec::new())

@@ -36,12 +36,13 @@ async fn serve_api(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let listener = new_listener();
     let (engine, _pg_file) = open_pg_engine_from(module_file, &loaded, listener, ACTOR)?;
     let backend = pg_backend(Arc::new(engine), Arc::new(Semaphore::new(MAX_CONNECTIONS)));
-    let mut built = build_state_from_files(&config, oncall_access(), vec![oncall_document()])?;
-    built
-        .catalog
+    let built = build_state_from_files(&config, oncall_access(), vec![oncall_document()])?;
+    let mut catalog = (*built.catalog.load_full()).clone();
+    catalog
         .entry(PROOF_ROLE.to_owned())
         .or_default()
         .insert(PERMISSION_ONCALL_READ.to_owned());
+    built.catalog.store(Arc::new(catalog));
     let state: SharedState = Arc::new(built);
     serve(&config, build_router(state, oncall_router(backend)), ServerHandle::new()).await?;
     Ok(())
