@@ -1,17 +1,18 @@
 use crate::config::{validate_taxii, FeedConfig, TaxiiConfig};
 use crate::error::{EntryError, TaxiiError};
-use crate::formats::{indicator_iocs, new_collector, record};
+use crate::files::read_trusted;
+use crate::formats::{indicator_iocs, new_collector, record, value_of};
 use crate::limits::{
-    CURSOR_SKEW_SECONDS, MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_TAXII_HEADER_BYTES, MAX_TAXII_IOCS, MAX_TAXII_NEXT_BYTES,
-    MAX_TAXII_OBJECTS_PER_PAGE, TAXII_ACCEPT, TAXII_DATE_HEADER,
+    CURSOR_SKEW_SECONDS, MAX_DOCUMENT_BYTES, MAX_TAXII_HEADER_BYTES, MAX_TAXII_IOCS, MAX_TAXII_NEXT_BYTES, MAX_TAXII_OBJECTS_PER_PAGE, TAXII_ACCEPT,
+    TAXII_DATE_HEADER,
 };
 use crate::model::{Collector, FeedSummary, Ioc};
+use crate::scan::{raw_elements, ScanError};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use core_pg::password::{read_limited, read_password};
+use core_pg::password::read_password;
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use serde_json::Value;
 use siem_ingest::clickhouse::{new_agent, MAX_CA_BYTES};
 use siem_ingest::settings::is_loopback_http;
 use std::io::{self, Read};
@@ -115,45 +116,6 @@ pub struct Envelope<'a> {
 }
 
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ScanState {
-    pub depth: usize,
-    pub in_string: bool,
-    pub escaped: bool,
-    pub commas: usize,
-}
-
-
-/// Counts the commas of the top-level array byte by byte, so a page of tiny objects is refused before any element is materialised.
-pub fn scan_byte(state: ScanState, byte: u8) -> Result<ScanState, TaxiiError> {
-    if state.in_string {
-        Ok(ScanState {
-            escaped: !state.escaped && byte == b'\\',
-            in_string: state.escaped || byte != b'"',
-            ..state
-        })
-    } else {
-        match byte {
-            b'"' => Ok(ScanState { in_string: true, ..state }),
-            b'[' | b'{' => Ok(ScanState {
-                depth: state.depth.saturating_add(1),
-                ..state
-            }),
-            b']' | b'}' => Ok(ScanState {
-                depth: state.depth.saturating_sub(1),
-                ..state
-            }),
-            b',' if state.depth == 1 && state.commas + 1 >= MAX_TAXII_OBJECTS_PER_PAGE => Err(TaxiiError::TooManyObjects),
-            b',' if state.depth == 1 => Ok(ScanState {
-                commas: state.commas + 1,
-                ..state
-            }),
-            _ => Ok(state),
-        }
-    }
-}
-
-
 /// Category, line and column only: serde's own text repeats the offending value, which is server text.
 pub fn envelope_error(error: serde_json::Error) -> TaxiiError {
     TaxiiError::Envelope {
@@ -167,20 +129,17 @@ pub fn envelope_error(error: serde_json::Error) -> TaxiiError {
 /// The elements of `objects`, as raw text, once their count is known to be within `MAX_TAXII_OBJECTS_PER_PAGE`.
 pub fn page_objects(raw: Option<&RawValue>) -> Result<Vec<&RawValue>, TaxiiError> {
     raw.map_or(Ok(Vec::new()), |objects| {
-        objects.get().bytes().try_fold(ScanState::default(), scan_byte)?;
-        serde_json::from_str(objects.get()).map_err(envelope_error)
+        raw_elements(objects, MAX_TAXII_OBJECTS_PER_PAGE).map_err(|error| match error {
+            ScanError::TooMany => TaxiiError::TooManyObjects,
+            ScanError::Json { category, line, column } => TaxiiError::Envelope { category, line, column },
+        })
     })
 }
 
 
 /// One object: over `MAX_OBJECT_BYTES` it is skipped unread; otherwise the STIX indicator path decides.
 pub fn object_iocs(feed: &FeedConfig, now: OffsetDateTime, text: &str) -> Result<Vec<Ioc>, EntryError> {
-    if text.len() > MAX_OBJECT_BYTES {
-        Err(EntryError::ObjectTooLarge)
-    } else {
-        let object: Value = serde_json::from_str(text).map_err(|_not_json| EntryError::NotAnObject)?;
-        indicator_iocs(feed, now, &object)
-    }
+    value_of(text).and_then(|object| indicator_iocs(feed, now, &object))
 }
 
 
@@ -420,7 +379,7 @@ pub fn taxii_agent(config: &TaxiiConfig) -> Result<Agent, TaxiiError> {
     let pem = config
         .ca_file
         .as_deref()
-        .map(|path| read_limited(path, MAX_CA_BYTES).map_err(TaxiiError::CaFile))
+        .map(|path| read_trusted(path, MAX_CA_BYTES).map_err(TaxiiError::CaFile))
         .transpose()?;
     new_agent(pem.as_deref().map(Vec::as_slice), !is_loopback_http(&config.api_root)).map_err(TaxiiError::Agent)
 }
