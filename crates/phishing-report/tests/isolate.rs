@@ -3,20 +3,21 @@
 use data_encoding::BASE64_MIME;
 use phishing_report::error::TriageError;
 use phishing_report::isolate::{
-    child_command, decide, default_isolation, default_isolation_from, exit_code, parse_child_main, payload, read_capped, reap, run_child_process,
-    send_output, spawn_job, triage_isolated, write_payload, ChildRequest, Isolation, CHILD_ARGUMENT, EXIT_FAILED, EXIT_TOO_LARGE, EXIT_UNPARSABLE,
-    PRLIMIT_PROGRAM, REQUEST_LINE_BYTES,
+    await_exit, child_command, decide, default_isolation, default_isolation_from, exit_code, kill_group, parse_child_main, payload, read_capped,
+    require_waitable, run_child_process, run_child_process_with, send_output, settle, sigchld_ignored, spawn_job, stop, triage_isolated,
+    write_payload, ChildRequest, Isolation, CHILD_ARGUMENT, EXIT_FAILED, EXIT_TOO_LARGE, EXIT_UNPARSABLE, PRLIMIT_PROGRAM, REQUEST_LINE_BYTES,
 };
 use phishing_report::limits::Limits;
 use phishing_report::model::{ReporterPolicy, Triage};
 use phishing_report::policy::{reporter_policy, MAX_DOMAIN_BYTES, MAX_INTERNAL_DOMAINS};
 use phishing_report::triage::triage_with;
 use phishing_report::types::Job;
+use rustix::process::Pid;
 use std::ffi::OsStr;
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, LazyLock};
 use tempfile::TempDir;
 use tracing::Dispatch;
@@ -177,7 +178,7 @@ fn run_fake(body: &str, limits: &Limits, payload: Vec<u8>) -> Result<Result<Tria
         payload,
         limits,
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     ))
 }
 
@@ -320,6 +321,7 @@ fn exit_codes_cover_every_variant() -> Result<(), Box<dyn std::error::Error>> {
         TriageError::ChildMemory,
         TriageError::ChildDeadline,
         TriageError::ChildFailed,
+        TriageError::ChildUnwaitable,
         TriageError::ChildOutput,
         TriageError::ChildProgram,
         TriageError::LimitsRefused,
@@ -558,7 +560,7 @@ fn a_fake_child_with_a_valid_record_is_accepted() -> Result<(), Box<dyn std::err
         b"x".to_vec(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(result, Ok(Triage::default()));
     Ok(())
@@ -672,7 +674,7 @@ fn a_failing_pipe_read_and_a_missing_program_are_child_failures() -> Result<(), 
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (failing_reader, spawn_job),
+        (failing_reader, spawn_job, kill_group),
     );
     assert_eq!(failed, Err(TriageError::ChildFailed));
     let missing = run_child_process(
@@ -680,21 +682,136 @@ fn a_failing_pipe_read_and_a_missing_program_are_child_failures() -> Result<(), 
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(missing, Err(TriageError::ChildFailed));
     Ok(())
 }
 
 
+struct Held(Child);
+
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let killed = self.0.kill();
+        let reaped = self.0.wait();
+        tracing::debug!(?killed, ?reaped, "a held test child was killed and reaped");
+    }
+}
+
+
+const NOT_OUR_CHILD: i32 = 1;
+
+
+fn not_our_child() -> Result<Pid, Box<dyn std::error::Error>> {
+    Ok(Pid::from_raw(NOT_OUR_CHILD).ok_or("pid 1")?)
+}
+
+
 #[test]
-fn reap_returns_none_while_the_child_runs() -> Result<(), Box<dyn std::error::Error>> {
+fn await_exit_reads_the_exit_without_reaping() -> Result<(), Box<dyn std::error::Error>> {
     LazyLock::force(&ANCHOR);
-    let mut child = Command::new("/bin/sleep").arg("30").stdin(Stdio::null()).spawn()?;
-    assert!(reap(&mut child, FEW_POLLS)?.is_none());
-    child.kill()?;
-    assert!(reap(&mut child, MANY_POLLS)?.is_some());
-    assert!(reap(&mut child, 0)?.is_none());
+    let mut held = Held(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()).spawn()?);
+    let pid = Pid::from_child(&held.0);
+    assert!(!await_exit(pid, FEW_POLLS)?);
+    held.0.kill()?;
+    assert!(await_exit(pid, MANY_POLLS)?);
+    assert!(await_exit(pid, 0).is_ok_and(|exited| !exited));
+    assert!(held.0.wait()?.signal().is_some());
+    assert!(await_exit(not_our_child()?, 1).is_err());
+    Ok(())
+}
+
+
+fn marker_path(prefix: &str, pid: Pid) -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_phish_triage")).with_file_name(format!("t979b-{prefix}-{}", pid.as_raw_nonzero()))
+}
+
+
+fn record_marker(prefix: &str, pid: Pid, text: &str) {
+    let written = std::fs::write(marker_path(prefix, pid), text);
+    tracing::debug!(?written, "a kill marker was written");
+}
+
+
+fn recording_kill(pid: Pid) {
+    record_marker("kill", pid, "called");
+}
+
+
+#[test]
+fn a_waitid_error_signals_nothing_on_either_path() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let marker = marker_path("kill", not_our_child()?);
+    std::fs::remove_file(&marker).or_else(|error| if error.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(error) })?;
+    let mut held = Held(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()).spawn()?);
+    let settled = settle(not_our_child()?, &mut held.0, b"", (FAST_GRACE_MILLIS, recording_kill));
+    assert_eq!(settled, Err(TriageError::ChildUnwaitable));
+    let stopped = stop(not_our_child()?, &mut held.0, TriageError::ChildDeadline, recording_kill);
+    assert_eq!(stopped, Err(TriageError::ChildUnwaitable));
+    assert!(!marker.exists());
+    assert!(held.0.try_wait()?.is_none());
+    Ok(())
+}
+
+
+fn status_file(dir: &Path, name: &str, text: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+
+#[test]
+fn the_sigchld_disposition_is_read_from_the_status_file() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let dir = work_dir()?;
+    let set = status_file(dir.path(), "set", "Name:\tx\nSigIgn:\t0000000000010000\n")?;
+    let clear = status_file(dir.path(), "clear", "SigIgn:\t0000000000000001\n")?;
+    let none = status_file(dir.path(), "none", "Name:\tx\n")?;
+    let bad = status_file(dir.path(), "bad", "SigIgn:\tzz\n")?;
+    assert_eq!(sigchld_ignored(&set), Ok(true));
+    assert_eq!(sigchld_ignored(&clear), Ok(false));
+    assert_eq!(sigchld_ignored(&none), Err(TriageError::ChildUnwaitable));
+    assert_eq!(sigchld_ignored(&bad), Err(TriageError::ChildUnwaitable));
+    assert_eq!(sigchld_ignored(&dir.path().join("absent")), Err(TriageError::ChildUnwaitable));
+    assert_eq!(sigchld_ignored(Path::new("/proc/self/status")), Ok(false));
+    assert_eq!(require_waitable(&clear), Ok(()));
+    assert_eq!(require_waitable(&set), Err(TriageError::ChildUnwaitable));
+    assert_eq!(require_waitable(&none), Err(TriageError::ChildUnwaitable));
+    Ok(())
+}
+
+
+#[test]
+fn a_run_with_sigchld_ignored_is_refused_before_any_spawn() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let dir = work_dir()?;
+    let mail = dir.path().join("mail.eml");
+    std::fs::write(&mail, SMALL_MAIL)?;
+    let marker = dir.path().join("spawned");
+    let script = install_script(dir.path(), "marker.sh", &format!("echo x > {}", marker.display()))?;
+    let ignored = status_file(dir.path(), "ignored", "SigIgn:\t0000000000010000\n")?;
+    let refused = run_child_process_with(
+        &ignored,
+        Command::new(script),
+        b"x".to_vec(),
+        &limits_for_fakes(),
+        (FAST_GRACE_MILLIS, (read_capped, spawn_job, kill_group)),
+    );
+    assert_eq!(refused, Err(TriageError::ChildUnwaitable));
+    assert!(!marker.exists());
+    let output = Command::new("/usr/bin/env")
+        .arg("--ignore-signal=CHLD")
+        .arg(example_program()?)
+        .arg(&mail)
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("ChildUnwaitable"));
+    assert!(output.stdout.is_empty());
+    let normal = Command::new(example_program()?).arg(&mail).output()?;
+    assert!(normal.status.success());
     Ok(())
 }
 
@@ -714,7 +831,7 @@ fn a_refused_helper_thread_is_a_child_failure() -> Result<(), Box<dyn std::error
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, failing_spawner),
+        (read_capped, failing_spawner, kill_group),
     );
     assert_eq!(result, Err(TriageError::ChildFailed));
     Ok(())
@@ -763,7 +880,7 @@ fn logged_flows() -> Result<(), Box<dyn std::error::Error>> {
         Vec::new(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     assert_eq!(absent, Err(TriageError::ChildFailed));
     assert_eq!(
@@ -858,7 +975,7 @@ fn run_leaving_a_group(tail: &str) -> Result<GroupRun, Box<dyn std::error::Error
         b"x".to_vec(),
         &limits_for_fakes(),
         FAST_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     );
     let text = std::fs::read_to_string(&note)?;
     let fields: Vec<&str> = text.split_whitespace().collect();
@@ -892,4 +1009,49 @@ fn a_child_leaving_a_background_process_in_its_group_is_swept_on_every_exit_path
         assert!(run.gone, "the background process survived: {tail}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+
+const ZOMBIE_STATE: &str = "Z";
+
+
+fn is_zombie(pid: Pid) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+        .is_ok_and(|text| text.rsplit(')').next().and_then(|rest| rest.split_whitespace().next()) == Some(ZOMBIE_STATE))
+}
+
+
+fn kill_recording_a_zombie(pid: Pid) {
+    record_marker("zombie", pid, &is_zombie(pid).to_string());
+    kill_group(pid);
+}
+
+
+#[test]
+fn the_group_is_killed_while_the_exited_child_is_still_a_zombie() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let dir = work_dir()?;
+    let record = dir.path().join("record.json");
+    std::fs::write(&record, serde_json::to_string(&Triage::default())?)?;
+    let note = dir.path().join("note");
+    let script = install_script(
+        dir.path(),
+        "zombie.sh",
+        &format!("echo $$ > {}\nexec /bin/cat {}", note.display(), record.display()),
+    )?;
+    let result = run_child_process(
+        Command::new(script),
+        b"x".to_vec(),
+        &limits_for_fakes(),
+        FAST_GRACE_MILLIS,
+        (read_capped, spawn_job, kill_recording_a_zombie),
+    );
+    assert_eq!(result, Ok(Triage::default()));
+    let pid = Pid::from_raw(std::fs::read_to_string(&note)?.trim().parse()?).ok_or("no pid")?;
+    assert_eq!(
+        std::fs::read_to_string(marker_path("zombie", pid))?,
+        "true",
+        "the group kill must run before the child is reaped"
+    );
+    Ok(())
 }

@@ -18,6 +18,10 @@ pub type SpawnFn = fn(Job) -> io::Result<()>;
 
 
 #[cfg(unix)]
+pub type GroupKillFn = fn(rustix::process::Pid);
+
+
+#[cfg(unix)]
 pub type SerializeFn = fn(&ChildRequest) -> serde_json::Result<Vec<u8>>;
 
 

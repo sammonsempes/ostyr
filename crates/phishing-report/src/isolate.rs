@@ -5,14 +5,15 @@ use crate::limits::{check_child_limits, Limits};
 use crate::model::{ReporterPolicy, Triage};
 use crate::policy::check_policy;
 use crate::triage::triage_with;
-use crate::types::{Job, ReadFn, SerializeFn, SpawnFn};
+use crate::types::{GroupKillFn, Job, ReadFn, SerializeFn, SpawnFn};
 use core_config::trusted_program::open_trusted_program;
-use rustix::process::{geteuid, kill_process, kill_process_group, Pid, Signal};
+use rustix::process::{geteuid, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -47,6 +48,21 @@ pub const REAP_GRACE_MILLIS: u64 = 2_000;
 const NEW_PROCESS_GROUP: i32 = 0;
 
 
+pub const PROC_STATUS: &str = "/proc/self/status";
+
+
+pub const MAX_STATUS_BYTES: u64 = 1_048_576;
+
+
+pub const SIGCHLD_NUMBER: u32 = 17;
+
+
+pub const HEX_RADIX: u32 = 16;
+
+
+const SIGIGN_PREFIX: &str = "SigIgn:";
+
+
 const PROFILE_VARIABLE: &str = "LLVM_PROFILE_FILE";
 
 
@@ -72,6 +88,7 @@ pub fn exit_code(error: TriageError) -> u8 {
         TriageError::TooLarge => EXIT_TOO_LARGE,
         TriageError::Unparsable => EXIT_UNPARSABLE,
         TriageError::ChildMemory
+        | TriageError::ChildUnwaitable
         | TriageError::ChildDeadline
         | TriageError::ChildFailed
         | TriageError::ChildOutput
@@ -203,20 +220,12 @@ pub fn triage_isolated(
         bytes,
         limits,
         REAP_GRACE_MILLIS,
-        (read_capped, spawn_job),
+        (read_capped, spawn_job, kill_group),
     )
 }
 
 
-pub fn kill_all(pid: Pid) {
-    let group = kill_process_group(pid, Signal::KILL);
-    let process = kill_process(pid, Signal::KILL);
-    let outcome = format!("group {group:?}, process {process:?}");
-    debug!(outcome, "the child was killed");
-}
-
-
-/// Kills what the child left in its process group; the child is already reaped, so only the group is signalled.
+/// Kills what the child left in its process group; the exited child is still a zombie, so the pgid cannot be recycled.
 pub fn kill_group(pid: Pid) {
     let group = kill_process_group(pid, Signal::KILL);
     let outcome = format!("{group:?}");
@@ -264,26 +273,66 @@ fn converse(streams: (ChildStdin, ChildStdout), bytes: Vec<u8>, limits: &Limits,
 }
 
 
-/// Waits for the child in bounded polls; `None` when it is still running after `polls`.
-pub fn reap(child: &mut Child, polls: u64) -> io::Result<Option<ExitStatus>> {
+/// Whether the child has exited, read without reaping it: the zombie keeps its pid and process group; an error means the pid is not ours to signal.
+pub fn exited(pid: Pid) -> io::Result<bool> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    waitid(WaitId::Pid(pid), options).map(|status| status.is_some()).map_err(io::Error::from)
+}
+
+
+/// Waits for the exit in bounded polls without reaping; `false` when the child still runs after `polls`.
+pub fn await_exit(pid: Pid, polls: u64) -> io::Result<bool> {
     (0..polls)
-        .find_map(|_| match child.try_wait() {
-            Ok(None) => {
+        .find_map(|_| match exited(pid) {
+            Ok(false) => {
                 thread::sleep(Duration::from_millis(REAP_POLL_MILLIS));
                 None
             }
             other => Some(other),
         })
-        .unwrap_or(Ok(None))
+        .unwrap_or(Ok(false))
 }
 
 
-fn stop(pid: Pid, child: &mut Child, error: TriageError) -> Result<Triage, TriageError> {
-    kill_all(pid);
+/// The deadline path: signals only a leader that `waitid` still shows (running or zombie), then reaps; an error signals nothing.
+pub fn stop(pid: Pid, child: &mut Child, error: TriageError, group_kill: GroupKillFn) -> Result<Triage, TriageError> {
+    let present = exited(pid).map_err(|failure| {
+        let kind = format!("{:?}", failure.kind());
+        warn!(kind, "the child cannot be waited on, nothing is signalled");
+        TriageError::ChildUnwaitable
+    })?;
+    debug!(present, "the child was present before the kill");
+    group_kill(pid);
+    let killed = child.kill();
+    let kill_outcome = format!("{:?}", killed.as_ref().err().map(io::Error::kind));
+    debug!(kill_outcome, "the child was killed");
     let waited = child.wait();
     let outcome = format!("{:?}", waited.as_ref().err().map(io::Error::kind));
     debug!(outcome, "the killed child was reaped");
     Err(error)
+}
+
+
+/// True when the `SigIgn` mask of the status file at `status` has SIGCHLD set; a file or mask that cannot be read is `ChildUnwaitable`.
+pub fn sigchld_ignored(status: &Path) -> Result<bool, TriageError> {
+    let mut text = String::new();
+    File::open(status)
+        .and_then(|file| file.take(MAX_STATUS_BYTES).read_to_string(&mut text))
+        .or(Err(TriageError::ChildUnwaitable))?;
+    let mask = text
+        .lines()
+        .find_map(|line| line.strip_prefix(SIGIGN_PREFIX))
+        .ok_or(TriageError::ChildUnwaitable)?;
+    let bits = u64::from_str_radix(mask.trim(), HEX_RADIX).or(Err(TriageError::ChildUnwaitable))?;
+    Ok(bits & (1 << (SIGCHLD_NUMBER - 1)) != 0)
+}
+
+
+/// Refuses to run when SIGCHLD is ignored: the leader would be reaped by the kernel and its pid could be reused before a signal.
+pub fn require_waitable(status: &Path) -> Result<(), TriageError> {
+    let ignored = sigchld_ignored(status)?;
+    debug!(ignored, "the SIGCHLD disposition was read");
+    (!ignored).then_some(()).ok_or(TriageError::ChildUnwaitable)
 }
 
 
@@ -308,29 +357,48 @@ pub fn decide(status: ExitStatus, bytes: &[u8]) -> Result<Triage, TriageError> {
 }
 
 
-fn settle(pid: Pid, child: &mut Child, bytes: &[u8], grace_millis: u64) -> Result<Triage, TriageError> {
+pub fn settle(pid: Pid, child: &mut Child, bytes: &[u8], timing: (u64, GroupKillFn)) -> Result<Triage, TriageError> {
+    let (grace_millis, group_kill) = timing;
     let polls = grace_millis / REAP_POLL_MILLIS + 1;
-    let reaped = reap(child, polls);
-    let outcome = format!("{:?}", reaped.as_ref().err().map(io::Error::kind));
-    debug!(outcome, "the child status was read");
-    match reaped.unwrap_or(None) {
-        Some(status) => {
-            kill_group(pid);
-            decide(status, bytes)
+    let waited = await_exit(pid, polls);
+    let outcome = format!("{:?}", waited.as_ref().err().map(io::Error::kind));
+    debug!(outcome, "the child exit was awaited");
+    match waited {
+        Ok(true) => {
+            group_kill(pid);
+            let reaped = child.wait();
+            let reaped_outcome = format!("{:?}", reaped.as_ref().err().map(io::Error::kind));
+            debug!(reaped_outcome, "the child was reaped after the group kill");
+            reaped.map_or(Err(TriageError::ChildFailed), |status| decide(status, bytes))
         }
-        None => stop(pid, child, TriageError::ChildFailed),
+        Ok(false) => stop(pid, child, TriageError::ChildFailed, group_kill),
+        Err(_) => Err(TriageError::ChildUnwaitable),
     }
 }
 
 
 /// Runs a prepared child command: the payload on its stdin, a bounded stdout, a deadline; every failure is one fixed variant.
 pub fn run_child_process(
-    mut command: Command,
+    command: Command,
     bytes: Vec<u8>,
     limits: &Limits,
     grace_millis: u64,
-    plumbing: (ReadFn, SpawnFn),
+    plumbing: (ReadFn, SpawnFn, GroupKillFn),
 ) -> Result<Triage, TriageError> {
+    run_child_process_with(Path::new(PROC_STATUS), command, bytes, limits, (grace_millis, plumbing))
+}
+
+
+/// `run_child_process` with the status file that tells whether SIGCHLD is ignored injected.
+pub fn run_child_process_with(
+    status: &Path,
+    mut command: Command,
+    bytes: Vec<u8>,
+    limits: &Limits,
+    timing: (u64, (ReadFn, SpawnFn, GroupKillFn)),
+) -> Result<Triage, TriageError> {
+    let (grace_millis, plumbing) = timing;
+    require_waitable(status)?;
     let profile: Option<(OsString, OsString)> = std::env::var_os(PROFILE_VARIABLE).map(|value| (OsString::from(PROFILE_VARIABLE), value));
     command
         .env_clear()
@@ -350,10 +418,10 @@ pub fn run_child_process(
         .take()
         .zip(child.stdout.take())
         .map_or(Err(TriageError::ChildFailed), |(stdin, stdout)| {
-            converse((stdin, stdout), bytes, limits, plumbing)
+            converse((stdin, stdout), bytes, limits, (plumbing.0, plumbing.1))
         });
     match collected {
-        Ok(output) => settle(pid, &mut child, &output, grace_millis),
-        Err(error) => stop(pid, &mut child, error),
+        Ok(output) => settle(pid, &mut child, &output, (grace_millis, plumbing.2)),
+        Err(error) => stop(pid, &mut child, error, plumbing.2),
     }
 }
