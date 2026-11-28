@@ -22,6 +22,10 @@ pub const SMALL_CAP: usize = 4;
 pub const HUNTS_LATE_CLOSE: usize = 2;
 
 
+/// The traces module holds no PostgreSQL connection: its pool is the decode slots of core-api.
+pub const NO_PG_CAP: usize = 0;
+
+
 pub const PLATFORM_PG_BUDGET: usize = 78;
 
 
@@ -43,6 +47,7 @@ pub fn module_cap(module: Module) -> usize {
         | Module::Grc
         | Module::AttackPaths
         | Module::Playbooks => SMALL_CAP,
+        Module::Traces => NO_PG_CAP,
     }
 }
 
@@ -71,6 +76,7 @@ pub fn module_name(module: Module) -> &'static str {
         Module::Grc => "grc",
         Module::AttackPaths => "attack_paths",
         Module::Playbooks => "playbooks",
+        Module::Traces => "traces",
     }
 }
 

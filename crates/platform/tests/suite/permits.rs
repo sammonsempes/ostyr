@@ -89,9 +89,9 @@ fn the_budget_covers_every_cap_the_cancel_connection_and_the_late_close() -> Tes
 #[test]
 fn every_module_has_exactly_one_row_with_a_cap_and_a_name_that_parses_back() -> TestResult {
     let names = Module::VARIANTS.iter().map(|module| module_name(*module)).collect::<Vec<_>>();
-    assert_eq!(names.join(", "), ALL_MODULES);
+    assert_eq!(names.join(", "), format!("{ALL_MODULES}, traces"));
     for module in all_modules() {
-        assert!(module_cap(module) > 0, "{module:?}");
+        assert_eq!(module_cap(module) > 0, module != Module::Traces, "{module:?}");
         assert_eq!(module_of(module_name(module)), Some(module));
     }
     assert_eq!(module_cap(Module::Alerts), LARGE_CAP);
@@ -133,7 +133,7 @@ fn a_selected_module_without_a_semaphore_is_a_named_error() -> TestResult {
     let module_file = dir.path().join("platform.yaml");
     std::fs::write(&module_file, crate::fixture::module_text("alerts", &pg_file))?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, core_api::server::new_listener(), platform::merge::ACTOR)?;
-    let parts = module_parts(&[Module::Alerts], &Arc::new(opened), &missing, None, None);
+    let parts = module_parts(&[Module::Alerts], &Arc::new(opened), &missing, None, None, None);
     assert_eq!(parts.err(), Some(PlatformError::MissingPermits));
     Ok(())
 }

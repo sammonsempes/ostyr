@@ -23,6 +23,16 @@ pub enum PlatformError {
     PageFile { reason: &'static str },
     #[error("settings.status.page_file tenant differs from the module file tenant")]
     PageTenantMismatch,
+    #[error("settings.traces.settings_file is required by the traces module")]
+    MissingTracesSettings,
+    #[error("settings.traces.sampling_file is required by the traces module")]
+    MissingTracesSampling,
+    #[error("settings.otlp.senders_file is required by the traces module")]
+    MissingSendersFile,
+    #[error("the traces module needs settings.tls_certificate and settings.tls_key: tokens never travel in clear")]
+    TlsRequired,
+    #[error("the traces module has no runtime")]
+    MissingTracesRuntime,
     #[error("a selected module has no connection semaphore")]
     MissingPermits,
 }

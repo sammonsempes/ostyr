@@ -219,9 +219,9 @@ const TENANT_PINNED: [&str; 1] = [core_api::reload::TENANT_START_ONLY];
 
 #[test]
 fn the_tenant_is_pinned_only_while_the_status_page_is_served() -> TestResult {
-    assert!(start_only_keys(true).contains(&core_api::reload::TENANT_START_ONLY));
-    assert!(!start_only_keys(false).contains(&core_api::reload::TENANT_START_ONLY));
-    assert!(start_only_keys(false).contains(&"modules"));
+    assert!(start_only_keys(true, false).contains(&core_api::reload::TENANT_START_ONLY));
+    assert!(!start_only_keys(false, false).contains(&core_api::reload::TENANT_START_ONLY));
+    assert!(start_only_keys(false, false).contains(&"modules"));
     Ok(())
 }
 

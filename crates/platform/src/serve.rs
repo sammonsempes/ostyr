@@ -1,10 +1,11 @@
-//! The `ostyr-platform` service: serves the fifteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
+//! The `ostyr-platform` service: serves the modules of `settings.modules`; `risk` also needs `settings.risk.weights_file`, `status` needs `settings.status.page_file` and `traces` needs three files and TLS.
 
 
 use crate::merge::{
     check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, start_only_keys, weights_file_of, ACTOR,
 };
 use crate::permits::{module_semaphores, start_permits};
+use crate::traces::{open_traces, require_tls, senders_startup, traces_files_of};
 use crate::types::InterruptWait;
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
 use alerts::settings::{api_startup_reloads, module_audit, open_pg_engine_from, DEFAULT_TENANT};
@@ -13,7 +14,7 @@ use core_api::logging::reloadable_dispatch;
 use core_api::server::{listening_address, new_listener, run_loaded, stop_listener};
 use core_api::types::{SharedListener, StartupReloadFn};
 use core_config::load::load_module;
-use core_config::reload::{open_engine, reload, ReloadContext};
+use core_config::reload::{open_engine, reload, ReloadContext, ReloadEngine};
 #[cfg(unix)]
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
@@ -57,11 +58,29 @@ pub async fn announce(listener: SharedListener) {
 }
 
 
+/// Watches the file and reloads on `SIGHUP`; drop the result to stop both.
+#[cfg(unix)]
+pub fn keep_live<Config: Send + Sync + 'static>(engine: &Arc<ReloadEngine<Config>>, file: &Path) -> Result<impl Sized, Box<dyn Error>> {
+    let watch = watch_files(Arc::clone(engine), &[file.to_path_buf()], RELOAD_DEBOUNCE)?;
+    let signals = reload_on_signals(Arc::clone(engine), &[signal_hook::consts::SIGHUP])?;
+    Ok((watch, signals))
+}
+
+
+/// Watches the file and reloads on change; drop the result to stop.
+#[cfg(not(unix))]
+pub fn keep_live<Config: Send + Sync + 'static>(engine: &Arc<ReloadEngine<Config>>, file: &Path) -> Result<impl Sized, Box<dyn Error>> {
+    Ok(watch_files(Arc::clone(engine), &[file.to_path_buf()], RELOAD_DEBOUNCE)?)
+}
+
+
 pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let module_file = arguments.first().ok_or(USAGE)?;
     let loaded = load_module(Path::new(module_file))?;
     let modules = modules_of(&loaded.settings)?;
     let weights_file = weights_file_of(&loaded.settings, &modules)?;
+    let traces_files = traces_files_of(&loaded.settings, &modules)?;
+    require_tls(&loaded.settings, &modules)?;
     let page = page_file_of(&loaded.settings, &modules)?
         .map(|file| load_page_services(&file))
         .transpose()?
@@ -104,24 +123,47 @@ pub async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         Some(weights_engine) => Some(reload_on_signals(Arc::clone(weights_engine), &[signal_hook::consts::SIGHUP])?),
         None => None,
     };
+    let tenant = loaded.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.to_owned());
+    let traces = traces_files
+        .as_ref()
+        .map(|files| open_traces(files, &tenant, &loaded.name, &listener))
+        .transpose()?;
+    let _traces_live = match (&traces, &traces_files) {
+        (Some(runtime), Some(files)) => Some((
+            keep_live(&runtime.settings, &files.settings)?,
+            keep_live(&runtime.sampling, &files.sampling)?,
+            keep_live(&runtime.senders, &files.senders)?,
+        )),
+        _ => None,
+    };
     let held = lease(&engine, &start_permits()).await?;
     for (namespace, migrations) in migration_plan(&modules) {
         let applied = migrate(&held.client, namespace, migrations, held.deadline).await?;
         tracing::info!(namespace, applied = applied.len(), "migrations checked");
     }
     drop(held);
-    let (router, access, documents) = module_parts(&modules, &engine, &module_semaphores(&modules), weights.as_ref(), page.as_ref())?;
+    let (router, access, documents) = module_parts(
+        &modules,
+        &engine,
+        &module_semaphores(&modules),
+        weights.as_ref(),
+        page.as_ref(),
+        traces.as_ref(),
+    )?;
     tokio::spawn(stop_on(listener.clone(), Box::pin(tokio::signal::ctrl_c())));
     tokio::spawn(announce(listener.clone()));
     let mut startup_reloads = api_startup_reloads(Arc::clone(&engine));
     if let Some(weights_engine) = weights {
         startup_reloads.push(Box::new(move || reload(&weights_engine)) as StartupReloadFn);
     }
+    if let Some(runtime) = &traces {
+        startup_reloads.push(senders_startup(listener.clone(), Arc::clone(&runtime.senders)));
+    }
     run_loaded(
         Path::new(module_file),
         loaded,
         (router, access, documents),
-        &start_only_keys(page.is_some()),
+        &start_only_keys(page.is_some(), traces.is_some()),
         listener,
         Some(log),
         startup_reloads,

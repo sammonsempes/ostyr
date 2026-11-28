@@ -5,4 +5,5 @@ pub mod merge;
 pub mod model;
 pub mod permits;
 pub mod serve;
+pub mod traces;
 pub mod types;

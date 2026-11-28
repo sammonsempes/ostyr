@@ -412,6 +412,9 @@ fn every_write_of_the_report_can_fail() -> TestResult {
         batches_planned: 1,
         batches_sent: 0,
         failed_batch: Some(0),
+        unsent_rows: 1,
+        failure: None,
+        revoked: false,
     };
     let failures = (0..REPORT_WRITES)
         .filter(|left| write_report(&report, &mut FailAfter { left: *left }).is_err())
