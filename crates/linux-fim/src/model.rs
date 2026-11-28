@@ -1,5 +1,5 @@
 use crate::error::PlantRefusal;
-use crate::types::{ExistsFn, Identity, IdentityFn, RunFn, Sha256Digest};
+use crate::types::{ExistsFn, Identity, IdentityFn, LinkFn, RunFn, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 
@@ -272,6 +272,7 @@ pub struct PackageOps {
     pub run: RunFn,
     pub identity: IdentityFn,
     pub exists: ExistsFn,
+    pub link: LinkFn,
 }
 
 

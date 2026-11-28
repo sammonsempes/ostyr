@@ -184,7 +184,7 @@ pub fn no_hook(_binary: &str) {}
 pub fn list_checked(binary: &str, handle: &OwnedFd, owner: u32, deadline: Duration, between: fn(&str)) -> std::io::Result<String> {
     between(binary);
     same_program(handle, Path::new(binary), owner)
-        .inspect_err(log_unjudged)
+        .inspect_err(|error| log_unjudged(binary, error))
         .unwrap_or(false)
         .then_some(())
         .ok_or(std::io::Error::other(PROGRAM_CHANGED))
@@ -193,9 +193,9 @@ pub fn list_checked(binary: &str, handle: &OwnedFd, owner: u32, deadline: Durati
 
 
 /// Logs that the program could not be judged again before the spawn.
-pub fn log_unjudged(error: &TrustedProgramError) {
+pub fn log_unjudged(program: &str, error: &TrustedProgramError) {
     let reason = error.to_string();
-    tracing::warn!(reason, "tetra cannot be judged again");
+    tracing::warn!(program, reason, "program cannot be judged again");
 }
 
 
@@ -222,7 +222,7 @@ pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Op
 /// Logs that a candidate was refused and not run.
 pub fn log_skipped_candidate(path: &str, error: &std::io::Error) {
     let reason = error.to_string();
-    tracing::warn!(path, reason, "tetra candidate skipped");
+    tracing::warn!(path, reason, "program candidate skipped");
 }
 
 

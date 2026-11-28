@@ -15,6 +15,16 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 
+pub const USRMERGE_LINKS: [(&str, &str, &str); 6] = [
+    ("/bin", "usr/bin", "/usr/bin"),
+    ("/sbin", "usr/sbin", "/usr/sbin"),
+    ("/lib", "usr/lib", "/usr/lib"),
+    ("/lib64", "usr/lib64", "/usr/lib64"),
+    ("/lib32", "usr/lib32", "/usr/lib32"),
+    ("/libx32", "usr/libx32", "/usr/libx32"),
+];
+
+
 pub const RPM: &str = "/usr/bin/rpm";
 
 
@@ -138,11 +148,39 @@ pub fn verdict_for(subject: &str, evidence: &FileEvidence, ops: &PackageOps) -> 
         .and_then(|()| ensure(evidence.path == subject, REASON_EVIDENCE))
         .and_then(|()| manager_of(ops))
         .and_then(|manager| match manager {
-            Manager::Rpm => rpm_verdict(subject, &evidence.sha256, ops),
-            Manager::Dpkg => dpkg_verdict(subject, ops),
+            Manager::Rpm => spelled_verdict(subject, ops, |spelling| rpm_verdict(spelling, &evidence.sha256, ops)),
+            Manager::Dpkg => spelled_verdict(subject, ops, |spelling| dpkg_verdict(spelling, ops)),
         })
         .and_then(|found| unchanged(subject, evidence.identity, ops).map(|()| found));
     outcome.unwrap_or_else(unverified)
+}
+
+
+/// The verdict for the path as written; when that is `Unowned` and a usrmerge link defines another spelling of it, the verdict for that spelling.
+pub fn spelled_verdict<Judge>(subject: &str, ops: &PackageOps, judge: Judge) -> Result<PackageVerdict, &'static str>
+where
+    Judge: Fn(&str) -> Result<PackageVerdict, &'static str>,
+{
+    judge(subject).and_then(|first| match first {
+        PackageVerdict::Unowned => alias_of(subject, ops).map_or(Ok(PackageVerdict::Unowned), |alias| judge(&alias)),
+        found => Ok(found),
+    })
+}
+
+
+/// The other spelling of a path under a directory the system links to its `/usr` twin (`/bin` to `usr/bin`): read once per call, the link text must match exactly.
+pub fn alias_of(path: &str, ops: &PackageOps) -> Option<String> {
+    USRMERGE_LINKS
+        .iter()
+        .filter(|(directory, target, _)| (ops.link)(directory).is_some_and(|text| text == *target))
+        .find_map(|(directory, _, canonical)| {
+            let linked = format!("{directory}/");
+            let real = format!("{canonical}/");
+            path.strip_prefix(&real)
+                .map(|rest| format!("{linked}{rest}"))
+                .or_else(|| path.strip_prefix(&linked).map(|rest| format!("{real}{rest}")))
+        })
+        .filter(|alias| path_is_exact(alias))
 }
 
 
@@ -452,7 +490,7 @@ pub fn run_first(binary: &str, args: &[&str], owner: u32, deadline: Duration) ->
 /// Runs the tool when the path still names the program the handle holds; a failed re-judgement is logged and refuses the run.
 pub fn run_checked(binary: &str, handle: &OwnedFd, owner: u32, deadline: Duration, args: &[&str]) -> std::io::Result<ToolOutput> {
     same_program(handle, Path::new(binary), owner)
-        .inspect_err(log_unjudged)
+        .inspect_err(|error| log_unjudged(binary, error))
         .unwrap_or(false)
         .then_some(())
         .ok_or(std::io::Error::other(PROGRAM_CHANGED))
@@ -519,4 +557,20 @@ pub fn os_exists(path: &str) -> bool {
         tracing::warn!(path, reason, "package database path cannot be checked");
         false
     })
+}
+
+
+/// The text of a symbolic link; a missing one is `None`, any other failure is logged and is `None`.
+pub fn os_link(path: &str) -> Option<String> {
+    std::fs::read_link(path)
+        .inspect_err(|error| log_link_failure(path, error))
+        .ok()
+        .and_then(|target| target.to_str().map(str::to_string))
+}
+
+
+/// Logs a link that cannot be read (absent on a split `/usr`, so only at debug level).
+pub fn log_link_failure(path: &str, error: &std::io::Error) {
+    let reason = error.to_string();
+    tracing::debug!(path, reason, "usrmerge link cannot be read");
 }
