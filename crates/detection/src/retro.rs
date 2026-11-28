@@ -4,7 +4,7 @@ use crate::error::RetroError;
 use crate::id::MAX_EVENT_ID_CHARS;
 use crate::pg::event_time_text;
 use crate::types::{ElapsedFn, RetroSendFn};
-use alerts::store::MAX_ENTITY_CHARS;
+use alerts::store::{INVISIBLE_CHARACTERS, MAX_ENTITY_CHARS};
 use core_pg::password::{read_limited, read_password};
 use core_pg::scope::tenant_scope;
 use serde::Deserialize;
@@ -182,7 +182,7 @@ pub struct RetroReply {
 }
 
 
-/// One reply line; 64-bit integers are sent as text by ClickHouse JSON output, so the time is `toString` of the milliseconds.
+/// One reply line; the time is the `toString` of the milliseconds, sent as text.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRow {
@@ -285,7 +285,6 @@ pub fn retro_limits(settings: &RetroSettings) -> Vec<(&'static str, String)> {
 }
 
 
-/// The compiled rule over `retro_projection`, then tenant and window as `param_` values, a stable order, `max_rows + 1` rows at most and every pin in its own `SETTINGS` clause.
 fn quoted(column: &str) -> String {
     format!("`{column}`")
 }
@@ -340,6 +339,7 @@ pub fn retro_projection() -> String {
 }
 
 
+/// The compiled rule, then tenant and window as `param_` values, a stable order, `max_rows + 1` rows at most, every pin in its own `SETTINGS`.
 pub fn retro_statement(rule_text: &str, mapping: &FieldMapping, settings: &RetroSettings) -> Result<String, RetroError> {
     let options = SqlOptions {
         table: EVENTS_TABLE.to_owned(),
@@ -423,9 +423,14 @@ pub fn read_changed(reply: RetroReply, settings: &RetroSettings) -> Result<(), R
 }
 
 
-/// A control (Cc) or format (Cf) character is refused: the identity goes into alerts, logs and the UI.
+/// Cc, Cf, Zl, Zp and the blank-rendering letters are refused: the identity goes into alerts, logs and the UI.
 pub fn refused_character(character: char) -> bool {
-    character.is_control() || get_general_category(character) == GeneralCategory::Format
+    character.is_control()
+        || INVISIBLE_CHARACTERS.contains(&character)
+        || matches!(
+            get_general_category(character),
+            GeneralCategory::Format | GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
+        )
 }
 
 
@@ -457,7 +462,7 @@ fn is_hash(text: &str) -> bool {
 }
 
 
-/// An event from a row, `None` when its id is refused alone (invalid UTF-8, Cc or Cf); a field out of form is a malformed reply.
+/// An event from a row, `None` when its id is refused alone (invalid UTF-8 or a refused character); a field out of form is a malformed reply.
 pub fn event_of(row: EventRow) -> Result<Option<RetroEvent>, RetroError> {
     let event_ms = row.ret_ms.parse::<i64>().map_err(|_| RetroError::MalformedReply)?;
     let prefix: String = row.ret_id.chars().take(MAX_EVENT_ID_CHARS).collect();

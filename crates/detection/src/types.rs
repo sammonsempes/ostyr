@@ -1,6 +1,7 @@
-use crate::error::SinkError;
+use crate::error::{CursorError, RetroError, SinkError};
 use crate::model::{AlertRecord, AlertStore};
-use crate::retro::{RetroReply, RetroRequest};
+use crate::retro::{RetroOutcome, RetroQuery, RetroReply, RetroRequest};
+use crate::retro_cursor::RetroCursors;
 use siem_ingest::error::InsertClass;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -64,3 +65,19 @@ pub type RetroSendFn<'a> = dyn Fn(&RetroRequest) -> Result<RetroReply, InsertCla
 
 /// The time spent since the run began, injected so a test freezes it.
 pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;
+
+
+/// Reads one window of one rule; the real one is `run_retro` over the settings and the mapping.
+pub type RetroReadFn<'a> = dyn Fn(&RetroQuery) -> Result<RetroOutcome, RetroError> + 'a;
+
+
+/// Stores alerts under the tenant; the real one is `commit_pg`.
+pub type RetroInsertFn<'a> = dyn Fn(&str, &[AlertRecord]) -> Result<usize, SinkError> + 'a;
+
+
+/// Saves the whole cursor document atomically.
+pub type RetroSaveFn<'a> = dyn Fn(&RetroCursors) -> Result<(), CursorError> + 'a;
+
+
+/// Syncs a file to disk; injected so a test can fail it.
+pub type FileSyncFn = fn(&std::fs::File) -> io::Result<()>;
