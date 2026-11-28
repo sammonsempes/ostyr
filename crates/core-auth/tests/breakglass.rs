@@ -339,10 +339,9 @@ fn the_tool_reads_the_roles_file_through_the_bounded_regular_file_reader() -> Te
             webauthn.clone(),
             roles_file.clone(),
         ];
-        assert!(matches!(
-            run(&arguments, "".as_bytes(), Vec::new(), fixed, os_random),
-            Err(AuthError::Config(_))
-        ));
+        let refusal = run(&arguments, "".as_bytes(), Vec::new(), fixed, os_random);
+        assert!(matches!(&refusal, Err(AuthError::Config(_))));
+        assert!(refusal.is_err_and(|error| error.to_string().starts_with("configuration file rejected: ")));
         Ok(())
     })
 }
@@ -499,6 +498,10 @@ fn nobody_grants_themselves_a_break_glass_role() -> TestResult {
         roles(&[ROLE_ADMINISTRATOR, "glass"]),
     );
     assert!(matches!(own, Err(AuthError::PermissionDenied)));
+    assert_eq!(
+        lines_with(&fx, &["authz.role.change", "\"outcome\":\"denied\"", "\"break_glass_change\":\"grant\""])?,
+        1
+    );
     assert!(world.state.accounts.get("admin").is_some_and(|account| !account.roles.contains("glass")));
     assert_eq!(lines_with(&fx, &["authz.role.change", "\"outcome\":\"denied\""])?, 1);
     create_account(
@@ -511,7 +514,13 @@ fn nobody_grants_themselves_a_break_glass_role() -> TestResult {
         roles(&[ROLE_READER]),
     )?;
     change_roles(&mut world.state, &ctx, at(PLUS_ONE)?, &admin, "other", roles(&["glass"]))?;
-    assert_eq!(lines_with(&fx, &["authz.role.change", MARKER, "\"break_glass_change\":\"grant\""])?, 1);
+    assert_eq!(
+        lines_with(
+            &fx,
+            &["authz.role.change", MARKER, "\"outcome\":\"success\"", "\"break_glass_change\":\"grant\""]
+        )?,
+        1
+    );
     create_account(
         &mut world.state,
         &ctx,

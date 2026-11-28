@@ -94,7 +94,7 @@ pub enum AuthError {
     OidcBreakGlassRole(String),
     #[error("OIDC login refused: {0}")]
     Oidc(#[from] OidcDenial),
-    #[error("OIDC configuration rejected: {0}")]
+    #[error("configuration file rejected: {0}")]
     Config(#[from] ConfigError),
     #[error("the client secret reference could not be resolved: {0}")]
     Secret(#[source] io::Error),
