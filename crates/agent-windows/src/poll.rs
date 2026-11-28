@@ -175,6 +175,7 @@ pub fn run_main(
         args: &args,
         max_bytes: env.max_output_bytes,
         deadline_seconds: env.deadline_seconds,
+        environment: None,
     };
     let context = ItemContext {
         channel,

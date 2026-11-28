@@ -29,6 +29,7 @@ pub fn defender_once(runner: Runner<'_>) -> String {
         args: &args,
         max_bytes: DEFENDER_MAX_OUTPUT_BYTES,
         deadline_seconds: DEFENDER_DEADLINE_SECONDS,
+        environment: None,
     };
     let mut output: Vec<u8> = Vec::new();
     match runner(&request, &mut |chunk| output.extend_from_slice(chunk)) {

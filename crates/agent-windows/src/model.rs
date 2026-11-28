@@ -203,6 +203,7 @@ pub struct RunRequest<'a> {
     pub args: &'a [String],
     pub max_bytes: usize,
     pub deadline_seconds: u64,
+    pub environment: Option<&'a [(&'a str, &'a str)]>,
 }
 
 

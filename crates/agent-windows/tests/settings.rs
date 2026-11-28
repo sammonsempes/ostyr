@@ -12,6 +12,7 @@ use agent_windows::settings::{
     MAX_SETTINGS_BYTES, MAX_SPOOL_BYTES_CEILING, MIN_DEADLINE_SECONDS, MIN_OUTPUT_BYTES, MIN_POLL_INTERVAL_SECONDS, MIN_SPOOL_BYTES, SETTINGS_FILE,
 };
 use agent_windows::types::SharedObserved;
+use agent_windows::winget::{DEFAULT_UPDATES_INTERVAL_SECONDS, MAX_UPDATES_INTERVAL_SECONDS, MIN_UPDATES_INTERVAL_SECONDS};
 use core_config::error::ConfigError;
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use std::fs;
@@ -53,7 +54,7 @@ const NEW_BATCH: u32 = 7;
 const FOUR_DENIED: usize = 4;
 
 
-const SETTING_COUNT: usize = 8;
+const SETTING_COUNT: usize = 9;
 
 
 const HOSTILE_FILES: usize = 14;
@@ -104,6 +105,14 @@ fn defender(value: u64) -> Settings {
 }
 
 
+fn updates(value: u64) -> Settings {
+    Settings {
+        updates_interval_seconds: value,
+        ..base()
+    }
+}
+
+
 fn output(value: u64) -> Settings {
     Settings {
         max_output_bytes: wide(value),
@@ -147,6 +156,12 @@ fn cases() -> Result<Vec<Case>, std::num::TryFromIntError> {
             build: defender,
             low: MIN_DEFENDER_INTERVAL_SECONDS,
             high: MAX_DEFENDER_INTERVAL_SECONDS,
+        },
+        Case {
+            name: "updates_interval_seconds",
+            build: updates,
+            low: MIN_UPDATES_INTERVAL_SECONDS,
+            high: MAX_UPDATES_INTERVAL_SECONDS,
         },
         Case {
             name: "max_output_bytes",
@@ -200,6 +215,7 @@ fn defaults_are_the_values_the_agent_used_before_the_file() -> TestResult {
     assert_eq!(parsed.poll_interval_seconds, POLL_INTERVAL_SECONDS);
     assert_eq!(parsed.batch, MAX_EVENTS_PER_POLL);
     assert_eq!(parsed.defender_interval_seconds, DEFAULT_DEFENDER_INTERVAL_SECONDS);
+    assert_eq!(parsed.updates_interval_seconds, DEFAULT_UPDATES_INTERVAL_SECONDS);
     assert_eq!(parsed.max_output_bytes, MAX_OUTPUT_BYTES);
     assert_eq!(parsed.deadline_seconds, QUERY_DEADLINE_SECONDS);
     assert_eq!(parsed.max_spool_bytes, DEFAULT_MAX_SPOOL_BYTES);

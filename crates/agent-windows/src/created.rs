@@ -26,6 +26,7 @@ pub fn query_created(env: &mut PollEnv<'_>, channel: &Channel, totals: &mut Poll
         args: &args,
         max_bytes: env.max_output_bytes,
         deadline_seconds: env.deadline_seconds,
+        environment: None,
     };
     let mut output: Vec<u8> = Vec::new();
     let end = (env.run)(&request, &mut |chunk| output.extend_from_slice(chunk))?;

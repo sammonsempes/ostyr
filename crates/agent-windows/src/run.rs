@@ -79,8 +79,18 @@ pub fn stop(child: &mut Child) -> Result<(), RunError> {
 }
 
 
+/// With an explicit environment the child sees exactly those pairs; without one it inherits the agent's.
+pub fn apply_environment(command: &mut Command, environment: Option<&[(&str, &str)]>) {
+    if let Some(pairs) = environment {
+        command.env_clear().envs(pairs.iter().copied());
+    }
+}
+
+
 pub fn spawn_child(request: &RunRequest<'_>, writer: io::PipeWriter) -> Result<Child, RunError> {
-    Command::new(request.program)
+    let mut command = Command::new(request.program);
+    apply_environment(&mut command, request.environment);
+    command
         .args(request.args)
         .current_dir(WORKING_DIRECTORY)
         .stdin(Stdio::null())
@@ -98,8 +108,31 @@ pub fn start_reader(mut reader: io::PipeReader) -> (Receiver<Vec<u8>>, JoinHandl
 }
 
 
-/// Runs the tool without a shell, stderr null; stdout goes to `sink` within the cap and deadline, else the child is killed and reaped.
+/// A request with an explicit environment runs in a kill-on-close job on Windows (the tree ends with the deadline); elsewhere it is the plain run.
+#[cfg(windows)]
+pub fn run_isolated(request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError> {
+    crate::job_run::run_in_job(request, sink)
+}
+
+
+#[cfg(not(windows))]
+pub fn run_isolated(request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError> {
+    run_plain(request, sink)
+}
+
+
+/// The production runner: a request with an explicit environment is the isolated run, any other the plain one.
 pub fn run_process(request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError> {
+    if request.environment.is_some() {
+        run_isolated(request, sink)
+    } else {
+        run_plain(request, sink)
+    }
+}
+
+
+/// Runs the tool without a shell, stderr null; stdout goes to `sink` within the cap and deadline, else the child is killed and reaped.
+pub fn run_plain(request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError> {
     let (reader, writer) = io::pipe().map_err(RunError::Pipe)?;
     let mut child = spawn_child(request, writer)?;
     let (receiver, handle) = start_reader(reader);

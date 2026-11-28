@@ -79,6 +79,7 @@ fn request<'a>(program: &'a str, args: &'a [String], max_bytes: usize, deadline:
         args,
         max_bytes,
         deadline_seconds: deadline,
+        environment: None,
     }
 }
 
@@ -212,5 +213,55 @@ fn drain_names_a_deadline_and_a_disconnect() -> TestResult {
     assert_eq!(drain(&receiver, &timed, &mut |_| ()), Drained::Deadline);
     drop(sender);
     assert_eq!(drain(&receiver, &timed, &mut |_| ()), Drained::Eof);
+    Ok(())
+}
+
+
+const ENV: &str = "/usr/bin/env";
+
+
+#[test]
+fn an_explicit_environment_is_exactly_the_given_pairs() -> TestResult {
+    let pairs = [("ONLY", "this")];
+    let mut received = Vec::new();
+    let end = run_process(
+        &RunRequest {
+            program: ENV,
+            args: &[],
+            max_bytes: BIG,
+            deadline_seconds: GENEROUS,
+            environment: Some(&pairs),
+        },
+        &mut |chunk| received.extend_from_slice(chunk),
+    )?;
+    assert_eq!(end, RunEnd::Done);
+    assert_eq!(received, b"ONLY=this\n");
+    Ok(())
+}
+
+
+#[test]
+fn without_an_explicit_environment_the_agent_environment_is_inherited() -> TestResult {
+    let mut received = Vec::new();
+    run_process(
+        &RunRequest {
+            program: ENV,
+            args: &[],
+            max_bytes: BIG,
+            deadline_seconds: GENEROUS,
+            environment: None,
+        },
+        &mut |chunk| received.extend_from_slice(chunk),
+    )?;
+    assert!(received.len() > SMALL);
+    Ok(())
+}
+
+
+#[test]
+fn a_job_failure_keeps_its_cause() -> TestResult {
+    let error = RunError::Job(sys_windows::types::ConsoleError::AlreadyClosed);
+    assert_eq!(error.to_string(), "the job run failed");
+    assert!(std::error::Error::source(&error).is_some());
     Ok(())
 }

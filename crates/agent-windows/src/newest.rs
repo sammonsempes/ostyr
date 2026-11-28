@@ -32,6 +32,7 @@ pub fn query_first(env: &mut PollEnv<'_>, args: &[String], totals: &mut PollTota
         args,
         max_bytes: env.max_output_bytes,
         deadline_seconds: env.deadline_seconds,
+        environment: None,
     };
     let mut stream = Stream::default();
     let mut info: Option<SystemInfo> = None;
