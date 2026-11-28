@@ -2096,6 +2096,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "siem-ingest",
+ "siem-schema",
  "sigma-sql",
  "signal-hook",
  "stream-correlation",

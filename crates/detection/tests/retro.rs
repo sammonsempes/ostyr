@@ -4,6 +4,7 @@
 mod types;
 
 
+use alerts::store::INVISIBLE_CHARACTERS;
 use detection::error::RetroError;
 use detection::retro::{
     absorb, body_failure, check_refusal, entity_of, event_of, fetch_with, hash_expression, hash_part, id_allowed, read_changed, read_ids, refusal,
@@ -14,6 +15,7 @@ use detection::retro::{
 use sha2::{Digest, Sha256};
 use siem_ingest::error::InsertClass;
 use siem_ingest::reader_profile::pins;
+use siem_schema::schema::default_columns;
 use sigma_sql::mapping::{parse_mapping, FieldMapping};
 use std::cell::RefCell;
 use std::error::Error;
@@ -1031,5 +1033,48 @@ fn secrets_are_refused_before_any_connection() -> TestResult {
         run(&garbage).err().and_then(|error| error.downcast::<RetroError>().ok()).as_deref(),
         Some(RetroError::Agent(_))
     ));
+    Ok(())
+}
+
+
+const LONG_SEPARATOR_ID: usize = 70;
+
+
+#[test]
+fn an_event_id_with_a_line_separator_a_paragraph_separator_or_a_blank_letter_is_refused_alone() -> TestResult {
+    assert!(!id_allowed("a\u{2028}b"));
+    assert!(!id_allowed("a\u{2029}b"));
+    assert!(!id_allowed(&"\u{2028}".repeat(LONG_SEPARATOR_ID)));
+    INVISIBLE_CHARACTERS.iter().try_for_each(|blank| -> TestResult {
+        assert!(!id_allowed(&format!("a{blank}b")));
+        assert_eq!(entity_of(&format!("a{blank}b")), None);
+        let found = complete([row_json(1, "good", 1, "h", "u"), row_json(SECOND_ROW, &format!("x{blank}y"), 1, "h", "u")].join("\n"))?;
+        assert_eq!((found.events.len(), found.refused), (1, 1));
+        Ok(())
+    })?;
+    let separators = [
+        row_json(1, "good", 1, "h", "u"),
+        row_json(SECOND_ROW, &"\u{2028}".repeat(LONG_SEPARATOR_ID), 1, "h", "u"),
+    ]
+    .join("\n");
+    assert_eq!(complete(separators)?.refused, 1);
+    let paragraph = complete(row_json(1, "p\u{2029}q", 1, "h", "u"))?;
+    assert_eq!((paragraph.events.len(), paragraph.refused), (0, 1));
+    assert!(id_allowed("a b"));
+    assert!(id_allowed("caf\u{e9}"));
+    Ok(())
+}
+
+
+#[test]
+fn the_hashed_columns_are_the_schema_columns_without_tenant_tier_and_time() -> TestResult {
+    let excluded = ["tenant", "tenant_tier", "@timestamp"];
+    let schema: Vec<String> = default_columns()
+        .into_iter()
+        .map(|column| column.name)
+        .filter(|name| !excluded.contains(&name.as_str()))
+        .collect();
+    let hashed: Vec<String> = HASH_COLUMNS.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(hashed, schema);
     Ok(())
 }

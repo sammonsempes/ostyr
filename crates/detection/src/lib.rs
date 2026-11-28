@@ -7,6 +7,9 @@ pub mod logging;
 pub mod model;
 pub mod pg;
 pub mod retro;
+pub mod retro_cursor;
+pub mod retro_rules;
+pub mod retro_step;
 pub mod run;
 #[cfg(unix)]
 pub mod serve;
