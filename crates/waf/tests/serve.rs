@@ -56,9 +56,6 @@ const HANG_GUARD: Duration = Duration::from_secs(180);
 const TWO_CALLS: usize = 2;
 
 
-const FOUR_CALLS: usize = 4;
-
-
 struct Fixture {
     dir: tempfile::TempDir,
     settings_file: PathBuf,
@@ -240,7 +237,7 @@ fn the_service_applies_follows_edits_refuses_a_bad_one_and_audits_under_all() ->
     serve_driven(&fixture, fake, &source, &sender, &|| {
         wait_until(&|| applied_count(&fixture) >= 1)?;
         wait_until(&|| call_count(&fixture) >= TWO_CALLS)?;
-        replace_until(&fixture.routes, MARKER_ROUTE, &|| call_count(&fixture) >= FOUR_CALLS)?;
+        replace_until(&fixture.routes, MARKER_ROUTE, &|| applied_count(&fixture) >= TWO_CALLS)?;
         let applied = fs::read_to_string(&before_edit)?;
         check(applied.contains("marker-host.example.test"), "the edited route is published")?;
         let refused_before = audit_lines(&fixture).iter().filter(|line| line.contains("refused")).count();
@@ -561,7 +558,7 @@ fn refused_after_start(fixture: &Fixture, damage: &(dyn Fn(&Path) -> io::Result<
     let source = feed(receiver, None);
     serve_driven(fixture, fake, &source, &sender, &|| {
         wait_until(&|| applied_count(fixture) >= 1)?;
-        replace_until(&fixture.routes, MARKER_ROUTE, &|| call_count(fixture) >= FOUR_CALLS)?;
+        replace_until(&fixture.routes, MARKER_ROUTE, &|| applied_count(fixture) >= TWO_CALLS)?;
         let calls_before = call_count(fixture);
         damage(fixture.dir.path())?;
         replace(&fixture.routes, ONE_ROUTE)?;
