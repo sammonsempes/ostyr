@@ -50,6 +50,7 @@ pub struct Gathered {
     pub duplicated: usize,
     pub entries: usize,
     pub scan_cut: bool,
+    pub unreadable: usize,
     pub unreadable_directory: bool,
 }
 
@@ -121,17 +122,17 @@ pub fn refusal_class(refusal: &GrcError) -> &'static str {
 
 
 /// Every entry is counted up to `scan_cap`; the files named `*.json` are all kept, so foreign entries never hide a producer file.
-pub fn indicator_files(directory: &Path, scan_cap: usize) -> std::io::Result<(Vec<PathBuf>, usize, bool)> {
-    let mut listing = std::fs::read_dir(directory)?;
-    let listed: Vec<std::io::Result<PathBuf>> = listing.by_ref().take(scan_cap).map(|found| found.map(|entry| entry.path())).collect();
+pub fn indicator_listing(mut listing: impl Iterator<Item = std::io::Result<PathBuf>>, scan_cap: usize) -> (Vec<PathBuf>, usize, bool, usize) {
+    let listed: Vec<std::io::Result<PathBuf>> = listing.by_ref().take(scan_cap).collect();
     let scan_cut = listing.next().is_some();
     let entries = listed.len();
-    Ok((indicator_paths(listed), entries, scan_cut))
+    let (files, unreadable) = indicator_paths(listed);
+    (files, entries, scan_cut, unreadable)
 }
 
 
-/// The `*.json` paths, sorted; unreadable entries are counted in one warning per listing.
-pub fn indicator_paths(listed: Vec<std::io::Result<PathBuf>>) -> Vec<PathBuf> {
+/// The `*.json` paths, sorted, and the count of unreadable entries, which is one warning per listing.
+pub fn indicator_paths(listed: Vec<std::io::Result<PathBuf>>) -> (Vec<PathBuf>, usize) {
     let unreadable = listed.iter().filter(|entry| entry.is_err()).count();
     if unreadable > 0 {
         warn!(unreadable, "indicator directory entries unreadable, skipped");
@@ -142,7 +143,7 @@ pub fn indicator_paths(listed: Vec<std::io::Result<PathBuf>>) -> Vec<PathBuf> {
         .filter(|path| path.extension().is_some_and(|extension| extension == INDICATOR_EXTENSION))
         .collect();
     files.sort();
-    files
+    (files, unreadable)
 }
 
 
@@ -181,7 +182,7 @@ pub fn gather_indicators(directory: &Path, tenant: &str) -> Gathered {
 
 /// `gather_indicators` with an explicit scan bound; a directory over `MAX_DIRECTORY_ENTRIES` or cut by the scan bound is a named warning.
 pub fn gather_indicators_bounded(directory: &Path, tenant: &str, scan_cap: usize) -> Gathered {
-    match indicator_files(directory, scan_cap) {
+    match std::fs::read_dir(directory) {
         Err(failure) => {
             let kind = failure.kind();
             warn!(?kind, "indicator directory unreadable, every technical control has no evidence");
@@ -190,50 +191,56 @@ pub fn gather_indicators_bounded(directory: &Path, tenant: &str, scan_cap: usize
                 ..Gathered::default()
             }
         }
-        Ok((files, entries, scan_cut)) => {
-            if entries > MAX_DIRECTORY_ENTRIES || scan_cut {
-                let max = MAX_DIRECTORY_ENTRIES;
-                warn!(entries, scan_cut, max, "indicator directory over its entry bound");
-            }
-            let beyond_cap = files.len().saturating_sub(MAX_INDICATOR_FILES);
-            warn_files_cut(files.get(MAX_INDICATOR_FILES..).unwrap_or(&[]));
-            let read: Vec<Option<Vec<IndicatorValue>>> = files
-                .iter()
-                .take(MAX_INDICATOR_FILES)
-                .map(|path| {
-                    load_indicators(path)
-                        .inspect_err(|refusal| {
-                            let class = refusal_class(refusal);
-                            warn!(file = ?path.file_name(), class, "indicator file refused, its controls have no evidence");
-                        })
-                        .ok()
+        Ok(listing) => gather_indicators_from_listing(listing.map(|found| found.map(|entry| entry.path())), tenant, scan_cap),
+    }
+}
+
+
+/// The gathering over any listing of paths: a read error ends a real listing, and is counted as unreadable.
+pub fn gather_indicators_from_listing(listing: impl Iterator<Item = std::io::Result<PathBuf>>, tenant: &str, scan_cap: usize) -> Gathered {
+    let (files, entries, scan_cut, unreadable) = indicator_listing(listing, scan_cap);
+    if entries > MAX_DIRECTORY_ENTRIES || scan_cut {
+        let max = MAX_DIRECTORY_ENTRIES;
+        warn!(entries, scan_cut, max, "indicator directory over its entry bound");
+    }
+    let beyond_cap = files.len().saturating_sub(MAX_INDICATOR_FILES);
+    warn_files_cut(files.get(MAX_INDICATOR_FILES..).unwrap_or(&[]));
+    let read: Vec<Option<Vec<IndicatorValue>>> = files
+        .iter()
+        .take(MAX_INDICATOR_FILES)
+        .map(|path| {
+            load_indicators(path)
+                .inspect_err(|refusal| {
+                    let class = refusal_class(refusal);
+                    warn!(file = ?path.file_name(), class, "indicator file refused, its controls have no evidence");
                 })
-                .collect();
-            let refused_files = read.iter().filter(|outcome| outcome.is_none()).count();
-            let all: Vec<IndicatorValue> = read.into_iter().flatten().flatten().collect();
-            let total = all.len();
-            let own: Vec<IndicatorValue> = all.into_iter().filter(|value| value.tenant == tenant).collect();
-            let foreign = total - own.len();
-            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            own.iter().for_each(|value| *counts.entry(value.name.clone()).or_default() += 1);
-            let duplicated = counts.values().filter(|count| **count > 1).count();
-            counts
-                .iter()
-                .filter(|(_, count)| **count > 1)
-                .for_each(|(name, _)| warn!(indicator = %name, "indicator given more than once, no evidence for it"));
-            let values: Vec<IndicatorValue> = own.into_iter().filter(|value| counts.get(&value.name) == Some(&1)).collect();
-            Gathered {
-                values,
-                files: files.len().min(MAX_INDICATOR_FILES),
-                refused_files,
-                beyond_cap,
-                foreign,
-                duplicated,
-                entries,
-                scan_cut,
-                unreadable_directory: false,
-            }
-        }
+                .ok()
+        })
+        .collect();
+    let refused_files = read.iter().filter(|outcome| outcome.is_none()).count();
+    let all: Vec<IndicatorValue> = read.into_iter().flatten().flatten().collect();
+    let total = all.len();
+    let own: Vec<IndicatorValue> = all.into_iter().filter(|value| value.tenant == tenant).collect();
+    let foreign = total - own.len();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    own.iter().for_each(|value| *counts.entry(value.name.clone()).or_default() += 1);
+    let duplicated = counts.values().filter(|count| **count > 1).count();
+    counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .for_each(|(name, _)| warn!(indicator = %name, "indicator given more than once, no evidence for it"));
+    let values: Vec<IndicatorValue> = own.into_iter().filter(|value| counts.get(&value.name) == Some(&1)).collect();
+    Gathered {
+        values,
+        files: files.len().min(MAX_INDICATOR_FILES),
+        refused_files,
+        beyond_cap,
+        foreign,
+        duplicated,
+        entries,
+        scan_cut,
+        unreadable,
+        unreadable_directory: false,
     }
 }
 
@@ -312,7 +319,11 @@ pub async fn run_round_with(exec: Executor<'_, '_>, declarations: &Declarations,
             exec,
             declarations,
             framework,
-            (&gathered.values, gathered.beyond_cap > 0 || gathered.scan_cut, now),
+            (
+                &gathered.values,
+                gathered.beyond_cap > 0 || gathered.scan_cut || gathered.unreadable > 0,
+                now,
+            ),
         )
         .await
         {
