@@ -9,7 +9,7 @@ use sys_windows::session::{close_console, read_output, resize_console, spawn_ses
 use sys_windows::types::ConsoleError;
 
 
-const WAIT_SECONDS: u64 = 60;
+const WAIT_SECONDS: u64 = 300;
 
 
 const HELPER_SECONDS: u64 = 600;
