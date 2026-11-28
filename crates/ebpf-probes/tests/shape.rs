@@ -483,16 +483,30 @@ fn the_production_table_is_the_exec_and_file_probes() -> Result<(), Box<dyn Erro
     assert_eq!((EXEC_PROBE.kind, FILE_PROBE.kind), (RecordKind::Exec, RecordKind::File));
     assert_eq!(
         FILE_PROBE.attach,
-        AttachKind::TracePoint {
-            category: "syscalls",
-            name: "sys_enter_openat"
+        AttachKind::FExit {
+            function: "security_file_open"
         }
     );
+    assert_eq!(FILE_PROGRAM_NAME, "security_file_open");
     Ok(())
 }
 
 
-const FILE_SECTION: &str = "tracepoint/syscalls/sys_enter_openat";
+#[test]
+fn the_probe_names_and_every_ring_drops_and_program_name_of_the_table_are_unique() -> Result<(), Box<dyn Error>> {
+    let mut names: Vec<&str> = PROBE_TABLE
+        .iter()
+        .flat_map(|spec| [spec.name, spec.ring, spec.drops, spec.program])
+        .collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), total);
+    Ok(())
+}
+
+
+const FILE_SECTION: &str = "fexit/security_file_open";
 
 
 fn both_spec() -> Spec {
@@ -522,11 +536,24 @@ fn the_production_object_needs_both_probes() -> Result<(), Box<dyn Error>> {
     wrong_type.programs.pop();
     wrong_type
         .programs
-        .push(("kprobe/sys_enter_openat".to_string(), FILE_PROGRAM_NAME.to_string()));
+        .push(("kprobe/security_file_open".to_string(), FILE_PROGRAM_NAME.to_string()));
     assert_eq!(
         check_object_bytes(&elf_of(&wrong_type)?),
         Err(ShapeError::WrongProgramType(FILE_PROGRAM_NAME))
     );
+    [
+        "fentry/security_file_open",
+        "fexit.s/security_file_open",
+        "tracepoint/syscalls/sys_enter_openat",
+    ]
+    .iter()
+    .try_for_each(|section| -> Result<(), Box<dyn Error>> {
+        let mut other = both_spec();
+        other.programs.pop();
+        other.programs.push((section.to_string(), FILE_PROGRAM_NAME.to_string()));
+        assert_eq!(check_object_bytes(&elf_of(&other)?), Err(ShapeError::WrongProgramType(FILE_PROGRAM_NAME)));
+        Ok(())
+    })?;
     Ok(())
 }
 

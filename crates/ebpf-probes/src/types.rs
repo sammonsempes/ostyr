@@ -59,6 +59,7 @@ pub struct Parsed<'a> {
     pub strings: &'a [u8],
     pub index: Vec<usize>,
     pub found: Vec<Option<TaskStruct>>,
+    pub duplicated: Vec<bool>,
 }
 
 

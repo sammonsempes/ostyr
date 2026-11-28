@@ -17,7 +17,10 @@ pub const RING_NAME: &str = "EXEC_EVENTS";
 pub const DROPS_NAME: &str = "EXEC_DROPS";
 
 
-pub const FILE_PROGRAM_NAME: &str = "sys_enter_openat";
+pub const FILE_PROGRAM_NAME: &str = "security_file_open";
+
+
+pub const FILE_FUNCTION: &str = "security_file_open";
 
 
 pub const FILE_RING_NAME: &str = "FILE_EVENTS";
@@ -32,6 +35,7 @@ pub const RODATA_NAME: &str = ".rodata";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttachKind {
     TracePoint { category: &'static str, name: &'static str },
+    FExit { function: &'static str },
 }
 
 
@@ -72,10 +76,7 @@ pub const FILE_PROBE: ProbeSpec = ProbeSpec {
     program: FILE_PROGRAM_NAME,
     ring: FILE_RING_NAME,
     drops: FILE_DROPS_NAME,
-    attach: AttachKind::TracePoint {
-        category: "syscalls",
-        name: FILE_PROGRAM_NAME,
-    },
+    attach: AttachKind::FExit { function: FILE_FUNCTION },
 };
 
 
@@ -123,6 +124,7 @@ fn map_type_is(maps: &HashMap<String, Map>, name: &'static str, expected: u32) -
 fn section_matches(attach: &AttachKind, section: &ProgramSection) -> bool {
     match attach {
         AttachKind::TracePoint { .. } => matches!(section, ProgramSection::TracePoint),
+        AttachKind::FExit { .. } => matches!(section, ProgramSection::FExit { sleepable: false }),
     }
 }
 

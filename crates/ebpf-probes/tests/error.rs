@@ -156,9 +156,16 @@ fn every_variant_has_fixed_text_and_the_inner_causes_are_kept() -> Result<(), Bo
     ];
     let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
     assert_eq!(texts.iter().collect::<std::collections::HashSet<_>>().len(), all.len());
-    assert!(texts
-        .iter()
-        .all(|text| text.starts_with("exec ") || text.starts_with("kernel ") || text.starts_with("program ") || text.starts_with("map ")));
+    assert!(texts.iter().all(|text| text.starts_with("exec ")
+        || text.starts_with("probe ")
+        || text.starts_with("kernel ")
+        || text.starts_with("program ")
+        || text.starts_with("map ")));
+    assert_eq!(LoadError::Parse.to_string(), "probe object cannot be loaded");
+    assert_eq!(
+        LoadError::MapCreate { errno: Some(1) }.to_string(),
+        "probe object map cannot be created (errno Some(1))"
+    );
     let with_source: Vec<bool> = all.iter().map(|error| Error::source(error).is_some()).collect();
     assert!(with_source.iter().take(CAUSED_VARIANTS).all(|has| *has));
     assert!(with_source.iter().skip(CAUSED_VARIANTS).all(|has| !has));

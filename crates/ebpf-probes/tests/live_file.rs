@@ -3,61 +3,77 @@
 use ebpf_probes::drain::{KernelDropped, MAX_DRAIN_PER_POLL};
 use ebpf_probes::loader::{attach_probes, drain_exec, drain_probes, prepare_exec_probe_from_bytes, Probe, ProbeDrained};
 use ebpf_probes::object::{read_object, EXEC_OBJECT_PATH};
-use ebpf_probes::record::{FileRecord, FILE_PATH_BYTES};
+use ebpf_probes::record::FileRecord;
 use ebpf_probes::shape::{EXEC_PROBE, FILE_PROBE};
 use std::error::Error;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 
-const O_WRITE_BITS: u32 = 0o1 | 0o2 | 0o100 | 0o1000;
+const O_WRONLY: u32 = 0o1;
+
+
+const O_CREAT: u32 = 0o100;
+
+
+const O_TRUNC: u32 = 0o1000;
+
+
+const O_PATH: u32 = 0o10000000;
 
 
 const STORM_OPENS: u32 = 3000;
 
 
-const WRITES_EXPECTED: usize = 2;
+const RACE_OPENS: usize = 800;
 
 
-const SCRATCH: &str = "/tmp/t919-live";
+/// Runs allowed for the flipper to land inside the opener's window on a 2 vCPU guest; every run still checks all its records.
+const RACE_ATTEMPTS: usize = 5;
+
+
+const DEEP_LEVELS: u32 = 7;
+
+
+const SCRATCH: &str = "/tmp/t919b-live";
 
 
 const TRUE_BINARY: &str = "/usr/bin/true";
 
 
-const MAX_PATH_NAME: usize = 4094;
+const IA32_BINARY: &str = "/opt/t919/ia32_open";
 
 
-const HELPER: &str = r#"
-import ctypes, mmap, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-mode = sys.argv[1]
-flags = os.O_WRONLY | os.O_CREAT
-if mode == "unmapped":
-    libc.syscall(257, -100, ctypes.c_void_p(1), flags, 0o644)
-elif mode == "nonul":
-    page = mmap.mmap(-1, 8192)
-    base = ctypes.addressof(ctypes.c_char.from_buffer(page))
-    page.write(b"/" + b"a" * 4095)
-    libc.mprotect(ctypes.c_void_p(base + 4096), 4096, 0)
-    libc.syscall(257, -100, ctypes.c_void_p(base + 4096 - 100), flags, 0o644)
-elif mode == "storm":
-    for _ in range(int(sys.argv[2])):
-        os.close(os.open(sys.argv[3], flags))
-elif mode == "read":
-    os.close(os.open(sys.argv[2], os.O_RDONLY))
-elif mode == "long":
-    try:
-        os.open("/" + "a" * int(sys.argv[2]), flags)
-    except OSError:
-        pass
-"#;
+const UNPRIVILEGED_ID: u32 = 1000;
+
+
+const WRITES_EXPECTED: usize = 2;
+
+
+/// Kernels whose release starts so predate io_uring (5.1): the helper's setup call fails there and the test names it.
+const PRE_IO_URING_PREFIX: &str = "4.";
+
+
+/// The one kernel measured without `FMODE_CREATED` at `security_file_open`.
+const RHEL_8_PREFIX: &str = "4.18.";
+
+
+const HELPER: &str = include_str!("live_helper.py");
+
+
+struct Run {
+    pid: u32,
+    code: Option<i32>,
+    output: String,
+}
 
 
 fn probe() -> Result<Probe, Box<dyn Error>> {
     let bytes = read_object(Path::new(EXEC_OBJECT_PATH))?;
     let mut loaded = prepare_exec_probe_from_bytes(&bytes)?;
     attach_probes(&mut loaded)?;
+    assert!(loaded.unavailable.is_empty(), "{:?}", loaded.unavailable);
     Ok(loaded)
 }
 
@@ -75,22 +91,69 @@ fn file_records(loaded: &mut Probe) -> Result<Vec<FileRecord>, Box<dyn Error>> {
 
 
 fn scratch(name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    std::fs::create_dir_all(SCRATCH)?;
-    Ok(Path::new(SCRATCH).join(name))
+    let directory = Path::new(SCRATCH).join(name);
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory)?;
+    }
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
 }
 
 
-fn helper(mode: &str, extra: &[&str]) -> Result<u32, Box<dyn Error>> {
-    let mut child = Command::new("python3").arg("-I").arg("-c").arg(HELPER).arg(mode).args(extra).spawn()?;
+fn run(command: &mut Command) -> Result<Run, Box<dyn Error>> {
+    let child = command.stdout(Stdio::piped()).spawn()?;
     let pid = child.id();
-    child.wait()?;
-    Ok(pid)
+    let output = child.wait_with_output()?;
+    Ok(Run {
+        pid,
+        code: output.status.code(),
+        output: String::from_utf8_lossy(&output.stdout).to_string(),
+    })
+}
+
+
+fn helper_command(mode: &str, arguments: &[&str]) -> Command {
+    let mut command = Command::new("python3");
+    command.arg("-I").arg("-c").arg(HELPER).arg(mode).args(arguments);
+    command
+}
+
+
+fn helper(mode: &str, arguments: &[&str]) -> Result<Run, Box<dyn Error>> {
+    run(&mut helper_command(mode, arguments))
+}
+
+
+fn identity(run: &Run) -> Result<(u32, u64), Box<dyn Error>> {
+    let line = run.output.lines().next().ok_or("helper printed nothing")?;
+    let mut fields = line.split_whitespace();
+    let device: u32 = fields.next().ok_or("no device")?.parse()?;
+    let inode: u64 = fields.next().ok_or("no inode")?.parse()?;
+    Ok((device, inode))
+}
+
+
+fn by_pid(records: &[FileRecord], pid: u32) -> Vec<&FileRecord> {
+    records.iter().filter(|record| record.pid == pid).collect()
+}
+
+
+fn kernel_release() -> Result<String, Box<dyn Error>> {
+    Ok(std::fs::read_to_string("/proc/sys/kernel/osrelease")?.trim().to_string())
+}
+
+
+fn mount_namespace_of_self() -> Result<u32, Box<dyn Error>> {
+    let link = std::fs::read_link("/proc/self/ns/mnt")?;
+    let text = link.to_string_lossy().to_string();
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    Ok(digits.parse()?)
 }
 
 
 #[test]
-fn touch_and_a_redirect_make_two_write_records_and_a_cat_makes_none() -> Result<(), Box<dyn Error>> {
-    let target = scratch("three-ops")?;
+fn touch_and_tee_make_two_write_records_and_a_cat_makes_none() -> Result<(), Box<dyn Error>> {
+    let target = scratch("three-ops")?.join("f");
     let text = target.to_string_lossy().to_string();
     let mut loaded = probe()?;
     Command::new("touch").arg(&target).status()?;
@@ -98,9 +161,7 @@ fn touch_and_a_redirect_make_two_write_records_and_a_cat_makes_none() -> Result<
     Command::new("cat").arg(&target).status()?;
     let ours: Vec<FileRecord> = file_records(&mut loaded)?.into_iter().filter(|record| record.path == text).collect();
     assert_eq!(ours.len(), WRITES_EXPECTED, "{ours:?}");
-    assert!(ours
-        .iter()
-        .all(|record| record.flags & O_WRITE_BITS != 0 && !record.cut && !record.unreadable));
+    assert!(ours.iter().all(|record| !record.too_long && !record.path_error && !record.unlinked));
     Ok(())
 }
 
@@ -108,51 +169,458 @@ fn touch_and_a_redirect_make_two_write_records_and_a_cat_makes_none() -> Result<
 #[test]
 fn a_read_only_open_never_reaches_the_ring() -> Result<(), Box<dyn Error>> {
     let mut loaded = probe()?;
-    let marker = "/etc/hostname";
-    let pid = helper("read", &[marker])?;
+    let run = helper("write", &["/etc/hostname", "0"])?;
     let records = file_records(&mut loaded)?;
-    assert!(records.iter().all(|record| record.pid != pid), "a read-only helper produced {records:?}");
-    assert!(records.iter().all(|record| record.path != marker), "{records:?}");
+    assert!(by_pid(&records, run.pid).is_empty(), "{records:?}");
     Ok(())
 }
 
 
 #[test]
-fn a_long_path_is_cut_and_flagged_without_a_fault() -> Result<(), Box<dyn Error>> {
+fn open_creat_openat_and_openat2_are_each_recorded_with_the_real_path() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("entries")?;
     let mut loaded = probe()?;
-    let pid = helper("long", &[&MAX_PATH_NAME.to_string()])?;
+    let run = helper("opens", &[&directory.to_string_lossy()])?;
     let records = file_records(&mut loaded)?;
-    let mine: Vec<&FileRecord> = records.iter().filter(|record| record.pid == pid).collect();
+    let paths: Vec<String> = by_pid(&records, run.pid).iter().map(|record| record.path.clone()).collect();
+    let expected: Vec<String> = ["e-open", "e-creat", "e-openat", "e-openat2"]
+        .iter()
+        .map(|name| directory.join(name).to_string_lossy().to_string())
+        .collect();
+    assert_eq!(paths, expected);
+    Ok(())
+}
+
+
+#[test]
+fn a_32_bit_process_using_int_0x80_is_recorded() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("ia32")?;
+    let mut loaded = probe()?;
+    let names = ["a-openat", "b-open", "c-creat"].map(|name| directory.join(name).to_string_lossy().to_string());
+    let run = run(Command::new(IA32_BINARY).args(&names))?;
+    let records = file_records(&mut loaded)?;
+    let paths: Vec<String> = by_pid(&records, run.pid).iter().map(|record| record.path.clone()).collect();
+    assert_eq!(paths, names, "{records:?}");
+    Ok(())
+}
+
+
+#[test]
+fn an_io_uring_openat_is_recorded() -> Result<(), Box<dyn Error>> {
+    let target = scratch("uring")?.join("u");
+    let mut loaded = probe()?;
+    let run = helper("uring", &[&target.to_string_lossy()])?;
+    let release = kernel_release()?;
+    let io_uring_absent = release.starts_with(PRE_IO_URING_PREFIX);
+    assert!(
+        run.code == Some(0) || io_uring_absent,
+        "io_uring unavailable on kernel {release} (helper exit {:?}): the sysctl kernel.io_uring_disabled must be 0",
+        run.code
+    );
+    let records = file_records(&mut loaded)?;
+    let paths: Vec<&str> = records
+        .iter()
+        .filter(|record| record.pid == run.pid)
+        .map(|record| record.path.as_str())
+        .collect();
+    let expected: Vec<String> = if run.code == Some(0) {
+        vec![target.to_string_lossy().to_string()]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(paths, expected, "{records:?}");
+    Ok(())
+}
+
+
+fn race_once(directory: &Path) -> Result<usize, Box<dyn Error>> {
+    let mut loaded = probe()?;
+    let run = helper("race", &[&directory.to_string_lossy(), &RACE_OPENS.to_string()])?;
+    let records = file_records(&mut loaded)?;
+    let seen: Vec<&str> = run.output.lines().collect();
+    let recorded: Vec<&str> = records
+        .iter()
+        .filter(|record| record.pid == run.pid)
+        .map(|record| record.path.as_str())
+        .collect();
+    assert_eq!(seen.len(), RACE_OPENS);
+    assert_eq!(recorded, seen);
+    Ok(seen.iter().filter(|path| path.ends_with("race-b")).count())
+}
+
+
+#[test]
+fn a_second_process_rewriting_the_path_buffer_never_changes_what_a_record_names() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("race")?;
+    let mixed = (0..RACE_ATTEMPTS).find_map(|_| match race_once(&directory) {
+        Ok(flipped) if flipped > 0 && flipped < RACE_OPENS => Some(Ok(flipped)),
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    });
+    assert!(
+        mixed.transpose()?.is_some(),
+        "the buffer never changed under the opener in {RACE_ATTEMPTS} runs"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_untouched_file_backed_page_as_the_path_buffer_gives_the_real_path() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("filebacked")?;
+    let mut loaded = probe()?;
+    let run = helper("filebacked", &[&directory.to_string_lossy()])?;
+    let records = file_records(&mut loaded)?;
+    let mine = by_pid(&records, run.pid);
+    let expected = directory.join("fb-target").to_string_lossy().to_string();
+    assert!(mine.iter().any(|record| record.path == expected && !record.path_error), "{mine:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_path_over_256_bytes_is_flagged_with_an_empty_field_and_names_the_file_by_device_and_inode() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("deep")?;
+    let mut loaded = probe()?;
+    let run = helper("longname", &[&directory.to_string_lossy(), &DEEP_LEVELS.to_string()])?;
+    let records = file_records(&mut loaded)?;
+    let mine = by_pid(&records, run.pid);
+    let leaf: Vec<&&FileRecord> = mine.iter().filter(|record| record.too_long).collect();
+    assert_eq!(leaf.len(), 1, "{mine:?}");
+    assert!(leaf.iter().all(|record| record.path.is_empty() && !record.path_error));
+    let (device, inode) = identity(&run)?;
+    assert!(
+        leaf.iter().all(|record| record.inode == inode && record.device == device),
+        "{leaf:?} {device} {inode}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn o_tmpfile_is_flagged_unlinked_and_a_file_named_deleted_is_not() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("tmpfile")?;
+    let mut loaded = probe()?;
+    let run = helper("tmpfile", &[&directory.to_string_lossy()])?;
+    let named = directory.join("x (deleted)");
+    std::fs::write(&named, b"")?;
+    let second = helper("write", &[&named.to_string_lossy(), &(O_WRONLY | O_CREAT).to_string()])?;
+    let records = file_records(&mut loaded)?;
+    let mine = by_pid(&records, run.pid);
     assert_eq!(mine.len(), 1, "{mine:?}");
-    assert!(mine
+    assert!(mine.iter().all(|record| record.unlinked));
+    let (device, inode) = identity(&run)?;
+    let linked = std::fs::metadata(directory.join("linked"));
+    assert!(linked.is_ok());
+    assert!(mine.iter().all(|record| record.inode == inode && record.device == device));
+    let other = by_pid(&records, second.pid);
+    assert_eq!(other.len(), 1, "{other:?}");
+    assert!(other
         .iter()
-        .all(|record| record.cut && !record.unreadable && record.path.len() == FILE_PATH_BYTES - 1));
+        .all(|record| !record.unlinked && record.path.ends_with("x (deleted)") && !record.too_long && !record.path_error));
     Ok(())
 }
 
 
 #[test]
-fn a_path_without_nul_in_the_page_and_an_unmapped_pointer_are_flagged() -> Result<(), Box<dyn Error>> {
+fn write_intent_covers_truncate_and_create_and_leaves_read_and_path_opens_out() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("intent")?;
+    let existing = directory.join("existing");
+    std::fs::write(&existing, b"data")?;
+    let fresh = directory.join("fresh");
+    let path_only = directory.join("path-only");
+    std::fs::write(&path_only, b"data")?;
     let mut loaded = probe()?;
-    let faulting = helper("nonul", &[])?;
-    let unmapped = helper("unmapped", &[])?;
+    let truncate = helper("write", &[&existing.to_string_lossy(), &O_TRUNC.to_string()])?;
+    let create_new = helper("write", &[&fresh.to_string_lossy(), &O_CREAT.to_string()])?;
+    let create_old = helper("write", &[&existing.to_string_lossy(), &O_CREAT.to_string()])?;
+    let path_flag = helper("write", &[&path_only.to_string_lossy(), &(O_PATH | O_WRONLY).to_string()])?;
     let records = file_records(&mut loaded)?;
-    let first: Vec<&FileRecord> = records.iter().filter(|record| record.pid == faulting).collect();
-    let second: Vec<&FileRecord> = records.iter().filter(|record| record.pid == unmapped).collect();
-    assert_eq!((first.len(), second.len()), (1, 1), "{records:?}");
-    assert!(first
+    assert_eq!(by_pid(&records, truncate.pid).len(), 1, "{records:?}");
+    let created = by_pid(&records, create_new.pid).len();
+    assert_eq!(
+        created,
+        if loaded.create_unseen { 0 } else { 1 },
+        "create_unseen {}: {records:?}",
+        loaded.create_unseen
+    );
+    assert!(by_pid(&records, create_old.pid).is_empty(), "{records:?}");
+    assert!(by_pid(&records, path_flag.pid).is_empty(), "{records:?}");
+    Ok(())
+}
+
+
+#[test]
+fn the_create_unseen_flag_is_true_on_the_rhel_8_kernel_and_false_on_every_other_lab_kernel() -> Result<(), Box<dyn Error>> {
+    let loaded = probe()?;
+    let release = kernel_release()?;
+    assert_eq!(loaded.create_unseen, release.starts_with(RHEL_8_PREFIX), "kernel {release}");
+    Ok(())
+}
+
+
+#[test]
+fn a_denied_open_is_not_recorded_and_the_next_allowed_open_is() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("denied")?;
+    let denied = directory.join("denied");
+    let allowed = directory.join("allowed");
+    std::fs::write(&denied, b"")?;
+    std::fs::write(&allowed, b"")?;
+    let mut loaded = probe()?;
+    let run = helper(
+        "fanotify",
+        &[&denied.to_string_lossy(), &allowed.to_string_lossy(), &directory.to_string_lossy()],
+    )?;
+    assert!(run.output.contains("refused"), "{}", run.output);
+    let records = file_records(&mut loaded)?;
+    let paths: Vec<&str> = records.iter().map(|record| record.path.as_str()).collect();
+    let denied_text = denied.to_string_lossy().to_string();
+    let allowed_text = allowed.to_string_lossy().to_string();
+    assert!(!paths.contains(&denied_text.as_str()), "{paths:?}");
+    assert!(paths.contains(&allowed_text.as_str()), "{paths:?}");
+    Ok(())
+}
+
+
+const APPARMOR_DIRECTORY: &str = "/sys/kernel/security/apparmor";
+
+
+const SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
+
+
+const NO_LSM_MARKER: &str = "LIVE_ALLOW_NO_LSM";
+
+
+const DENY_SCRIPT: &str =
+    "import sys\ntry:\n    open(sys.argv[1], 'w')\nexcept OSError as error:\n    print('refused', error.errno)\nopen(sys.argv[2], 'w')\n";
+
+
+const PYTHON_BINARY: &str = "/usr/bin/python3";
+
+
+fn assert_denied_not_recorded(records: &[FileRecord], run: &Run, denied: &Path, allowed: &Path) {
+    let denied_text = denied.to_string_lossy().to_string();
+    let allowed_text = allowed.to_string_lossy().to_string();
+    assert!(run.output.contains("refused 13"), "{}", run.output);
+    assert!(records.iter().all(|record| record.path != denied_text), "{records:?}");
+    assert!(records.iter().any(|record| record.path == allowed_text), "{records:?}");
+}
+
+
+fn apparmor_denial() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("lsm")?;
+    let denied = directory.join("denied");
+    let allowed = directory.join("allowed");
+    let profile = directory.join("profile");
+    std::fs::write(
+        &profile,
+        format!(
+            "profile t919deny {{\n  file,\n  capability,\n  deny {} w,\n}}\n",
+            denied.to_string_lossy()
+        ),
+    )?;
+    assert!(Command::new("apparmor_parser").arg("-r").arg(&profile).status()?.success());
+    let mut loaded = probe()?;
+    let run = run(Command::new("aa-exec")
+        .args(["-p", "t919deny", "--", "python3", "-I", "-c", DENY_SCRIPT])
+        .arg(&denied)
+        .arg(&allowed))?;
+    let records = file_records(&mut loaded)?;
+    Command::new("apparmor_parser").arg("-R").arg(&profile).status()?;
+    assert_denied_not_recorded(&records, &run, &denied, &allowed);
+    Ok(())
+}
+
+
+fn label(context_type: &str, path: &Path) -> Result<(), Box<dyn Error>> {
+    assert!(
+        Command::new("chcon").args(["-t", context_type]).arg(path).status()?.success(),
+        "chcon {context_type}"
+    );
+    Ok(())
+}
+
+
+fn selinux_denial() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("selinux")?;
+    let confined = directory.join("py");
+    let denied = directory.join("denied");
+    let allowed = directory.join("allowed");
+    std::fs::copy(std::fs::canonicalize(PYTHON_BINARY)?, &confined)?;
+    std::fs::write(&denied, b"")?;
+    std::fs::write(&allowed, b"")?;
+    label("httpd_exec_t", &confined)?;
+    label("shadow_t", &denied)?;
+    label("httpd_sys_rw_content_t", &allowed)?;
+    label("httpd_sys_rw_content_t", &directory)?;
+    let mut loaded = probe()?;
+    let run = run(Command::new("runcon")
+        .args(["-u", "system_u", "-r", "system_r", "-t", "httpd_t", "-l", "s0"])
+        .arg(&confined)
+        .args(["-I", "-c", DENY_SCRIPT])
+        .arg(&denied)
+        .arg(&allowed))?;
+    let records = file_records(&mut loaded)?;
+    assert_denied_not_recorded(&records, &run, &denied, &allowed);
+    Ok(())
+}
+
+
+fn selinux_enforcing() -> bool {
+    std::fs::read_to_string(SELINUX_ENFORCE).is_ok_and(|text| text.trim() == "1")
+}
+
+
+#[test]
+fn an_lsm_denied_open_is_not_recorded_under_apparmor_and_under_selinux() -> Result<(), Box<dyn Error>> {
+    let apparmor = Path::new(APPARMOR_DIRECTORY).exists();
+    let selinux = selinux_enforcing();
+    if apparmor {
+        apparmor_denial()?;
+    }
+    if selinux {
+        selinux_denial()?;
+    }
+    if !apparmor && !selinux {
+        assert!(
+            std::env::var_os(NO_LSM_MARKER).is_some(),
+            "skipped by name: neither AppArmor nor an enforcing SELinux is present, nothing was tested; set {NO_LSM_MARKER} to accept this run"
+        );
+        writeln!(std::io::stderr(), "named skip: no LSM on this kernel, {NO_LSM_MARKER} accepted the run")?;
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_chroot_names_the_file_in_the_openers_root_and_the_device_and_inode_name_the_real_file() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("chroot")?;
+    let mut loaded = probe()?;
+    let run = helper("chroot", &[&directory.to_string_lossy()])?;
+    let records = file_records(&mut loaded)?;
+    let mine = by_pid(&records, run.pid);
+    let (device, inode) = identity(&run)?;
+    assert!(
+        mine.iter()
+            .any(|record| record.path == "/inner" && record.inode == inode && record.device == device),
+        "{mine:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_bind_mount_and_an_open_tree_clone_keep_the_real_device_and_inode() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("bind")?;
+    let source = directory.join("source");
+    let bound = directory.join("bound");
+    std::fs::create_dir_all(&source)?;
+    std::fs::create_dir_all(&bound)?;
+    assert!(Command::new("mount").arg("--bind").arg(&source).arg(&bound).status()?.success());
+    let mut loaded = probe()?;
+    let through_bind = helper("write", &[&bound.join("f").to_string_lossy(), &(O_WRONLY | O_CREAT).to_string()])?;
+    let through_clone = helper("opentree", &[&source.to_string_lossy()])?;
+    let records = file_records(&mut loaded)?;
+    Command::new("umount").arg(&bound).status()?;
+    let bind_identity = identity(&through_bind)?;
+    let clone_identity = identity(&through_clone)?;
+    let bind_records = by_pid(&records, through_bind.pid);
+    let clone_records = by_pid(&records, through_clone.pid);
+    assert!(
+        bind_records
+            .iter()
+            .any(|record| (record.device, record.inode) == bind_identity && record.path == bound.join("f").to_string_lossy()),
+        "{bind_records:?}"
+    );
+    assert!(
+        clone_records.iter().any(|record| (record.device, record.inode) == clone_identity),
+        "{clone_records:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_process_in_a_user_namespace_reports_its_own_mount_namespace() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("userns")?;
+    let target = directory.join("f");
+    let mut loaded = probe()?;
+    let mut command = Command::new("unshare");
+    command.args(["-Urm", "touch"]).arg(&target);
+    let run = run(&mut command)?;
+    let own = helper("write", &[&directory.join("g").to_string_lossy(), &(O_WRONLY | O_CREAT).to_string()])?;
+    let records = file_records(&mut loaded)?;
+    let target_text = target.to_string_lossy().to_string();
+    let inside: Vec<&FileRecord> = by_pid(&records, run.pid)
+        .into_iter()
+        .filter(|record| record.path == target_text)
+        .collect();
+    let outside = by_pid(&records, own.pid);
+    assert_eq!(inside.len(), 1, "{inside:?}");
+    assert_eq!(outside.len(), 1, "{outside:?}");
+    assert!(inside
         .iter()
-        .chain(second.iter())
-        .all(|record| record.unreadable && record.path.is_empty()));
+        .zip(outside.iter())
+        .all(|(first, second)| first.mount_namespace != second.mount_namespace));
+    assert_eq!(
+        outside.iter().map(|record| record.mount_namespace).collect::<Vec<u32>>(),
+        [mount_namespace_of_self()?]
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_overlay_write_by_an_unprivileged_user_is_recorded_with_the_merged_path() -> Result<(), Box<dyn Error>> {
+    let directory = scratch("overlay")?;
+    ["lower", "upper", "work", "merged"]
+        .iter()
+        .try_for_each(|name| std::fs::create_dir_all(directory.join(name)))?;
+    std::fs::write(directory.join("lower/f"), b"data")?;
+    Command::new("chmod").arg("-R").arg("a+rwX").arg(&directory).status()?;
+    let options = format!("lowerdir={0}/lower,upperdir={0}/upper,workdir={0}/work", directory.to_string_lossy());
+    assert!(Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o"])
+        .arg(&options)
+        .arg(directory.join("merged"))
+        .status()?
+        .success());
+    let mut loaded = probe()?;
+    let merged = directory.join("merged/f").to_string_lossy().to_string();
+    let uid_text = UNPRIVILEGED_ID.to_string();
+    let run = run(Command::new("setpriv")
+        .args(["--reuid", &uid_text, "--regid", &uid_text, "--clear-groups", "python3", "-I", "-c"])
+        .arg(HELPER)
+        .args(["write", &merged, "1"]))?;
+    let records = file_records(&mut loaded)?;
+    Command::new("umount").arg(directory.join("merged")).status()?;
+    let mine = by_pid(&records, run.pid);
+    assert!(
+        mine.iter().any(|record| record.path == merged && record.uid == UNPRIVILEGED_ID),
+        "{mine:?}"
+    );
+    let summary: Vec<(String, u32)> = records
+        .iter()
+        .filter(|record| record.path.contains("t919b-live/overlay"))
+        .map(|record| (record.path.clone(), record.uid))
+        .collect();
+    assert!(summary.iter().all(|(_, uid)| *uid == 0 || *uid == UNPRIVILEGED_ID), "{summary:?}");
     Ok(())
 }
 
 
 #[test]
 fn a_write_storm_leaves_a_kernel_drop_count_and_exec_records_keep_flowing() -> Result<(), Box<dyn Error>> {
-    let target = scratch("storm")?;
+    let target = scratch("storm")?.join("f");
     let mut loaded = probe()?;
-    helper("storm", &[&STORM_OPENS.to_string(), &target.to_string_lossy()])?;
+    let mut storm = Command::new("python3");
+    storm
+        .arg("-I")
+        .arg("-c")
+        .arg("import os,sys\nfor _ in range(int(sys.argv[1])): os.close(os.open(sys.argv[2], 0o101))")
+        .arg(STORM_OPENS.to_string())
+        .arg(&target);
+    storm.status()?;
     let child = Command::new(TRUE_BINARY)
         .spawn()
         .and_then(|mut process| process.wait().map(|_| process.id()))?;
