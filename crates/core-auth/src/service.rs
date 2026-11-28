@@ -264,11 +264,11 @@ pub fn marked(mut parameters: Parameters, flag: bool) -> Parameters {
 }
 
 
-/// The marker of a target that is break-glass before or after an operation, and the grant or revoke it made when it succeeded.
-pub fn target_marks(before: bool, after: bool, succeeded: bool) -> Parameters {
-    let change = match (before, after, succeeded) {
-        (false, true, true) => Some("grant"),
-        (true, false, true) => Some("revoke"),
+/// The marker of a target that is break-glass before or after an operation, and the grant or revoke the working copy shows, attempted or done.
+pub fn target_marks(before: bool, after: bool) -> Parameters {
+    let change = match (before, after) {
+        (false, true) => Some("grant"),
+        (true, false) => Some("revoke"),
         _ => None,
     };
     marked(Vec::new(), before || after)
@@ -389,7 +389,7 @@ pub fn transact<Output: Write, Value>(
         is_break_glass(&state.accounts, context.catalog, &target_before),
         is_break_glass(&working.accounts, context.catalog, &target_after),
     );
-    let marks = target_marks(before, after, result.is_ok());
+    let marks = target_marks(before, after);
     let outcome = finish_marked(context, now, (&acting.actor, action, &target_after), result, &marks);
     state.attempts = working.attempts;
     state.challenges = working.challenges;
@@ -635,8 +635,10 @@ pub fn change_roles<Output: Write>(
         |after| audit_name(&after.accounts, username),
         |working, acting| {
             require(acting, acting.manager)
-                .and_then(|()| refuse_self_grant(working, context.catalog, (acting, username), &roles))
-                .and_then(|()| apply_roles(working, context.catalog, username, roles))
+                .and_then(|()| {
+                    let refusal = refuse_self_grant(working, context.catalog, (acting, username), &roles);
+                    apply_roles(working, context.catalog, username, roles).and_then(|parameters| refusal.map(|()| parameters))
+                })
                 .map(|parameters| {
                     mark_sessions_revoked(&mut working.accounts, username, now);
                     ((), parameters)
