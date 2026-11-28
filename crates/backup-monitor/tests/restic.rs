@@ -7,6 +7,7 @@ use backup_monitor::restic::{
     ResticError, MAX_LOCATION_BYTES,
 };
 use backup_monitor::secrets::{open_secrets_dir, SecretsDir, MAX_SECRET_NAME_BYTES};
+use grandchild::{gone_within_guard, Grandchild};
 use net_topology::model::RunFailure;
 use std::error::Error;
 use std::fs::{create_dir, set_permissions, File, Permissions};
@@ -15,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+
+
+#[path = "common/grandchild.rs"]
+mod grandchild;
 
 
 const CONFIG_ID: &str = "8ff9e8256a6089f1357840c0fc88b498c541e8948af3317219d4117ce4243ab5";
@@ -63,12 +68,6 @@ const LONG_MARKER_BYTES: usize = 5000;
 
 
 const TINY_CAP: u64 = 10;
-
-
-const GONE_ATTEMPTS: usize = 100;
-
-
-const GONE_POLL: Duration = Duration::from_millis(50);
 
 
 const DECLARATIONS: &str =
@@ -374,24 +373,24 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
+    let grandchild = Grandchild {
+        pid_file: setup.dir.path().join("grandchild"),
+    };
     assert!(matches!(
         run_raw(
             &setup.program,
             &setup.secrets,
             &setup.source,
-            &Limits::default(),
-            IMPATIENT,
+            &Limits {
+                max_bytes: TINY_CAP,
+                ..Limits::default()
+            },
+            PATIENT,
             rustix::process::geteuid().as_raw()
         ),
-        Err(ResticError::Timeout)
+        Err(ResticError::Oversized)
     ));
-    let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
-    let gone = (0..GONE_ATTEMPTS).any(|_| {
-        std::thread::sleep(GONE_POLL);
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map_or(true, |stat| stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z')))
-    });
-    assert!(gone);
+    assert!(gone_within_guard(&grandchild)?);
     Ok(())
 }
 

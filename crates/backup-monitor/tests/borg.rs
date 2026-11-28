@@ -10,6 +10,7 @@ use backup_monitor::model::{BorgSource, Limits};
 use backup_monitor::restic::{plan as restic_plan, valid_authority, valid_port, MAX_LOCATION_BYTES};
 use backup_monitor::secrets::{open_secrets_dir, SecretsDir, MAX_SECRET_NAME_BYTES};
 use core_pg::scope::{tenant_scope, TenantScope};
+use grandchild::{gone_within_guard, Grandchild};
 use net_topology::model::RunFailure;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -22,6 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+
+
+#[path = "common/grandchild.rs"]
+mod grandchild;
 
 
 const REPOSITORY_NAME: &str = "main";
@@ -97,12 +102,6 @@ const FAILED_CODE: i32 = 2;
 
 
 const WARNING_CODE: i32 = 1;
-
-
-const GONE_ATTEMPTS: usize = 100;
-
-
-const GONE_POLL: Duration = Duration::from_millis(50);
 
 
 const DECLARATIONS: &str = "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 1\n    borg:\n      location: ssh://u@h/srv/borg\n      \
@@ -588,6 +587,9 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
+    let grandchild = Grandchild {
+        pid_file: setup.dir.path().join("grandchild"),
+    };
     let outcome = run_raw(
         &setup.program,
         &setup.secrets,
@@ -597,18 +599,15 @@ fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn 
             repository: REPOSITORY_NAME,
             state: &setup.state,
         },
-        &Limits::default(),
-        IMPATIENT,
+        &Limits {
+            max_bytes: TINY_CAP,
+            ..Limits::default()
+        },
+        PATIENT,
         rustix::process::geteuid().as_raw(),
     );
-    assert!(matches!(outcome, Err(BorgError::Timeout)));
-    let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
-    let gone = (0..GONE_ATTEMPTS).any(|_| {
-        std::thread::sleep(GONE_POLL);
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map_or(true, |stat| stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z')))
-    });
-    assert!(gone);
+    assert!(matches!(outcome, Err(BorgError::Oversized)));
+    assert!(gone_within_guard(&grandchild)?);
     Ok(())
 }
 

@@ -24,7 +24,7 @@ else
   big) head -c 5000 /dev/zero ;;
   failed) cat "$dir/canary"; echo "/secret/path $(printf '\033[31m') hunter2" >&2; exit 1 ;;
   sleep) sleep 60 ;;
-  hold) sleep 60 & echo $! > "$dir/grandchild"; sleep 60 ;;
+  hold) sleep 3600 & echo $! > "$dir/grandchild"; head -c 5000 /dev/zero; exit 0 ;;
   swap) rm "$4"; ln -s /etc/hostname "$4"; cat "$dir/canary" ;;
   *) cat "$dir/canary" ;;
   esac
