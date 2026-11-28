@@ -546,3 +546,22 @@ fn a_stale_temporary_file_next_to_the_package_does_not_block_it() -> TestResult 
     );
     Ok(())
 }
+
+
+#[test]
+fn an_entry_that_is_not_a_file_of_the_package_is_refused_at_signing_and_at_verification() -> TestResult {
+    let directory = signed_dir()?;
+    put(
+        directory.path(),
+        MANIFEST_NAME,
+        manifest_with("entry: main.py", "entry: other.py").as_bytes(),
+    )?;
+    let package = read_package(directory.path())?;
+    assert!(matches!(
+        sign_package(&package, KEY_ID, &signing_key()),
+        Err(ConnectorError::MissingEntry)
+    ));
+    write_signature(directory.path(), &signature_over(&signed_document(&package.files), KEY_ID))?;
+    assert!(matches!(verdict(directory.path())?, ConnectorError::MissingEntry));
+    Ok(())
+}

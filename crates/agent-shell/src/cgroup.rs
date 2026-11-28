@@ -24,6 +24,9 @@ pub const SELF_CGROUP: &str = "/proc/self/cgroup";
 pub const CGROUP2_MAGIC: i64 = 0x6367_7270;
 
 
+pub const DETACHED_PID_LINE: &str = "0";
+
+
 pub const SESSION_PREFIX: &str = "shell-";
 
 
@@ -258,6 +261,15 @@ pub fn logged_prefix(text: &str) -> String {
 }
 
 
+/// The ids of a `cgroup.procs` or `cgroup.threads` text; a `0` line is a task whose pid the kernel already detached (it prints `task_pid_vnr` = 0), skipped.
+pub fn parse_members(text: &str) -> Result<Vec<Pid>, CgroupError> {
+    text.lines()
+        .filter(|line| *line != DETACHED_PID_LINE)
+        .map(parse_pid)
+        .collect::<Result<Vec<Pid>, CgroupError>>()
+}
+
+
 pub fn parse_pid(line: &str) -> Result<Pid, CgroupError> {
     line.parse::<i32>().ok().and_then(Pid::from_raw).ok_or_else(|| {
         let shown = logged_prefix(line);
@@ -270,7 +282,7 @@ pub fn parse_pid(line: &str) -> Result<Pid, CgroupError> {
 /// The members of a session cgroup; more than `MAX_SCANNED_PROCESSES` is a refusal.
 pub fn read_pids(directory: &OwnedFd) -> Result<Vec<Pid>, CgroupError> {
     let text = read_capped(&mut open_file_at(directory, PROCS_FILE, OFlags::RDONLY)?, MAX_PROCS_FILE_BYTES)?;
-    let pids = text.lines().map(parse_pid).collect::<Result<Vec<Pid>, CgroupError>>()?;
+    let pids = parse_members(&text)?;
     if pids.len() > MAX_SCANNED_PROCESSES {
         Err(CgroupError::TooManyProcesses)
     } else {
@@ -329,7 +341,7 @@ pub fn write_kill(directory: &OwnedFd) -> Result<(), CgroupError> {
 /// The thread ids of a session cgroup; a leader that called `pthread_exit` is listed here only (kernel 7.0), with its live threads.
 pub fn read_tids(directory: &OwnedFd) -> Result<Vec<Pid>, CgroupError> {
     let text = read_capped(&mut open_file_at(directory, THREADS_FILE, OFlags::RDONLY)?, MAX_PROCS_FILE_BYTES)?;
-    let tids = text.lines().map(parse_pid).collect::<Result<Vec<Pid>, CgroupError>>()?;
+    let tids = parse_members(&text)?;
     if tids.len() > MAX_SCANNED_PROCESSES {
         Err(CgroupError::TooManyProcesses)
     } else {

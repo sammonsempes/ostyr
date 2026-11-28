@@ -100,6 +100,8 @@ pub struct FeedSummary {
     pub unknown_tlp: u64,
     pub samples: Vec<SkipSample>,
     pub failed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<&'static str>,
 }
 
 

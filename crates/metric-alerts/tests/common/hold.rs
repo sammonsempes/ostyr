@@ -14,13 +14,24 @@ const MAX_CHUNKS: usize = 4096;
 const BLOCK: usize = 65_536;
 
 
-/// Accepts one connection, reads the request and holds it open until `release` fires.
+/// Accepts one connection, reads the request and holds it open until `release` fires; a client that hung up on its deadline ends it cleanly.
 pub fn stall(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Result<()>> {
-    spawn(move || {
-        serve_check(&listener)?;
-        let (mut stream, _) = listener.accept()?;
-        read_request(&mut stream)?;
-        release.recv().map_err(io::Error::other)
+    spawn(move || peer_hung_up(hold(&listener, &release)))
+}
+
+
+fn hold(listener: &TcpListener, release: &Receiver<()>) -> io::Result<()> {
+    serve_check(listener)?;
+    let (mut stream, _) = listener.accept()?;
+    read_request(&mut stream)?;
+    release.recv().map_err(io::Error::other)
+}
+
+
+fn peer_hung_up(outcome: io::Result<()>) -> io::Result<()> {
+    outcome.or_else(|error| match error.kind() {
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::UnexpectedEof => Ok(()),
+        _ => Err(error),
     })
 }
 

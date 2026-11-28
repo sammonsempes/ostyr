@@ -305,7 +305,7 @@ fn an_object_over_the_cap_is_skipped_and_a_document_over_the_cap_is_refused() ->
 fn document_level_failures_are_typed() -> TestResult {
     let json = feed("list", FeedFormat::Json);
     let stix = feed("bundle", FeedFormat::Stix);
-    assert!(matches!(parse_text(&json, "[1, 2"), Err(FeedError::Json(_))));
+    assert!(matches!(parse_text(&json, "[1, 2"), Err(FeedError::Json { .. })));
     assert!(matches!(parse_text(&json, "{}"), Err(FeedError::NotAnArray)));
     assert!(matches!(parse_text(&stix, "[]"), Err(FeedError::NotABundle)));
     assert!(matches!(parse_feed(&json, &mut BufReader::new(Broken), now()), Err(FeedError::Io(_))));

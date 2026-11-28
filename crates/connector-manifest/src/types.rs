@@ -23,3 +23,28 @@ pub type OpenFn = fn(BorrowedFd<'_>, &str, OFlags) -> Result<OwnedFd, Errno>;
 
 
 pub type WriteFn = fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>;
+
+
+#[cfg(target_os = "linux")]
+pub type LaunchFn = fn(&crate::run::LaunchPlan) -> std::process::Command;
+
+
+#[cfg(target_os = "linux")]
+pub type SpawnFn = fn(&mut std::process::Command) -> io::Result<std::process::Child>;
+
+
+#[cfg(target_os = "linux")]
+pub type NamerFn = fn() -> io::Result<String>;
+
+
+#[cfg(target_os = "linux")]
+pub type PauseFn = fn(std::time::Duration);
+
+
+#[cfg(target_os = "linux")]
+pub type Started = (
+    std::process::Child,
+    std::process::ChildStdin,
+    std::process::ChildStdout,
+    std::process::ChildStderr,
+);

@@ -325,6 +325,19 @@ pub fn check_profile(agent: &Agent, config: &ClickhouseConfig, password: &str, r
 }
 
 
+pub const PARAM_COUNT: usize = 3;
+
+
+/// Tenant, time and limit (one more than `max_rows`) as query values.
+pub fn row_params(config: &ClickhouseConfig, now: OffsetDateTime, max_rows: usize) -> [(&'static str, String); PARAM_COUNT] {
+    [
+        ("param_tenant", config.tenant.clone()),
+        ("param_now", epoch_u32(now.unix_timestamp()).to_string()),
+        ("param_limit", (max_rows + 1).to_string()),
+    ]
+}
+
+
 /// The read under what is left of the deadline; tenant, time and limit travel as query parameters.
 pub fn request_rows(
     agent: &Agent,
@@ -335,11 +348,7 @@ pub fn request_rows(
     max_rows: usize,
     remaining: Duration,
 ) -> Result<Response<Body>, ReadError> {
-    let params = [
-        ("param_tenant", config.tenant.clone()),
-        ("param_now", epoch_u32(now.unix_timestamp()).to_string()),
-        ("param_limit", (max_rows + 1).to_string()),
-    ];
+    let params = row_params(config, now, max_rows);
     let response = send_statement(agent, config, password, statement, &params, remaining)?;
     classify_reply(response.status(), exception_code(response.headers())).map_or(Ok(response), |class| Err(ReadError::Refused(class)))
 }

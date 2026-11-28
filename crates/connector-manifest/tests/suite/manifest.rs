@@ -4,7 +4,7 @@ use connector_manifest::bounded::TOO_MANY_ELEMENTS;
 use connector_manifest::error::ConnectorError;
 use connector_manifest::manifest::{in_grammar, parse_manifest, valid_file_name, valid_name, valid_scope};
 use connector_manifest::model::{
-    Access, Approval, ConfigKind, MAX_ACTIONS, MAX_ALIASES, MAX_CONFIG_FIELDS, MAX_DEFAULT_BYTES, MAX_FILE_NAME_BYTES, MAX_MANIFEST_BYTES,
+    Access, Approval, ConfigKind, Runtime, MAX_ACTIONS, MAX_ALIASES, MAX_CONFIG_FIELDS, MAX_DEFAULT_BYTES, MAX_FILE_NAME_BYTES, MAX_MANIFEST_BYTES,
     MAX_NAME_BYTES, MAX_RIGHTS, MAX_SCOPE_BYTES, MAX_TARGETS, MAX_VERSION_BYTES,
 };
 
@@ -297,5 +297,60 @@ fn a_version_over_the_cap_is_refused_before_parsing_and_one_at_the_cap_is_read()
     ));
     let exact = format!("{VERSION_PREFIX}{}", "a".repeat(MAX_VERSION_BYTES - VERSION_PREFIX.len()));
     assert_eq!(parse_manifest(manifest_with("1.2.3", &exact).as_bytes())?.version.to_string(), exact);
+    Ok(())
+}
+
+
+#[test]
+fn the_entry_and_the_runtime_are_required_and_the_entry_is_a_package_file_name() -> TestResult {
+    let manifest = parse_manifest(VALID_MANIFEST.as_bytes())?;
+    assert_eq!(manifest.entry, "main.py");
+    assert_eq!(manifest.runtime, Runtime::Python3);
+    assert_eq!(
+        parse_manifest(manifest_with("runtime: python3", "runtime: native").as_bytes())?.runtime,
+        Runtime::Native
+    );
+    assert!(matches!(
+        refused(&VALID_MANIFEST.replacen("entry: main.py\n", "", 1))?,
+        ConnectorError::Document { .. }
+    ));
+    assert!(matches!(
+        refused(&VALID_MANIFEST.replacen("runtime: python3\n", "", 1))?,
+        ConnectorError::Document { .. }
+    ));
+    assert!(matches!(
+        refused(&manifest_with("runtime: python3", "runtime: perl"))?,
+        ConnectorError::Document { .. }
+    ));
+    assert!(matches!(
+        refused(&manifest_with("runtime: python3", "runtime: python3\nruntime: native"))?,
+        ConnectorError::Document { .. }
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_entry_outside_the_file_name_grammar_or_naming_the_manifest_or_the_signature_is_refused() -> TestResult {
+    let bad = [
+        "-main.py",
+        "../main.py",
+        "a/b",
+        ".hidden",
+        "connector.yaml",
+        "connector.sig",
+        "\"\"",
+        "caf\u{e9}",
+    ];
+    bad.iter().try_for_each(
+        |entry| match invalid_field(&manifest_with("entry: main.py", &format!("entry: {entry}"))) {
+            Ok("entry") => Ok(()),
+            other => Err(format!("{entry}: {other:?}")),
+        },
+    )?;
+    assert_eq!(
+        parse_manifest(manifest_with("entry: main.py", "entry: run-2.sh").as_bytes())?.entry,
+        "run-2.sh"
+    );
     Ok(())
 }

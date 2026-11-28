@@ -1586,6 +1586,7 @@ async fn an_oversized_request_source_is_cut_before_it_is_audited() -> TestResult
         forwarded_by: None,
         status: StatusCode::OK,
         identity: fx.state.identity.load_full(),
+        reason: None,
     };
     audit_exchange(&fx.state, &exchange)?;
     let lines = audit_lines(&fx)?;
@@ -1677,6 +1678,7 @@ async fn the_audit_and_the_log_of_a_request_use_the_identity_that_admitted_it() 
         forwarded_by: None,
         status: StatusCode::OK,
         identity: Arc::new(other_tenant(&fx.state)),
+        reason: None,
     };
     audit_exchange(&fx.state, &exchange)?;
     let lines = audit_lines(&fx)?;

@@ -412,6 +412,36 @@ async fn conflicts_and_events_are_stored_with_their_asset() -> TestResult {
 
 
 #[tokio::test]
+async fn repeated_sightings_of_a_retired_asset_keep_one_reappeared_row_per_tenant() -> TestResult {
+    const SIGHTINGS: usize = 50;
+    let db = Db::default();
+    let exec = executor(&db);
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    for tenant_name in ["a", "b"] {
+        let scope = tenant_scope(tenant_name)?;
+        reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[]), &truth, &limits).await?;
+        with_tenant(&db, tenant_name, |tenant| {
+            tenant
+                .assets
+                .insert("serial_number:SN1".to_owned(), ("server".to_owned(), "retired".to_owned(), THIRD_VERSION));
+        });
+    }
+    for _ in 0..SIGHTINGS {
+        reconcile_stored(&exec, &tenant_scope("a")?, &observation("agent", "SN1", &[]), &truth, &limits).await?;
+    }
+    reconcile_stored(&exec, &tenant_scope("b")?, &observation("agent", "SN1", &[]), &truth, &limits).await?;
+    for tenant_name in ["a", "b"] {
+        let reappeared = with_tenant(&db, tenant_name, |tenant| {
+            tenant.events.iter().filter(|event| memory::text(event, "kind") == "reappeared").count()
+        });
+        assert_eq!(reappeared, 1, "tenant {tenant_name}");
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_server_that_never_ends_a_table_is_too_many_rows_not_a_partial_read() -> TestResult {
     let never_ending = endless();
     let scope = tenant_scope("acme")?;
@@ -871,6 +901,24 @@ fn the_conflict_status_migration_adds_the_status_and_the_duplicate_index() -> Te
     assert!(sql.contains("status IN ('open', 'resolved')"));
     assert!(sql.contains("ON cmdb_conflicts (tenant, asset, attribute)"));
     assert!(APPLY_SQL.contains("o.status = 'open'"));
+    Ok(())
+}
+
+
+#[test]
+fn the_events_write_skips_a_repeat_on_the_unique_constraint() -> TestResult {
+    assert!(APPLY_SQL.contains("ON CONFLICT ON CONSTRAINT cmdb_events_once DO NOTHING"));
+    Ok(())
+}
+
+
+#[test]
+fn the_events_migration_adds_the_unique_constraint() -> TestResult {
+    let migration = MIGRATIONS
+        .iter()
+        .find(|entry| entry.version.starts_with("007"))
+        .ok_or("no 007 migration")?;
+    assert!(migration.sql.contains("UNIQUE NULLS NOT DISTINCT (tenant, asset, kind, lifecycle)"));
     Ok(())
 }
 

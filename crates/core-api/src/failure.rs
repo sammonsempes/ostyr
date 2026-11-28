@@ -59,7 +59,7 @@ pub fn reply(result: Result<Response, ApiError>) -> Response {
 
 pub fn auth_failure(error: &AuthError) -> ApiError {
     match error {
-        AuthError::InvalidCredentials => ApiError::InvalidCredentials,
+        AuthError::InvalidCredentials | AuthError::WebauthnRequired => ApiError::InvalidCredentials,
         AuthError::SessionInvalid => ApiError::Unauthorized,
         AuthError::PermissionDenied => ApiError::Forbidden,
         AuthError::MfaRequired => ApiError::MfaRequired,

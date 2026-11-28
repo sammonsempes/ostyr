@@ -29,12 +29,12 @@ A stop asked while the service starts waits for the start (the interrupt is look
 
 start >= connect_timeout_secs + (migrations + 4) x (2 x statement_timeout_secs + 5) + (max(statement_timeout_secs, MIGRATION_DEADLINE 3600) + 5) + migrations x (migrations + 1) x (max(statement_timeout_secs, MIGRATION_DEADLINE 3600) + 5)
 
-migrations = 6 (the embedded CMDB migrations)
+migrations = 7 (the embedded CMDB migrations)
 
 - `connect_timeout_secs`: the pg connection (default 5).
 - (migrations + 4) reads: the isolation, shape and search-path reads, the applied-versions read, and one more applied-versions read per retry, each cut like a round statement.
 - the bootstrap script (it waits for the migration lock, cut at the larger of `statement_timeout_secs` and MIGRATION_DEADLINE, plus the 5 s query margin), then at most migrations + 1 passes of at most `migrations` migrations (a unique violation is retried once per migration, and only when another process made progress), each migration cut at the larger of `statement_timeout_secs` and MIGRATION_DEADLINE (3600 s), plus the 5 s migration margin.
 
-At the defaults (connect_timeout_secs 5, statement_timeout_secs 30) the start bound is 155670 s. At the ceilings (both 3600) the start bound is 230665 s.
+At the defaults (connect_timeout_secs 5, statement_timeout_secs 30) the start bound is 206205 s. At the ceilings (both 3600) the start bound is 288340 s.
 
 Both are far above an hour, so the advice is the same: `TimeoutStopSec=infinity`. In practice the start is seconds, and a start that waits long is waiting for another process's migration lock.

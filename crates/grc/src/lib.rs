@@ -16,5 +16,8 @@ pub mod render;
 pub mod report;
 pub mod risk;
 pub mod risk_eval;
+pub mod round;
+pub mod serve;
+pub mod service;
 pub mod store;
 pub mod types;

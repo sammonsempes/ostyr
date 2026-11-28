@@ -143,6 +143,7 @@ pub enum Denial {
     MfaMissing,
     MfaInvalid,
     WebauthnRequired,
+    UnknownRole,
     Internal,
 }
 
@@ -155,6 +156,7 @@ pub fn denial_reason(denial: Denial) -> &'static str {
         Denial::MfaMissing => "mfa_missing",
         Denial::MfaInvalid => "mfa_invalid",
         Denial::WebauthnRequired => "webauthn_required",
+        Denial::UnknownRole => "unknown_role",
         Denial::Internal => "internal_error",
     }
 }
@@ -162,7 +164,7 @@ pub fn denial_reason(denial: Denial) -> &'static str {
 
 pub fn denial_error(denial: Denial) -> AuthError {
     match denial {
-        Denial::UnknownUser | Denial::BadPassword | Denial::Internal => AuthError::InvalidCredentials,
+        Denial::UnknownUser | Denial::BadPassword | Denial::UnknownRole | Denial::Internal => AuthError::InvalidCredentials,
         Denial::MfaNotEnrolled => AuthError::MfaEnrolmentRequired,
         Denial::MfaMissing => AuthError::MfaRequired,
         Denial::MfaInvalid => AuthError::MfaInvalid,
@@ -650,6 +652,7 @@ pub fn second_factor(
 ) -> Result<Option<Denial>, AuthError> {
     let role_needs_mfa = requires_mfa(catalog, &account.roles);
     match (account.totp.as_mut(), request.totp_code.as_ref()) {
+        _ if check_roles(catalog, &account.roles).is_err() => Ok(Some(Denial::UnknownRole)),
         _ if webauthn_required(catalog, &account.roles) => Ok(Some(Denial::WebauthnRequired)),
         (None, _) => Ok(role_needs_mfa.then_some(Denial::MfaNotEnrolled)),
         (Some(_), None) => Ok(Some(Denial::MfaMissing)),

@@ -94,6 +94,8 @@ const PETSTORE: &str = r#"{
 const PETSTORE_MANIFEST: &str = "name: 'petstore'
 version: 0.1.0
 publisher: 'acme'
+entry: 'connector'
+runtime: native
 rights: []
 actions:
   - name: 'listpets'

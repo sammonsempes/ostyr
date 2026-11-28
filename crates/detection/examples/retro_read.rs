@@ -1,4 +1,4 @@
-use detection::retro::{run_retro, RetroOutcome, RetroQuery, RetroSettings, MAX_EXECUTION_SECONDS, MAX_ROWS_TO_READ};
+use detection::retro::{run_retro, RetroIds, RetroOutcome, RetroQuery, RetroSettings, MAX_EXECUTION_SECONDS, MAX_ROWS_TO_READ};
 use sigma_sql::mapping::parse_mapping;
 use std::error::Error;
 use std::fs;
@@ -38,9 +38,10 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             let started = Instant::now();
             let outcome = run_retro(&settings, &parse_mapping(&fs::read_to_string(mapping)?)?, &query, &|| started.elapsed());
             let mut out = stdout();
+            let identities = |found: &RetroIds| found.events.iter().map(|event| event.identity.clone()).collect::<Vec<String>>();
             match outcome {
-                Ok(RetroOutcome::Complete(found)) => writeln!(out, "complete ids={:?} refused={}", found.ids, found.refused)?,
-                Ok(RetroOutcome::RowCap { found, cap }) => writeln!(out, "row_cap cap={cap} ids={:?} refused={}", found.ids, found.refused)?,
+                Ok(RetroOutcome::Complete(found)) => writeln!(out, "complete ids={:?} refused={}", identities(&found), found.refused)?,
+                Ok(RetroOutcome::RowCap { found, cap }) => writeln!(out, "row_cap cap={cap} ids={:?} refused={}", identities(&found), found.refused)?,
                 Err(error) => writeln!(out, "error {error}")?,
             }
             Ok(())

@@ -13,8 +13,8 @@ use cert_inventory::parse::MAX_DNS_NAMES;
 use cert_inventory::store::{
     cut_text, decode_cursor, doc_of, encode_cursor, get_certificate, get_detail, key_type_text, kind_text, list_certificates, record_ok,
     sightings_of, source_ok, store_records, time_in_range, COL_DNS_NAMES, COL_FIRST_SEEN, COL_KEY_BITS, COL_KEY_TYPE, COL_LAST_SEEN, COL_NOT_AFTER,
-    COL_NOT_BEFORE, COL_SELF_SIGNED, DEFAULT_LIMITS, MAX_PAGE, MAX_SIGHTINGS_READ, MAX_SOURCE_BYTES, MAX_STORE_BATCH, MAX_TEXT_BYTES, MIGRATIONS,
-    MIGRATION_NAMESPACE,
+    COL_NOT_BEFORE, COL_SELF_SIGNED, DEFAULT_LIMITS, LIST_FIRST_SQL, LIST_NEXT_SQL, MAX_PAGE, MAX_SIGHTINGS_READ, MAX_SOURCE_BYTES, MAX_STORE_BATCH,
+    MAX_TEXT_BYTES, MIGRATIONS, MIGRATION_NAMESPACE,
 };
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::tenant_scope;
@@ -58,6 +58,33 @@ const HEX_WIDTH: usize = 64;
 
 
 const SMALL_CAP: usize = 2;
+
+
+const QUALIFIED_ORDER: &str = "ORDER BY cert_inventory.not_after, cert_inventory.fingerprint";
+
+
+const BARE_ORDER: &str = "ORDER BY not_after";
+
+
+const ALIASED_OUTPUT: &str = "not_after::text AS not_after_text";
+
+
+const DIGIT_WIDTHS: [i64; 8] = [
+    -5,
+    0,
+    99_999_999,
+    100_000_000,
+    999_999_999,
+    1_000_000_000,
+    253_402_300_799,
+    100_000_000_000,
+];
+
+
+const WALK_PAGE: usize = 2;
+
+
+const WALK_PAGES: usize = 20;
 
 
 const RECORDS_OVER_CAP: usize = 5;
@@ -734,5 +761,45 @@ fn the_tenant_lock_takes_one_64_bit_key() -> TestResult {
     assert!(latest.contains("pg_advisory_xact_lock(hashtextextended('cert_inventory_room/' || tenant_name, 0))"));
     assert!(!latest.contains("hashtext(") && !latest.contains("1129270340"));
     assert!(latest.contains("SET search_path = pg_catalog, public"));
+    Ok(())
+}
+
+
+#[test]
+fn both_list_statements_order_by_the_numeric_column_not_the_text_output() -> TestResult {
+    [LIST_FIRST_SQL, LIST_NEXT_SQL].iter().for_each(|sql| {
+        assert!(sql.contains(QUALIFIED_ORDER), "{sql}");
+        assert!(sql.contains(ALIASED_OUTPUT), "{sql}");
+        assert!(!sql.contains(BARE_ORDER), "{sql}");
+    });
+    Ok(())
+}
+
+
+#[test]
+fn a_walk_across_digit_width_changes_lists_every_row_once_in_numeric_order() -> TestResult {
+    let fake = Fake::default();
+    let exec = executor(&fake);
+    let scope = tenant_scope("a")?;
+    let records: Vec<CertRecord> = DIGIT_WIDTHS
+        .iter()
+        .enumerate()
+        .map(|(index, not_after)| cert(index + 1, *not_after))
+        .collect();
+    run(store_records(&exec, &scope, &scan_source(), &records, NOW, &DEFAULT_LIMITS))??;
+    let mut seen: Vec<i64> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    let mut pending = true;
+    while pending && pages < WALK_PAGES {
+        let page = run(list_certificates(&exec, &scope, &CertFilter::default(), cursor.as_deref(), WALK_PAGE))??;
+        seen.extend(page.certs.iter().map(|stored| stored.record.not_after));
+        cursor = page.next_cursor;
+        pages += 1;
+        pending = cursor.is_some();
+    }
+    let mut expected = DIGIT_WIDTHS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(seen, expected);
     Ok(())
 }

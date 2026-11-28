@@ -309,7 +309,7 @@ pub fn render_manifest(name: &str, publisher: &str, planned: &[Planned], secrets
         .chain(secrets.iter().map(|secret| field_item(secret, "secret_file")))
         .collect();
     format!(
-        "name: {}\nversion: {SKELETON_VERSION}\npublisher: {}\nrights: []\n{}{}",
+        "name: {}\nversion: {SKELETON_VERSION}\npublisher: {}\nentry: 'connector'\nruntime: native\nrights: []\n{}{}",
         quoted(name),
         quoted(publisher),
         section("actions", &actions),

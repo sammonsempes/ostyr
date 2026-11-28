@@ -1,8 +1,7 @@
 use crate::error::GrcError;
 use crate::load::{is_identifier, is_owner, is_printable_text, MAX_ID_CHARS, MAX_INDICATOR_CHARS, MAX_TITLE_CHARS};
 use crate::model::{IndicatorValue, ManualEvidence};
-use core_config::error::ConfigError;
-use core_config::parse::{parse_document, read_text_capped};
+use core_config::parse::{open_regular, parse_document, read_text_capped};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
@@ -73,11 +72,10 @@ pub fn parse_manual(reader: &mut dyn Read, file: &str) -> Result<Vec<ManualEvide
 }
 
 
-fn open_file(path: &Path) -> Result<(File, String), GrcError> {
+pub fn open_file(path: &Path) -> Result<(File, String), GrcError> {
     let file = path.display().to_string();
-    File::open(path)
-        .map(|handle| (handle, file.clone()))
-        .map_err(|source| GrcError::Config(ConfigError::Io { file, source }))
+    let handle = open_regular(path, &file)?;
+    Ok((handle, file))
 }
 
 

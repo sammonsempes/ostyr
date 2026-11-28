@@ -5,13 +5,13 @@ use crate::limiter::{account_key, clear_failures, locked_until, passkey_start_ke
 use crate::model::{Challenge, ChallengeKind, CredentialInfo, Located, Prepared, StoredCredential};
 use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
-use crate::rbac::{requires_mfa, webauthn_required};
+use crate::rbac::{check_roles, requires_mfa, webauthn_required};
 use crate::service::{
     audit_name, count_failure, denial_error, finish, login_gate, record, record_denial, refuse_locked, require, resolve_actor, transact,
     verify_account_password, Context, Denial, LoginRequest, State, ACTION_LOGIN, ANONYMOUS_ACTOR,
 };
 use crate::session::create_session;
-use crate::types::{Parameters, RandomFn, RoleCatalog, RoleSet};
+use crate::types::{AccountMap, Parameters, RandomFn, RoleCatalog, RoleSet};
 use core_audit::model::Outcome;
 use core_config::parse::parse_document;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -471,6 +471,14 @@ pub fn remove_credential<Output: Write>(
 }
 
 
+/// True when the account holds a role the catalog in use does not know.
+pub fn holds_unknown_role(accounts: &AccountMap, catalog: &RoleCatalog, username: &str) -> bool {
+    accounts
+        .get(username)
+        .is_some_and(|account| check_roles(catalog, &account.roles).is_err())
+}
+
+
 pub fn second_factor_challenge<Output: Write>(
     working: &mut State,
     context: &Context<Output>,
@@ -480,9 +488,11 @@ pub fn second_factor_challenge<Output: Write>(
 ) -> Result<Result<(String, RequestChallengeResponse), Denial>, AuthError> {
     let password_ok = verify_account_password(&working.accounts, context, &request.username, &request.password)?;
     let passkeys = passkeys_of(working, &request.username);
+    let unknown_role = holds_unknown_role(&working.accounts, context.catalog, &request.username);
     match (working.accounts.contains_key(&request.username), password_ok) {
         (false, _) => Ok(Err(Denial::UnknownUser)),
         (true, false) => Ok(Err(Denial::BadPassword)),
+        (true, true) if unknown_role => Ok(Err(Denial::UnknownRole)),
         (true, true) if passkeys.is_empty() => Ok(Err(Denial::MfaNotEnrolled)),
         (true, true) => {
             let (options, authentication) = webauthn.start_passkey_authentication(&passkeys)?;
@@ -706,6 +716,9 @@ pub fn settle_assertion<Output: Write>(
     state.challenges = working.challenges.clone();
     match located {
         Err(error) => refuse_assertion(state, context, now, &assertion.source, (None, refusal_reason(&error))),
+        Ok(found) if holds_unknown_role(&state.accounts, context.catalog, &found.user) => {
+            refuse_assertion(state, context, now, &assertion.source, (Some(&found.user), "unknown_role"))
+        }
         Ok(found) => match check_assertion(webauthn, &found, &assertion.response) {
             Err(error) => refuse_assertion(state, context, now, &assertion.source, (Some(&found.user), refusal_reason(&error))),
             Ok(result) => grant_assertion(state, working, context, now, (&assertion.source, &found, &result)),

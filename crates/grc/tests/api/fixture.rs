@@ -127,6 +127,7 @@ pub fn report(tenant: &str, framework: &str, generated: &str, title: &str) -> Co
             evidence_time: None,
             risks: Vec::new(),
             open_actions: Vec::new(),
+            reason: None,
         }],
         gaps: Vec::new(),
         plan: Vec::new(),

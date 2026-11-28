@@ -5,16 +5,18 @@
 mod types;
 
 
-use cert_inventory::error::RoundError;
+use cert_inventory::error::{InventoryStoreError, RoundError};
 use cert_inventory::model::{CertRecord, FoundCert, KeyType, ScanOutcome, SkipCounts, StoreCounts};
 use cert_inventory::serve::{
-    block_on_with_grace, boxed_reload_audit, by_path, encoded, gap_text, gaps_of, is_host, listen_for_signals, load_settings, one_round,
-    open_cert_settings_from, pause, pg_digest, report, serve_then_quiesce, start, start_only_changed, start_only_field, sum_counts, ReloadThread,
-    RoundGaps, RoundReport, MAX_DEADLINE_SECONDS, MAX_HOST_BYTES, MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS,
+    block_on_with_grace, boxed_reload_audit, by_path, encoded, failure_class, gap_text, gaps_of, is_host, listen_for_signals, load_settings,
+    one_round, open_cert_settings_from, pause, pg_digest, progress_of, report, serve_then_quiesce, start, start_only_changed, start_only_field,
+    sum_counts, ReloadThread, RoundGaps, RoundReport, MAX_DEADLINE_SECONDS, MAX_HOST_BYTES, MAX_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS,
+    UNKNOWN_CLASS,
 };
 use cert_inventory::types::{InterruptFn, InterruptWait, StopWatchFn, WaitFn};
 use core_audit::log::open_file_log;
 use core_config::reload::{reload, ReloadOutcome};
+use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::load_settings as load_pg_settings;
 use pg_fake::certs::{loopback, make_pki};
@@ -29,6 +31,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
@@ -55,6 +58,12 @@ const STORE_MARKER: &str = "jsonb_to_recordset";
 
 
 const TWO_ROUNDS: u64 = 2;
+
+
+const LISTING_CUT_COUNT: usize = 3;
+
+
+const PATHS_OMITTED_COUNT: usize = 4;
 
 
 const ONE_ROUND: u64 = 1;
@@ -715,6 +724,7 @@ fn certificates_are_grouped_by_path_and_counts_add_up() -> TestResult {
         private_keys_refused: 0,
         roots_unreached: 0,
         roots_refused: 0,
+        listing_cut: 0,
         errors: Vec::new(),
         errors_omitted: 0,
     };
@@ -786,6 +796,8 @@ fn no_gaps() -> RoundGaps {
         private_keys_refused: 0,
         roots_unreached: 0,
         roots_refused: 0,
+        listing_cut: 0,
+        paths_omitted: 0,
         malformed: Vec::new(),
     }
 }
@@ -872,6 +884,20 @@ fn every_gap_count_is_a_named_field_of_the_warn_line() -> TestResult {
             },
         ),
         (
+            format!("listing_cut={LISTING_CUT_COUNT}"),
+            RoundGaps {
+                listing_cut: LISTING_CUT_COUNT,
+                ..no_gaps()
+            },
+        ),
+        (
+            format!("paths_omitted={PATHS_OMITTED_COUNT}"),
+            RoundGaps {
+                paths_omitted: PATHS_OMITTED_COUNT,
+                ..no_gaps()
+            },
+        ),
+        (
             format!("over_count={OVER_COUNT}"),
             RoundGaps {
                 over_count: OVER_COUNT,
@@ -918,6 +944,33 @@ fn a_max_files_hit_is_a_named_budget_overrun_with_the_unreached_roots() -> TestR
 }
 
 
+fn found_omitting(name: &str) -> FoundCert {
+    FoundCert {
+        record: record(name),
+        paths: vec!["/x".to_owned()],
+        paths_omitted: PATHS_OMITTED_COUNT,
+    }
+}
+
+
+#[test]
+fn a_listing_cut_or_omitted_paths_alone_is_a_named_budget_overrun() -> TestResult {
+    let cut = captured(|| report(&Ok(round_with(RoundGaps { listing_cut: 1, ..no_gaps() }))))?;
+    let omitted = captured(|| {
+        report(&Ok(round_with(RoundGaps {
+            paths_omitted: PATHS_OMITTED_COUNT,
+            ..no_gaps()
+        })))
+    })?;
+    assert!(cut.contains("scan budget overrun") && cut.contains("listing_cut=1"), "{cut}");
+    assert!(
+        omitted.contains("scan budget overrun") && omitted.contains(&format!("paths_omitted={PATHS_OMITTED_COUNT}")),
+        "{omitted}"
+    );
+    Ok(())
+}
+
+
 #[test]
 fn the_gaps_of_an_outcome_carry_every_count() -> TestResult {
     let outcome = ScanOutcome {
@@ -933,6 +986,8 @@ fn the_gaps_of_an_outcome_carry_every_count() -> TestResult {
         private_keys_refused: KEYS_COUNT,
         roots_unreached: UNREACHED_COUNT,
         roots_refused: REFUSED_ROOTS_COUNT,
+        listing_cut: LISTING_CUT_COUNT,
+        records: vec![found_omitting("a"), found_omitting("b")],
         ..ScanOutcome::default()
     };
     let expected = RoundGaps {
@@ -946,6 +1001,8 @@ fn the_gaps_of_an_outcome_carry_every_count() -> TestResult {
         private_keys_refused: KEYS_COUNT,
         roots_unreached: UNREACHED_COUNT,
         roots_refused: REFUSED_ROOTS_COUNT,
+        listing_cut: LISTING_CUT_COUNT,
+        paths_omitted: PATHS_OMITTED_COUNT + PATHS_OMITTED_COUNT,
         malformed: vec![("pem", MALFORMED_COUNT)],
     };
     assert_eq!(gaps_of(&outcome, ALL_FILES), expected);
@@ -1367,5 +1424,128 @@ async fn a_changed_pg_settings_file_makes_a_reload_refused_and_audited() -> Test
     );
     assert!(fs::read_to_string(&audit_file)?.contains("denied"));
     drop(fake);
+    Ok(())
+}
+
+
+fn store_failure(path_index: usize, source: PgError) -> RoundError {
+    RoundError::Store {
+        path_index,
+        counts: StoreCounts {
+            inserted: INSERTED,
+            ..StoreCounts::default()
+        },
+        source: Box::new(InventoryStoreError::Pg(source)),
+    }
+}
+
+
+#[tokio::test]
+async fn every_failure_has_a_fixed_class_and_its_progress() -> TestResult {
+    let task = tokio::spawn(pending::<()>());
+    task.abort();
+    let join = RoundError::Scan(task.await.err().ok_or("expected a join error")?);
+    let connect = RoundError::Pg(PgError::InvalidTenant);
+    let unknown = store_failure(1, PgError::ClientDeadline { seconds: 1 });
+    let refused = store_failure(1, PgError::InvalidTenant);
+    let bad_answer = RoundError::Store {
+        path_index: 1,
+        counts: StoreCounts::default(),
+        source: Box::new(InventoryStoreError::BadRow { column: 0 }),
+    };
+    assert_eq!(failure_class(&bad_answer), UNKNOWN_CLASS);
+    assert_eq!(failure_class(&join), "scan_task");
+    assert_eq!(failure_class(&connect), "connect");
+    assert_eq!(failure_class(&unknown), UNKNOWN_CLASS);
+    assert_eq!(failure_class(&refused), "store");
+    assert_eq!(progress_of(&join), (0, StoreCounts::default()));
+    assert_eq!(progress_of(&connect), (0, StoreCounts::default()));
+    assert_eq!(progress_of(&unknown).0, 1);
+    assert_eq!(progress_of(&unknown).1.inserted, INSERTED);
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_outcome_is_logged_as_unknown_and_a_refusal_as_failed() -> TestResult {
+    let unknown = captured(|| report(&Err(store_failure(1, PgError::ClientDeadline { seconds: 1 }))))?;
+    let refused = captured(|| report(&Err(store_failure(1, PgError::InvalidTenant))))?;
+    assert!(
+        unknown.contains("outcome unknown") && unknown.contains("may have committed") && unknown.contains("path_index=1"),
+        "{unknown}"
+    );
+    assert!(unknown.contains("store_unknown") && unknown.contains("inserted: 2"), "{unknown}");
+    assert!(refused.contains("scan round failed") && !refused.contains("outcome unknown"), "{refused}");
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_lost_in_the_second_store_keeps_the_first_counts_and_is_unknown() -> TestResult {
+    let dir = tempdir()?;
+    let stores = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&stores);
+    let handler: Handler = Arc::new(move |sql| {
+        if sql.contains(STORE_MARKER) {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Reply::Rows(vec![["1", "0", "0"].map(str::to_owned).to_vec()])
+        } else if counter.load(Ordering::SeqCst) > 0 {
+            Reply::Drop
+        } else {
+            Reply::Done
+        }
+    });
+    let (fake, ca_pem) = fake_with(handler).await?;
+    let settings_file = write_site(dir.path(), fake.port, &ca_pem)?;
+    fs::copy(dir.path().join("certs/one.pem"), dir.path().join("certs/two.pem"))?;
+    let live = load_settings(&settings_file)?;
+    let pg = load_pg_settings(&dir.path().join("pg.yaml"))?;
+    let failure = one_round(&pg, &tenant_scope("acme")?, &live).await.err().ok_or("expected an error")?;
+    let (path_index, counts) = progress_of(&failure);
+    assert_eq!(path_index, 1);
+    assert_eq!(counts.inserted, 1);
+    assert_eq!(failure_class(&failure), UNKNOWN_CLASS, "{failure:?}");
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_answer_to_the_second_store_is_unknown() -> TestResult {
+    let dir = tempdir()?;
+    let stores = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&stores);
+    let handler: Handler = Arc::new(move |sql| {
+        if sql.contains(STORE_MARKER) {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            let answer = if first { ["1", "0", "0"] } else { ["x", "0", "0"] };
+            Reply::Rows(vec![answer.map(str::to_owned).to_vec()])
+        } else {
+            Reply::Done
+        }
+    });
+    let (fake, ca_pem) = fake_with(handler).await?;
+    let settings_file = write_site(dir.path(), fake.port, &ca_pem)?;
+    fs::copy(dir.path().join("certs/one.pem"), dir.path().join("certs/two.pem"))?;
+    let live = load_settings(&settings_file)?;
+    let pg = load_pg_settings(&dir.path().join("pg.yaml"))?;
+    let failure = one_round(&pg, &tenant_scope("acme")?, &live).await.err().ok_or("expected an error")?;
+    assert_eq!(progress_of(&failure).1.inserted, 1);
+    assert_eq!(failure_class(&failure), UNKNOWN_CLASS, "{failure:?}");
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connect_failure_never_prints_the_file_it_names() -> TestResult {
+    let dir = tempdir()?;
+    let settings_file = write_site(dir.path(), CLOSED_PORT, "")?;
+    let pg_text = fs::read_to_string(dir.path().join("pg.yaml"))?;
+    fs::write(dir.path().join("pg.yaml"), pg_text.replace("ca.pem", "marker-ca-file.pem"))?;
+    let live = load_settings(&settings_file)?;
+    let pg = load_pg_settings(&dir.path().join("pg.yaml"))?;
+    let failure = one_round(&pg, &tenant_scope("acme")?, &live).await.err().ok_or("expected an error")?;
+    assert!(failure.to_string().contains("marker-ca-file"), "{failure}");
+    let text = captured(|| report(&Err(failure)))?;
+    assert!(text.contains("class=\"connect\"") && !text.contains("marker-ca-file"), "{text}");
     Ok(())
 }

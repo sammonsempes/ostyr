@@ -284,7 +284,7 @@ fn an_error_line_or_a_failing_exit_is_counted_failed_never_as_a_clean_scan() -> 
 
 
 #[test]
-fn a_program_that_cannot_run_is_counted_failed() -> TestResult {
+fn a_program_that_cannot_run_is_counted_run_refused() -> TestResult {
     assert!(logging_on());
     let (mut fake, rules) = setup(FAKE_YR)?;
     fake.yr.program = fake.program_dir.join("absent");
@@ -292,7 +292,7 @@ fn a_program_that_cannot_run_is_counted_failed() -> TestResult {
     store(root.path(), SHA_A, EICAR)?;
     let lines = [fileinfo_line(SHA_A)];
     let outcome = scan_tick(&fake.yr, &rules, root.path(), lines.iter().map(String::as_str), &Limits::default(), now());
-    assert_eq!((outcome.counts.failed, outcome.counts.scanned), (1, 0));
+    assert_eq!((outcome.counts.run_refused, outcome.counts.failed, outcome.counts.scanned), (1, 0, 0));
     Ok(())
 }
 
@@ -369,12 +369,12 @@ fn the_verdict_order_is_deadline_then_bound_then_exit_then_output() -> TestResul
 
 
 #[test]
-fn another_scan_failure_is_counted_failed() -> TestResult {
+fn a_spawn_failure_is_counted_run_refused_apart_from_failed() -> TestResult {
     assert!(logging_on());
     let mut outcome = TickOutcome::default();
     let failure = NdrError::Spawn(std::io::Error::other("injected"));
     record_scan(&mut outcome, Err(failure), &[sighting()], FOUR_BYTES, now());
-    assert_eq!((outcome.counts.failed, file_total(&outcome)), (1, 1));
+    assert_eq!((outcome.counts.run_refused, outcome.counts.failed, file_total(&outcome)), (1, 0, 1));
     Ok(())
 }
 

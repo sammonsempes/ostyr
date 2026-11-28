@@ -1,8 +1,10 @@
 //! Retro read: the event ids one compiled Sigma rule matches in a past window of one tenant's events in ClickHouse.
 
 use crate::error::RetroError;
+use crate::id::MAX_EVENT_ID_CHARS;
+use crate::pg::event_time_text;
 use crate::types::{ElapsedFn, RetroSendFn};
-use alerts::store::{check_text, MAX_EVENT_ID_CHARS};
+use alerts::store::MAX_ENTITY_CHARS;
 use core_pg::password::{read_limited, read_password};
 use core_pg::scope::tenant_scope;
 use serde::Deserialize;
@@ -17,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{info, warn};
+use unicode_general_category::{get_general_category, GeneralCategory};
 use ureq::http::StatusCode;
 use ureq::Agent;
 use zeroize::Zeroizing;
@@ -31,7 +34,28 @@ pub const SECONDS_PER_DAY: i64 = 86_400;
 pub const MAX_RETRO_ROWS: usize = 10_000;
 
 
-pub const MAX_RETRO_BYTES: u64 = 4_194_304;
+pub const MAX_RETRO_BYTES: u64 = 67_108_864;
+
+
+/// Worst case bytes of one reply row: 64 id characters and 2 x 257 entity characters at 6 bytes each, the hash, the numbers and the keys.
+pub const MAX_ROW_BYTES: u64 = 4_096;
+
+
+/// Characters of `event.id` the server returns; the identity keeps `MAX_EVENT_ID_CHARS` of them.
+pub const ID_KEEP_CHARS: usize = 64;
+
+
+/// Characters of `host.name` and `user.name` the server returns: one more than the alert store keeps.
+pub const ENTITY_KEEP_CHARS: usize = MAX_ENTITY_CHARS + 1;
+
+
+pub const HASH_HEX_CHARS: usize = 64;
+
+
+pub const MILLIS_COLUMN: &str = "@timestamp";
+
+
+pub const MILLIS_EXPRESSION: &str = "toUnixTimestamp64Milli(`@timestamp`)";
 
 
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
@@ -56,6 +80,63 @@ pub const EVENTS_TABLE: &str = "events";
 
 
 pub const ID_COLUMN: &str = "event.id";
+
+
+pub const HASH_ALIAS: &str = "ret_hash";
+
+
+/// How a column enters the content hash: a string is length-prefixed, a number is decimal then `;`, an array is count-prefixed with each element length-prefixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashKind {
+    Text,
+    Number,
+    TextArray,
+}
+
+
+/// The ordered content columns of an event row. Changing this list changes every retro identity: append only after a coordinator call.
+pub const HASH_COLUMNS: [(&str, HashKind); 40] = [
+    ("ecs.version", HashKind::Text),
+    ("event.id", HashKind::Text),
+    ("event.kind", HashKind::Text),
+    ("event.category", HashKind::TextArray),
+    ("event.type", HashKind::TextArray),
+    ("event.action", HashKind::Text),
+    ("event.outcome", HashKind::Text),
+    ("event.dataset", HashKind::Text),
+    ("event.module", HashKind::Text),
+    ("event.severity", HashKind::Number),
+    ("event.sequence", HashKind::Number),
+    ("message", HashKind::Text),
+    ("host.name", HashKind::Text),
+    ("host.id", HashKind::Text),
+    ("host.ip", HashKind::TextArray),
+    ("host.os.type", HashKind::Text),
+    ("user.name", HashKind::Text),
+    ("user.id", HashKind::Text),
+    ("user.domain", HashKind::Text),
+    ("source.ip", HashKind::Text),
+    ("source.port", HashKind::Number),
+    ("source.domain", HashKind::Text),
+    ("destination.ip", HashKind::Text),
+    ("destination.port", HashKind::Number),
+    ("destination.domain", HashKind::Text),
+    ("network.transport", HashKind::Text),
+    ("network.direction", HashKind::Text),
+    ("process.pid", HashKind::Number),
+    ("process.name", HashKind::Text),
+    ("process.executable", HashKind::Text),
+    ("process.command_line", HashKind::Text),
+    ("process.args", HashKind::TextArray),
+    ("process.working_directory", HashKind::Text),
+    ("process.parent.pid", HashKind::Number),
+    ("process.parent.executable", HashKind::Text),
+    ("process.parent.command_line", HashKind::Text),
+    ("file.path", HashKind::Text),
+    ("file.size", HashKind::Number),
+    ("event.code", HashKind::Text),
+    ("event.provider", HashKind::Text),
+];
 
 
 pub const TIMEOUT_CODES: [u32; 2] = [159, 160];
@@ -101,18 +182,40 @@ pub struct RetroReply {
 }
 
 
+/// One reply line; 64-bit integers are sent as text by ClickHouse JSON output, so the time is `toString` of the milliseconds.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IdRow {
-    #[serde(rename = "event.id")]
-    pub event_id: String,
+pub struct EventRow {
+    pub ret_ms: String,
+    pub ret_hash: String,
+    pub ret_id: String,
+    pub ret_id_chars: u32,
+    pub ret_id_valid: u8,
+    pub ret_host: String,
+    pub ret_host_chars: u32,
+    pub ret_user: String,
+    pub ret_user_chars: u32,
 }
 
 
-/// The ids that passed the grammar, how many event ids were refused alone, and how many rows were read.
+/// One matching event: its identity (`<event.id cut to 63>:<content hash>`, or the hash alone), its time and the entities the alert shows, each already cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetroEvent {
+    pub identity: String,
+    pub event_ms: i64,
+    pub event_time: String,
+    pub id_chars: u32,
+    pub host_name: Option<String>,
+    pub host_chars: u32,
+    pub user_name: Option<String>,
+    pub user_chars: u32,
+}
+
+
+/// The events that passed the grammar, how many were refused alone, and how many rows were read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetroIds {
-    pub ids: Vec<String>,
+    pub events: Vec<RetroEvent>,
     pub refused: usize,
     pub rows: usize,
 }
@@ -182,16 +285,71 @@ pub fn retro_limits(settings: &RetroSettings) -> Vec<(&'static str, String)> {
 }
 
 
-/// The compiled rule, then tenant and window as `param_` values, a stable order, `max_rows + 1` rows at most and every pin in its own `SETTINGS` clause.
+/// The compiled rule over `retro_projection`, then tenant and window as `param_` values, a stable order, `max_rows + 1` rows at most and every pin in its own `SETTINGS` clause.
+fn quoted(column: &str) -> String {
+    format!("`{column}`")
+}
+
+
+/// One column of the hash input: self-delimiting, so no two different rows give the same bytes.
+pub fn hash_part(column: &str, kind: HashKind) -> String {
+    let name = quoted(column);
+    match kind {
+        HashKind::Text => format!("concat(toString(length({name})), ':', {name})"),
+        HashKind::Number => format!("concat(toString({name}), ';')"),
+        HashKind::TextArray => format!(
+            "concat(toString(length({name})), '[', arrayStringConcat(arrayMap(element -> concat(toString(length(element)), ':', element), {name}), ''), ']')"
+        ),
+    }
+}
+
+
+/// `lower(hex(SHA256(..)))` over the time in milliseconds then `HASH_COLUMNS` in order.
+pub fn hash_expression() -> String {
+    let time = format!("concat(toString({MILLIS_EXPRESSION}), ';')");
+    let parts: Vec<String> = std::iter::once(time)
+        .chain(HASH_COLUMNS.iter().map(|(column, kind)| hash_part(column, *kind)))
+        .collect();
+    format!("lower(hex(SHA256(concat({}))))", parts.join(", "))
+}
+
+
+fn valid_cut(column: &str, keep: usize) -> String {
+    let name = quoted(column);
+    format!("if(isValidUTF8({name}), leftUTF8({name}, {keep}), '')")
+}
+
+
+/// The columns of a retro row, cut on the server: an invalid UTF-8 text is blanked (its validity is reported for the id) so the reply stays valid UTF-8.
+pub fn retro_projection() -> String {
+    let id = quoted(ID_COLUMN);
+    let host = quoted("host.name");
+    let user = quoted("user.name");
+    [
+        format!("toString({MILLIS_EXPRESSION}) AS `ret_ms`"),
+        format!("{} AS `{HASH_ALIAS}`", hash_expression()),
+        format!("{} AS `ret_id`", valid_cut(ID_COLUMN, ID_KEEP_CHARS)),
+        format!("lengthUTF8({id}) AS `ret_id_chars`"),
+        format!("isValidUTF8({id}) AS `ret_id_valid`"),
+        format!("{} AS `ret_host`", valid_cut("host.name", ENTITY_KEEP_CHARS)),
+        format!("lengthUTF8({host}) AS `ret_host_chars`"),
+        format!("{} AS `ret_user`", valid_cut("user.name", ENTITY_KEEP_CHARS)),
+        format!("lengthUTF8({user}) AS `ret_user_chars`"),
+    ]
+    .join(", ")
+}
+
+
 pub fn retro_statement(rule_text: &str, mapping: &FieldMapping, settings: &RetroSettings) -> Result<String, RetroError> {
     let options = SqlOptions {
         table: EVENTS_TABLE.to_owned(),
         id_column: ID_COLUMN.to_owned(),
+        projection: Some(retro_projection()),
     };
     let compiled = compile_rule(rule_text, mapping, &options).map_err(RetroError::Rule)?;
     let pins = pin_clause(&retro_limits(settings), settings.max_rows as u64 + 1);
     Ok(format!(
-        "{compiled} AND {WINDOW_FILTER} ORDER BY `@timestamp`, `event.id` LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow"
+        "{compiled} AND {WINDOW_FILTER} ORDER BY `{MILLIS_COLUMN}`, `{HASH_ALIAS}` LIMIT {{limit:UInt64}}{pins} FORMAT JSONEachRow"
     ))
 }
 
@@ -243,12 +401,12 @@ pub fn fetch_with(
 }
 
 
-/// A read error maps to a fixed variant: the `io::Error` of a body reader may carry transport text.
+/// A read error maps to a fixed variant (a body that is not UTF-8 is a malformed reply): the `io::Error` of a body reader may carry transport text.
 pub fn body_failure(error: &io::Error) -> RetroError {
-    if error.kind() == io::ErrorKind::TimedOut {
-        RetroError::Timeout
-    } else {
-        RetroError::Body(error.kind())
+    match error.kind() {
+        io::ErrorKind::TimedOut => RetroError::Timeout,
+        io::ErrorKind::InvalidData => RetroError::MalformedReply,
+        kind => RetroError::Body(kind),
     }
 }
 
@@ -265,26 +423,77 @@ pub fn read_changed(reply: RetroReply, settings: &RetroSettings) -> Result<(), R
 }
 
 
-/// A control character in an id is refused too: the ids go into alerts and logs.
-pub fn id_allowed(event_id: &str) -> bool {
-    check_text("event_id", event_id, MAX_EVENT_ID_CHARS).is_ok() && !event_id.chars().any(char::is_control)
+/// A control (Cc) or format (Cf) character is refused: the identity goes into alerts, logs and the UI.
+pub fn refused_character(character: char) -> bool {
+    character.is_control() || get_general_category(character) == GeneralCategory::Format
+}
+
+
+/// The cut id of an event, empty included, has no refused character.
+pub fn id_allowed(prefix: &str) -> bool {
+    !prefix.chars().any(refused_character)
+}
+
+
+/// The identity of a row: the id cut to 63 characters then `:` and the hash, or the hash alone for an empty id.
+pub fn retro_identity(prefix: &str, hash: &str) -> String {
+    if prefix.is_empty() {
+        hash.to_owned()
+    } else {
+        format!("{prefix}:{hash}")
+    }
+}
+
+
+/// The entity cut to the store's limit; an empty text, a blanked invalid one or one with a refused character is no entity, never a refused row.
+pub fn entity_of(text: &str) -> Option<String> {
+    let cut: String = text.chars().take(MAX_ENTITY_CHARS).collect();
+    Some(cut).filter(|found| !found.is_empty() && id_allowed(found))
+}
+
+
+fn is_hash(text: &str) -> bool {
+    text.len() == HASH_HEX_CHARS && text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+
+/// An event from a row, `None` when its id is refused alone (invalid UTF-8, Cc or Cf); a field out of form is a malformed reply.
+pub fn event_of(row: EventRow) -> Result<Option<RetroEvent>, RetroError> {
+    let event_ms = row.ret_ms.parse::<i64>().map_err(|_| RetroError::MalformedReply)?;
+    let prefix: String = row.ret_id.chars().take(MAX_EVENT_ID_CHARS).collect();
+    if !is_hash(&row.ret_hash) || row.ret_id_valid > 1 {
+        Err(RetroError::MalformedReply)
+    } else if row.ret_id_valid == 0 || !id_allowed(&prefix) {
+        Ok(None)
+    } else {
+        Ok(Some(RetroEvent {
+            identity: retro_identity(&prefix, &row.ret_hash),
+            event_ms,
+            event_time: event_time_text(event_ms)?,
+            id_chars: row.ret_id_chars,
+            host_name: entity_of(&row.ret_host),
+            host_chars: row.ret_host_chars,
+            user_name: entity_of(&row.ret_user),
+            user_chars: row.ret_user_chars,
+        }))
+    }
 }
 
 
 /// A line that does not parse is an error (a fixed query with JSON-escaped fields: a bad line is a server abnormality); a bad id is refused alone.
 pub fn absorb(mut found: RetroIds, line: io::Result<String>, cap: usize) -> Result<RetroIds, RetroError> {
     let text = line.map_err(|error| body_failure(&error))?;
-    let row = serde_json::from_str::<IdRow>(&text).map_err(|_| RetroError::MalformedReply)?;
+    let row = serde_json::from_str::<EventRow>(&text).map_err(|_| RetroError::MalformedReply)?;
     found.rows += 1;
     if found.rows > cap + 1 {
         Err(RetroError::TooManyRows(cap))
     } else if found.rows > cap {
         Ok(found)
-    } else if id_allowed(&row.event_id) {
-        found.ids.push(row.event_id);
-        Ok(found)
     } else {
-        found.refused += 1;
+        match event_of(row)? {
+            Some(event) => found.events.push(event),
+            None => found.refused += 1,
+        }
         Ok(found)
     }
 }

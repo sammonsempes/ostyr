@@ -47,7 +47,7 @@ pub const ATTRIBUTE_CURSOR: [usize; 2] = [0, 1];
 
 
 /// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap, `$4` open key-conflict cap, `$5` asset cap, `$6` identity key and attribute row cap; answers the applied flag, the refused conflicts and the duplicates of open ones (JSON arrays), and the table whose cap the apply would pass (empty if none).
-pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
+pub const APPLY_SQL: &str = include_str!("../migrations/apply_v2.sql");
 
 
 pub const UNIQUE_VIOLATION: &str = "23505";
@@ -95,7 +95,7 @@ pub const SOURCE_COLUMN: usize = 3;
 pub const MIGRATION_NAMESPACE: &str = "cmdb";
 
 
-pub const MIGRATIONS: [Migration; 6] = [
+pub const MIGRATIONS: [Migration; 7] = [
     Migration {
         version: "001_cmdb",
         sql: include_str!("../migrations/001_cmdb.sql"),
@@ -119,6 +119,10 @@ pub const MIGRATIONS: [Migration; 6] = [
     Migration {
         version: "006_cmdb_search_path_pg_temp",
         sql: include_str!("../migrations/006_cmdb_search_path_pg_temp.sql"),
+    },
+    Migration {
+        version: "007_cmdb_events_unique",
+        sql: include_str!("../migrations/007_cmdb_events_unique.sql"),
     },
 ];
 
