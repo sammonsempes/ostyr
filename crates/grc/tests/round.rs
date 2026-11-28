@@ -11,8 +11,9 @@ use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use grc::error::StoreError;
 use grc::round::{
-    changed_controls, fault_class, gather_indicators, gather_indicators_bounded, indicator_paths, refusal_class, run_round, run_round_with,
-    store_outcome_unknown, Gathered, RoundFault, RoundSummary, MAX_DIRECTORY_ENTRIES, MAX_INDICATOR_FILES, MAX_NAMED_SKIPPED,
+    changed_controls, fault_class, gather_indicators, gather_indicators_bounded, gather_indicators_from_listing, indicator_paths, refusal_class,
+    run_round, run_round_with, store_outcome_unknown, Gathered, RoundFault, RoundSummary, MAX_DIRECTORY_ENTRIES, MAX_INDICATOR_FILES,
+    MAX_NAMED_SKIPPED,
 };
 use grc::service::{load_declarations, Declarations};
 use grc::store::{digest_hex, GET_SQL, LIST_FRAMEWORK_SQL, STORE_SQL};
@@ -27,6 +28,9 @@ use time::Duration;
 use time::OffsetDateTime;
 use tracing::Dispatch;
 use types::TestResult;
+
+
+const UNREADABLE_ENTRIES: usize = 2;
 
 
 const NOW_SECONDS: i64 = 1_795_687_200;
@@ -586,6 +590,26 @@ async fn a_scan_cut_marks_the_controls_without_a_value_like_the_file_cap() -> Te
 }
 
 
+#[tokio::test]
+async fn a_listing_cut_by_a_read_error_marks_the_controls_without_a_value() -> TestResult {
+    let (_dir, site) = fresh()?;
+    let listing = vec![Ok(std::path::PathBuf::from("a.json")), Err(std::io::Error::other("getdents"))];
+    let gathered = gather_indicators_from_listing(listing.into_iter(), "acme", MAX_DIRECTORY_ENTRIES);
+    assert_eq!((gathered.unreadable, gathered.scan_cut, gathered.beyond_cap), (1, false, 0));
+    let script = Script::default();
+    round_over(&script, &declarations(&site)?, &gathered).await;
+    let body = script
+        .stored
+        .lock()
+        .map_err(|_poisoned| "poisoned")?
+        .first()
+        .cloned()
+        .ok_or("nothing stored")?;
+    assert!(body.contains("indicator_files_cut"), "{body}");
+    Ok(())
+}
+
+
 #[test]
 fn many_skipped_files_are_named_up_to_a_bound_then_counted() -> TestResult {
     let (_dir, site) = fresh()?;
@@ -609,7 +633,8 @@ fn unreadable_directory_entries_are_one_counted_warning() -> TestResult {
         Ok(std::path::PathBuf::from("a.json")),
         Err(std::io::Error::other("entry")),
     ];
-    let (files, log) = captured(|| indicator_paths(listed))?;
+    let ((files, unreadable), log) = captured(|| indicator_paths(listed))?;
+    assert_eq!(unreadable, UNREADABLE_ENTRIES);
     assert_eq!(files, vec![std::path::PathBuf::from("a.json"), std::path::PathBuf::from("b.json")]);
     assert_eq!(log.lines().count(), 1, "{log}");
     assert!(log.contains("unreadable=2"), "{log}");

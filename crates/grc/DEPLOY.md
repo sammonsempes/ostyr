@@ -18,7 +18,7 @@ max_reports: 1000
 - Start-only (a change is refused and audited as denied; restart to apply): `tenant`, `pg_settings`, `audit_file`, `indicators_dir`, `manual_file`, and the database host, port, database, user, password file and CA file inside `pg_settings`.
 - Live (watched, validated, swapped atomically, audited under tenant `all`): `frameworks` and the framework files, the manual evidence file, `interval_seconds` (300 to 86 400), `max_reports` (1 to 1 000), the database timeouts. An applied change starts a round at once.
 - `SIGHUP` reloads every file after the round in flight.
-- `indicators_dir` holds one JSON array per producer (`*.json`, at most 16 files, each as the producer example prints it). A file that is absent, too large or malformed is refused alone and named in the log; the controls that need it read "no evidence" in the stored report. Files beyond the 16th and directory entries beyond the scan bound (100 000) are skipped with a warning, and every technical control without a value is then marked `indicator_files_cut` (an over-approximation: controls that never had a producer are marked too).
+- `indicators_dir` holds one JSON array per producer (`*.json`, at most 16 files, each as the producer example prints it). A file that is absent, too large or malformed is refused alone and named in the log; the controls that need it read "no evidence" in the stored report. Files beyond the 16th and directory entries beyond the scan bound (100 000) are skipped with a warning, as is everything after a directory read error, and every technical control without a value is then marked `indicator_files_cut` (an over-approximation: controls that never had a producer are marked too).
 
 ## Stopping
 
