@@ -5,7 +5,7 @@ mod types;
 use types::TestResult;
 use vuln_match::kev::KevCatalogue;
 use vuln_match::model::{Criticality, Finding, ScoredFinding};
-use vuln_match::scoring::cap_aliases;
+use vuln_match::scoring::{cap_aliases, cap_aliases_counted};
 
 
 const MAX: usize = 4;
@@ -74,5 +74,28 @@ fn a_list_within_the_cap_is_kept_whole_and_an_invalid_alias_is_dropped_and_count
     let dirty = cap_aliases(scored(&["CVE-2020-0001", "CVE-bad", "CVE-2020-0001x"], 1), &catalogue(&[]), MAX);
     assert_eq!(dirty.finding.cve_aliases, ["CVE-2020-0001"]);
     assert_eq!(dirty.finding.aliases_omitted, PRIOR_PLUS_DROPPED);
+    Ok(())
+}
+
+
+const KEV_PAST_THE_CAP: u64 = 2;
+
+
+#[test]
+fn catalogue_ids_past_the_cap_are_counted_apart() -> TestResult {
+    let aliases = [
+        "CVE-2020-0001",
+        "CVE-2020-0002",
+        "CVE-2020-0003",
+        "CVE-2020-0004",
+        "CVE-2020-0005",
+        "CVE-2020-0006",
+    ];
+    let kev = catalogue(&aliases);
+    let (capped, kev_omitted) = cap_aliases_counted(scored(&aliases, 0), &kev, MAX);
+    assert_eq!(kev_omitted, KEV_PAST_THE_CAP);
+    assert_eq!(capped.finding.aliases_omitted, KEV_PAST_THE_CAP);
+    let (_whole, none) = cap_aliases_counted(scored(&aliases, 0), &catalogue(&[]), MAX);
+    assert_eq!(none, 0);
     Ok(())
 }
