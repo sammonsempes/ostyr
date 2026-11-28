@@ -20,6 +20,7 @@ use waf::model::{ApplySettings, CommandStatus};
 use waf::serve::{
     check_audit_distinct, check_audit_path, error_line, exit_code, open_sink, parse_args, same_file, serve_with_program, service_context,
 };
+use waf::types::RunnerFn;
 
 
 const ONE_ROUTE: &str = "routes:\n  - hosts: [a.example.test]\n    backends: [\"127.0.0.1:9001\"]\n";
@@ -49,10 +50,10 @@ const RETRY_POLLS: usize = 100;
 const RETRY_ATTEMPTS: usize = 60;
 
 
+const HANG_GUARD: Duration = Duration::from_secs(180);
+
+
 const TWO_CALLS: usize = 2;
-
-
-const FOUR_CALLS: usize = 4;
 
 
 struct Fixture {
@@ -157,16 +158,45 @@ fn feed(receiver: Receiver<c_int>, registered: Option<String>) -> impl Fn() -> i
 }
 
 
-fn joined(handle: std::thread::ScopedJoinHandle<'_, io::Result<()>>) -> Result<(), Box<dyn Error>> {
-    handle.join().map_err(|_| "driver panicked")??;
-    Ok(())
-}
-
-
 fn finish(sender: &Sender<c_int>, body: io::Result<()>) -> io::Result<()> {
     let delivered = sender.send(SIGTERM).is_ok();
     tracing::debug!(delivered, "extra stop for a service whose driver failed");
     body
+}
+
+
+fn check(condition: bool, name: &str) -> io::Result<()> {
+    condition.then_some(()).ok_or_else(|| io::Error::other(format!("check failed: {name}")))
+}
+
+
+fn serve_driven(
+    fixture: &Fixture,
+    runner: RunnerFn,
+    source: &dyn Fn() -> io::Result<Receiver<c_int>>,
+    sender: &Sender<c_int>,
+    body: &(dyn Fn() -> io::Result<()> + Sync),
+) -> Result<(), Box<dyn Error>> {
+    let (done, finished) = channel::<()>();
+    let (served, driven, expired) = scope(|scope| {
+        let driver = scope.spawn(|| finish(sender, body()));
+        let stopper = sender;
+        let watchdog = scope.spawn(move || {
+            let expired = finished.recv_timeout(HANG_GUARD).is_err();
+            let stopped = expired && stopper.send(SIGTERM).is_ok();
+            tracing::debug!(stopped, "hang guard");
+            expired
+        });
+        let served = serve_with_program(&fixture.settings_file, &fixture.program, runner, source);
+        let notified = done.send(()).is_ok();
+        tracing::debug!(notified, "serve returned");
+        let driven = driver.join().map_err(|_| io::Error::other("driver panicked")).and_then(|result| result);
+        let expired = watchdog.join().map_err(|_| io::Error::other("watchdog panicked"));
+        (served, driven, expired)
+    });
+    check(!expired?, "the service outlived the hang guard")?;
+    served?;
+    Ok(driven?)
 }
 
 
@@ -204,27 +234,18 @@ fn the_service_applies_follows_edits_refuses_a_bad_one_and_audits_under_all() ->
     let before_edit = fixture.dir.path().join("out/caddy.json");
     let (sender, receiver) = channel();
     let source = feed(receiver, None);
-    scope(|scope| -> Result<(), Box<dyn Error>> {
-        let driver = scope.spawn(|| {
-            finish(
-                &sender,
-                (|| -> io::Result<()> {
-                    wait_until(&|| applied_count(&fixture) >= 1)?;
-                    assert_eq!(call_count(&fixture), TWO_CALLS);
-                    replace_until(&fixture.routes, MARKER_ROUTE, &|| call_count(&fixture) >= FOUR_CALLS)?;
-                    let applied = fs::read_to_string(&before_edit)?;
-                    assert!(applied.contains("marker-host.example.test"));
-                    let refused_before = audit_lines(&fixture).iter().filter(|line| line.contains("refused")).count();
-                    replace(&fixture.routes, BAD_TLS_ROUTE)?;
-                    send(&sender, SIGHUP)?;
-                    wait_until(&|| audit_lines(&fixture).iter().filter(|line| line.contains("refused")).count() > refused_before)?;
-                    assert_eq!(fs::read_to_string(&before_edit)?, applied);
-                    send(&sender, SIGTERM)
-                })(),
-            )
-        });
-        serve_with_program(&fixture.settings_file, &fixture.program, fake, &source)?;
-        joined(driver)
+    serve_driven(&fixture, fake, &source, &sender, &|| {
+        wait_until(&|| applied_count(&fixture) >= 1)?;
+        wait_until(&|| call_count(&fixture) >= TWO_CALLS)?;
+        replace_until(&fixture.routes, MARKER_ROUTE, &|| applied_count(&fixture) >= TWO_CALLS)?;
+        let applied = fs::read_to_string(&before_edit)?;
+        check(applied.contains("marker-host.example.test"), "the edited route is published")?;
+        let refused_before = audit_lines(&fixture).iter().filter(|line| line.contains("refused")).count();
+        replace(&fixture.routes, BAD_TLS_ROUTE)?;
+        send(&sender, SIGHUP)?;
+        wait_until(&|| audit_lines(&fixture).iter().filter(|line| line.contains("refused")).count() > refused_before)?;
+        check(fs::read_to_string(&before_edit)? == applied, "a refused edit keeps the old configuration")?;
+        send(&sender, SIGTERM)
     })?;
     let lines = audit_lines(&fixture);
     assert!(lines.len() > TWO_CALLS);
@@ -397,22 +418,13 @@ fn a_reload_in_flight_when_the_wait_returns_is_audited_and_published_before_serv
     let program = fixture.program.display().to_string();
     let (sender, receiver) = channel();
     let source = feed(receiver, Some(format!("{program}.registered")));
-    scope(|scope| -> Result<(), Box<dyn Error>> {
-        let driver = scope.spawn(|| {
-            finish(
-                &sender,
-                (|| -> io::Result<()> {
-                    wait_until(&|| applied_count(&fixture) >= 1)?;
-                    fs::write(format!("{program}.hold"), "")?;
-                    replace_until(&fixture.routes, MARKER_ROUTE, &|| Path::new(&format!("{program}.entered")).exists())?;
-                    send(&sender, SIGTERM)?;
-                    sleep(RELEASE_DELAY);
-                    fs::write(format!("{program}.release"), "")
-                })(),
-            )
-        });
-        serve_with_program(&fixture.settings_file, &fixture.program, slow_fake, &source)?;
-        joined(driver)
+    serve_driven(&fixture, slow_fake, &source, &sender, &|| {
+        wait_until(&|| applied_count(&fixture) >= 1)?;
+        fs::write(format!("{program}.hold"), "")?;
+        replace_until(&fixture.routes, MARKER_ROUTE, &|| Path::new(&format!("{program}.entered")).exists())?;
+        send(&sender, SIGTERM)?;
+        sleep(RELEASE_DELAY);
+        fs::write(format!("{program}.release"), "")
     })?;
     assert_eq!(applied_count(&fixture), TWO_CALLS);
     assert!(fs::read_to_string(fixture.dir.path().join("out/caddy.json"))?.contains("marker-host.example.test"));
@@ -497,21 +509,15 @@ fn a_stop_and_a_hangup_during_the_first_delivery_wait_for_its_audit_and_publish(
     fs::write(format!("{program}.hold"), "")?;
     let (sender, receiver) = channel();
     let source = feed(receiver, Some(format!("{program}.registered")));
-    scope(|scope| -> Result<(), Box<dyn Error>> {
-        let driver = scope.spawn(|| {
-            finish(
-                &sender,
-                (|| -> io::Result<()> {
-                    wait_until(&|| Path::new(&format!("{program}.entered")).exists())?;
-                    assert_eq!(fs::read_to_string(format!("{program}.entered"))?, "registered");
-                    send(&sender, SIGHUP)?;
-                    send(&sender, SIGTERM)?;
-                    fs::write(format!("{program}.release"), "")
-                })(),
-            )
-        });
-        serve_with_program(&fixture.settings_file, &fixture.program, slow_fake, &source)?;
-        joined(driver)
+    serve_driven(&fixture, slow_fake, &source, &sender, &|| {
+        wait_until(&|| Path::new(&format!("{program}.entered")).exists())?;
+        check(
+            fs::read_to_string(format!("{program}.entered"))? == "registered",
+            "the signal source is registered before the first delivery",
+        )?;
+        send(&sender, SIGHUP)?;
+        send(&sender, SIGTERM)?;
+        fs::write(format!("{program}.release"), "")
     })?;
     assert_eq!(applied_count(&fixture), 1);
     assert!(fs::read_to_string(fixture.dir.path().join("out/caddy.json"))?.contains("a.example.test"));
@@ -550,26 +556,17 @@ fn an_audit_file_reached_through_a_symlinked_directory_of_out_dir_is_refused() -
 fn refused_after_start(fixture: &Fixture, damage: &(dyn Fn(&Path) -> io::Result<()> + Sync)) -> Result<(), Box<dyn Error>> {
     let (sender, receiver) = channel();
     let source = feed(receiver, None);
-    scope(|scope| -> Result<(), Box<dyn Error>> {
-        let driver = scope.spawn(|| {
-            finish(
-                &sender,
-                (|| -> io::Result<()> {
-                    wait_until(&|| applied_count(fixture) >= 1)?;
-                    replace_until(&fixture.routes, MARKER_ROUTE, &|| call_count(fixture) >= FOUR_CALLS)?;
-                    let calls_before = call_count(fixture);
-                    damage(fixture.dir.path())?;
-                    replace(&fixture.routes, ONE_ROUTE)?;
-                    send(&sender, SIGHUP)?;
-                    wait_until(&|| audit_lines(fixture).iter().any(|line| line.contains("denied")))?;
-                    assert_eq!(call_count(fixture), calls_before);
-                    assert_eq!(leftover_stages(fixture)?, 0);
-                    send(&sender, SIGTERM)
-                })(),
-            )
-        });
-        serve_with_program(&fixture.settings_file, &fixture.program, fake, &source)?;
-        joined(driver)
+    serve_driven(fixture, fake, &source, &sender, &|| {
+        wait_until(&|| applied_count(fixture) >= 1)?;
+        replace_until(&fixture.routes, MARKER_ROUTE, &|| applied_count(fixture) >= TWO_CALLS)?;
+        let calls_before = call_count(fixture);
+        damage(fixture.dir.path())?;
+        replace(&fixture.routes, ONE_ROUTE)?;
+        send(&sender, SIGHUP)?;
+        wait_until(&|| audit_lines(fixture).iter().any(|line| line.contains("denied")))?;
+        check(call_count(fixture) == calls_before, "a refused delivery runs nothing")?;
+        check(leftover_stages(fixture)? == 0, "a refused delivery leaves no stage file")?;
+        send(&sender, SIGTERM)
     })
 }
 
