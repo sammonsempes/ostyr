@@ -12,7 +12,7 @@ mod types;
 use core_config::reload::{reload, ReloadOutcome};
 use core_pg::scope::tenant_scope;
 use fake_store::{executor, FakeStore};
-use site::{build_archive, settings_text, sha_of, write_site, Site, EPSS, KEV, RECORD, ROUND_SECONDS, TENANT, VULNERABLE};
+use site::{build_archive, settings_text, sha_of, write_site, Site, EPSS, KEV, OPEN, RECORD, ROUND_SECONDS, TENANT, VULNERABLE};
 use std::fs;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
@@ -694,5 +694,121 @@ async fn an_unfinished_round_is_named_in_the_report() -> TestResult {
     ]
     .iter()
     .for_each(|single| log_round(single, 0));
+    Ok(())
+}
+
+
+const TWO_VERSIONS_OF_ONE_PACKAGE: &str =
+    r#"[{"ecosystem":"Debian:12","name":"curl","version":"7.88.1-10"},{"ecosystem":"Debian:12","name":"curl","version":"7.88.1-9"}]"#;
+
+
+#[tokio::test]
+async fn two_versions_of_one_package_raise_one_alert_for_the_stored_row() -> TestResult {
+    let dir = tempdir()?;
+    let (site, settings) = site_in(dir.path())?;
+    fs::write(site.inventory.join("k-1.json"), TWO_VERSIONS_OF_ONE_PACKAGE)?;
+    let loaded = loaded_of(&settings)?;
+    let store = FakeStore::default();
+    let report = round(&store, &settings, &loaded, NOW).await?;
+    assert_eq!((report.scanned, report.findings, report.alerts), (1, 1, 1));
+    assert_eq!(store.alerts.lock().map_err(|_poisoned| "poisoned")?.len(), 1);
+    assert_eq!(
+        store
+            .versions
+            .lock()
+            .map_err(|_poisoned| "poisoned")?
+            .values()
+            .cloned()
+            .collect::<Vec<String>>(),
+        ["7.88.1-10"]
+    );
+    let blind = FakeStore {
+        fail_readback: true,
+        ..FakeStore::default()
+    };
+    let blind_report = round(&blind, &settings, &loaded, NOW).await?;
+    assert_eq!((blind_report.scanned, blind_report.alerts), (1, 0));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_omitted_aliases_of_a_round_are_counted() -> TestResult {
+    let dir = tempdir()?;
+    let (site, _settings) = site_in(dir.path())?;
+    let archive = build_archive(&[("DSA-1.json", &aliased_record(HUNDREDS))])?;
+    fs::write(&site.archive, &archive)?;
+    fs::write(&site.settings, settings_text(&site, &sha_of(&archive), ROUND_SECONDS))?;
+    let settings = load_settings(&site.settings)?;
+    fs::write(site.inventory.join("k-1.json"), VULNERABLE)?;
+    let loaded = loaded_of(&settings)?;
+    let report = round(&FakeStore::default(), &settings, &loaded, NOW).await?;
+    assert_eq!(
+        report.aliases_omitted,
+        (HUNDREDS + 1 - vuln_match::limits::MAX_ALIASES_PER_FINDING) as u64
+    );
+    assert_eq!(report.kev_omitted, 0);
+    log_round(&report, 0);
+    log_round(
+        &RoundReport {
+            kev_omitted: 1,
+            ..RoundReport::default()
+        },
+        0,
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_ecosystem_names_of_the_settings_are_a_bounded_ascii_list() -> TestResult {
+    let dir = tempdir()?;
+    let (site, _settings) = site_in(dir.path())?;
+    let base = fs::read_to_string(&site.settings)?;
+    let with = |names: &str| {
+        base.replace(
+            &format!("allowed_licences: [{OPEN}]"),
+            &format!("allowed_licences: [{OPEN}]\n  ecosystems: {names}"),
+        )
+    };
+    let too_many = format!("[{}]", vec!["Debian"; vuln_match::limits::MAX_FEED_ECOSYSTEMS + 1].join(", "));
+    let too_long = format!("[{}]", "a".repeat(vuln_match::limits::MAX_ECOSYSTEM_CHARS + 1));
+    let bad = [
+        too_many,
+        too_long,
+        "[\"\"]".to_owned(),
+        "[\"-x\"]".to_owned(),
+        "[\"Debian;12\"]".to_owned(),
+        "[\"D\u{e9}bian\"]".to_owned(),
+    ];
+    bad.iter().try_for_each(|names| -> TestResult {
+        fs::write(&site.settings, with(names))?;
+        assert!(load_settings(&site.settings).is_err(), "{names}");
+        Ok(())
+    })?;
+    let at_cap = format!("[{}]", vec!["Rocky Linux:9.3"; vuln_match::limits::MAX_FEED_ECOSYSTEMS].join(", "));
+    fs::write(&site.settings, with(&at_cap))?;
+    assert_eq!(
+        load_settings(&site.settings)?.feed.ecosystems.len(),
+        vuln_match::limits::MAX_FEED_ECOSYSTEMS
+    );
+    fs::write(&site.settings, with("[Debian:12, Debian:11]"))?;
+    let selected = load_settings(&site.settings)?;
+    assert_eq!(selected.feed.ecosystems, ["Debian:12", "Debian:11"]);
+    assert!(settings_state(&selected)
+        .get("ecosystems")
+        .is_some_and(|value| value.contains("Debian:11")));
+    Ok(())
+}
+
+
+#[test]
+fn a_selected_ecosystem_with_no_entry_leaves_the_feed_empty() -> TestResult {
+    let dir = tempdir()?;
+    let (site, _settings) = site_in(dir.path())?;
+    let base = fs::read_to_string(&site.settings)?;
+    let selection = format!("allowed_licences: [{OPEN}]\n  ecosystems: [Nowhere:1]");
+    fs::write(&site.settings, base.replace(&format!("allowed_licences: [{OPEN}]"), &selection))?;
+    assert!(matches!(load_osv(&load_settings(&site.settings)?), Err(LoadError::Empty { feed: "osv" })));
     Ok(())
 }

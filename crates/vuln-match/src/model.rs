@@ -3,7 +3,7 @@
 use crate::types::UnmatchedCounts;
 use rpm_version::Evr;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -156,6 +156,14 @@ pub struct ScoredFinding {
 }
 
 
+/// Aliases a scan's findings left out of their lists, and how many of them were catalogue (KEV) ids.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Omitted {
+    pub aliases: u64,
+    pub kev: u64,
+}
+
+
 /// A scored finding on a named inventory asset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssetFinding {
@@ -199,6 +207,8 @@ pub struct FeedSettings {
     pub prefix_licences: BTreeMap<String, String>,
     #[serde(default)]
     pub allowed_licences: Vec<String>,
+    #[serde(default)]
+    pub ecosystems: Vec<String>,
 }
 
 
@@ -219,6 +229,7 @@ pub struct LocalHeader {
     pub flags: u16,
     pub method: u16,
     pub compressed: usize,
+    pub uncompressed: usize,
     pub name_len: usize,
     pub extra_len: usize,
 }
@@ -236,7 +247,9 @@ pub struct FeedReport {
     pub records: Vec<LoadedRecord>,
     pub bad_entries: usize,
     pub dropped_by_licence: usize,
+    pub dropped_by_ecosystem: usize,
     pub retained_items: u64,
+    pub unmatched_ecosystems: Vec<String>,
 }
 
 
@@ -244,6 +257,7 @@ pub struct FeedReport {
 pub struct ScanState {
     pub report: FeedReport,
     pub total: u64,
+    pub matched: BTreeSet<String>,
     pub entries: usize,
     pub done: bool,
 }

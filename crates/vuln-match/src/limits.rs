@@ -24,7 +24,7 @@ pub const MAX_VERSION_BYTES: usize = 256;
 pub const MAX_EOL_ENTRIES: usize = 10_000;
 
 
-pub const MAX_ARCHIVE_BYTES: u64 = 268_435_456;
+pub const MAX_ARCHIVE_BYTES: u64 = 134_217_728;
 
 
 pub const MAX_ARCHIVE_ENTRIES: usize = MAX_RECORDS;
@@ -33,7 +33,7 @@ pub const MAX_ARCHIVE_ENTRIES: usize = MAX_RECORDS;
 pub const MAX_ENTRY_BYTES: u64 = MAX_RECORD_BYTES as u64;
 
 
-pub const MAX_TOTAL_BYTES: u64 = 536_870_912;
+pub const MAX_TOTAL_BYTES: u64 = 335_544_320;
 
 
 pub const MAX_COMPRESSION_RATIO: u64 = 200;
@@ -45,7 +45,30 @@ pub const RATIO_FLOOR_BYTES: u64 = 65_536;
 pub const MAX_LOGGED_NAME_CHARS: usize = 128;
 
 
-pub const MAX_RETAINED_ITEMS: u64 = 2_000_000;
+pub const MAX_RETAINED_ITEMS: u64 = 4_100_000;
+
+
+/// Memory budget of one feed load while the previous record set is alive, the archive buffer included.
+pub const MAX_FEED_MEMORY_BYTES: u64 = 2_147_483_648;
+
+
+/// Worst fixed bytes of one retained item: the 96-byte `Affected` plus the allocator slot overhead (4-byte header, 15 rounding) of its two strings.
+pub const WORST_ITEM_FIXED_BYTES: u64 = 144;
+
+
+/// Worst fixed bytes of one record: the `OsvRecord` struct, its id and its vector headers, slots included.
+pub const WORST_RECORD_FIXED_BYTES: u64 = 512;
+
+
+/// Record sets alive at the peak of a reload: the loaded one and the one being built.
+pub const FEED_SETS_ALIVE: u64 = 2;
+
+
+/// Ecosystems one feed setting may name.
+pub const MAX_FEED_ECOSYSTEMS: usize = 16;
+
+
+pub const MAX_ECOSYSTEM_CHARS: usize = 64;
 
 
 pub const MAGIC_BYTES: usize = 4;
@@ -82,6 +105,10 @@ pub const LOCAL_COMPRESSED_AT: usize = 14;
 
 
 pub const LOCAL_NAME_AT: usize = 22;
+
+
+/// Offset of the uncompressed size in the 26 fixed bytes of a local header.
+pub const LOCAL_UNCOMPRESSED_AT: usize = 18;
 
 
 pub const LOCAL_EXTRA_AT: usize = 24;

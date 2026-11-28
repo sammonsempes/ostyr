@@ -92,7 +92,10 @@ pub fn pause(duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
 /// A clock before the epoch reads 0, which a round refuses to run on; a time beyond `u64` microseconds saturates and is refused by the store.
 pub fn micros_since_epoch(reading: Result<Duration, SystemTimeError>) -> u64 {
     match reading {
-        Ok(elapsed) => u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+        Ok(elapsed) => u64::try_from(elapsed.as_micros()).unwrap_or_else(|error| {
+            warn!(%error, "the clock is beyond the microsecond range, the round is refused");
+            u64::MAX
+        }),
         Err(error) => {
             warn!(%error, "the clock is before the epoch");
             0

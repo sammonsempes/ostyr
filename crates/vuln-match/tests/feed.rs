@@ -10,13 +10,15 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use types::TestResult;
 use vuln_match::error::FeedError;
-use vuln_match::feed::{default_limits, is_safe_name, licence_of, load_feed, load_feed_reader, parse_local, retained_items, take_bytes};
-use vuln_match::limits::{
-    DESCRIPTOR_FLAG, DESCRIPTOR_SIGNATURE, ENCRYPTED_FLAG, EOCD_SIGNATURE, LOCAL_SIGNATURE, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_ENTRIES,
-    MAX_COMPRESSION_RATIO, MAX_ENTRY_BYTES, MAX_RETAINED_ITEMS, MAX_TOTAL_BYTES, METHOD_DEFLATED, METHOD_STORED, RATIO_FLOOR_BYTES,
-    ZIP64_EOCD_SIGNATURE,
+use vuln_match::feed::{
+    default_limits, ecosystem_selected, is_safe_name, licence_of, load_feed, load_feed_reader, parse_local, retained_items, take_bytes,
 };
-use vuln_match::model::{FeedLimits, FeedSettings};
+use vuln_match::limits::{
+    DESCRIPTOR_FLAG, DESCRIPTOR_SIGNATURE, ENCRYPTED_FLAG, EOCD_SIGNATURE, FEED_SETS_ALIVE, LOCAL_SIGNATURE, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_ENTRIES,
+    MAX_COMPRESSION_RATIO, MAX_ENTRY_BYTES, MAX_FEED_MEMORY_BYTES, MAX_RECORDS, MAX_RETAINED_ITEMS, MAX_TOTAL_BYTES, METHOD_DEFLATED, METHOD_STORED,
+    RATIO_FLOOR_BYTES, WORST_ITEM_FIXED_BYTES, WORST_RECORD_FIXED_BYTES, ZIP64_EOCD_SIGNATURE,
+};
+use vuln_match::model::{Affected, FeedLimits, FeedSettings, OsvRecord};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -77,8 +79,12 @@ fn build_zip(entries: &[(&str, &[u8])], method: CompressionMethod) -> Result<Vec
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(method);
     entries.iter().try_for_each(|(name, content)| -> Result<(), Box<dyn std::error::Error>> {
-        writer.start_file(*name, options)?;
-        writer.write_all(content)?;
+        if name.ends_with('/') {
+            writer.add_directory(*name, options)?;
+        } else {
+            writer.start_file(*name, options)?;
+            writer.write_all(content)?;
+        }
         Ok(())
     })?;
     Ok(writer.finish()?.into_inner())
@@ -90,6 +96,7 @@ fn settings_for(bytes: &[u8]) -> FeedSettings {
         sha256: format!("{:x}", Sha256::digest(bytes)),
         prefix_licences: BTreeMap::from([(String::new(), OPEN.to_string())]),
         allowed_licences: vec![OPEN.to_string()],
+        ecosystems: Vec::new(),
     }
 }
 
@@ -355,6 +362,10 @@ const CENTRAL_COMPRESSED_OFFSET: usize = 20;
 const LOCAL_COMPRESSED_OFFSET: usize = 18;
 
 
+/// Offset of the uncompressed size of the first local header, signature included.
+const LOCAL_UNCOMPRESSED_OFFSET: usize = 22;
+
+
 const EOCD_BYTES: usize = 22;
 
 
@@ -376,7 +387,13 @@ const UNKNOWN_METHOD: u16 = 99;
 const ZIP_VERSION: u16 = 20;
 
 
-const TOTAL_CEILING: u64 = 536_870_912;
+const TOTAL_CEILING: u64 = 335_544_320;
+
+
+const STRING_SLOT_OVERHEAD_BYTES: u64 = 20;
+
+
+const STRINGS_PER_AFFECTED: u64 = 2;
 
 
 const NO_EXTRA: usize = 0;
@@ -598,10 +615,18 @@ fn entries_are_counted_while_reading() -> TestResult {
 
 
 #[test]
-fn directory_entries_are_skipped_whatever_their_body() -> TestResult {
+fn a_directory_entry_with_data_is_refused_and_an_empty_one_accepted() -> TestResult {
     let body = "x".repeat(DIRECTORY_BODY);
-    let bytes = sequential(&[stored("d/", &body), stored("a.json", &record("A"))], CENTRAL_SIGNATURE);
-    assert_eq!(load(&bytes, &default_limits())?.records.len(), 1);
+    let padded = sequential(&[stored("pad/", &body), stored("a.json", &record("A"))], CENTRAL_SIGNATURE);
+    assert!(matches!(load(&padded, &default_limits()), Err(FeedError::DirectoryEntryWithData { name }) if name == "pad/"));
+    let mut uncompressed_only = sequential(&[stored("pad/", ""), stored("a.json", &record("A"))], CENTRAL_SIGNATURE);
+    patch(&mut uncompressed_only, LOCAL_UNCOMPRESSED_OFFSET, &[1, 0, 0, 0])?;
+    assert!(matches!(
+        load(&uncompressed_only, &default_limits()),
+        Err(FeedError::DirectoryEntryWithData { .. })
+    ));
+    let empty = sequential(&[stored("d/", ""), stored("a.json", &record("A"))], CENTRAL_SIGNATURE);
+    assert_eq!(load(&empty, &default_limits())?.records.len(), 1);
     Ok(())
 }
 
@@ -833,3 +858,201 @@ const ALIAS_ITEMS: u64 = 3;
 
 
 const EMPTY_ITEMS: u64 = 3;
+
+
+const OTHER_RELEASE_VERSIONS: usize = 50;
+
+
+const ECOSYSTEM_CAP: u64 = 10;
+
+
+const SELECTED_ITEMS: u64 = 8;
+
+
+const SMALL_ITEMS: u64 = 2;
+
+
+const FOUR_RECORDS: usize = 4;
+
+
+const TWO_VERSIONS: usize = 2;
+
+
+const THREE_VERSIONS: usize = 3;
+
+
+const REAL_DEBIAN_11_AND_12_ITEMS: u64 = 4_011_996;
+
+
+fn affected_json(ecosystem: &str, versions: usize) -> String {
+    let listed: Vec<String> = (0..versions).map(|index| format!("\"1.{index}\"")).collect();
+    format!(
+        r#"{{"package":{{"ecosystem":"{ecosystem}","name":"p"}},"versions":[{}]}}"#,
+        listed.join(",")
+    )
+}
+
+
+fn ecosystem_record(id: &str, entries: &[(&str, usize)]) -> String {
+    let affected: Vec<String> = entries.iter().map(|(ecosystem, versions)| affected_json(ecosystem, *versions)).collect();
+    format!(r#"{{"id":"{id}","affected":[{}]}}"#, affected.join(","))
+}
+
+
+fn selecting(bytes: &[u8], ecosystems: &[&str]) -> FeedSettings {
+    FeedSettings {
+        ecosystems: ecosystems.iter().map(|name| (*name).to_owned()).collect(),
+        ..settings_for(bytes)
+    }
+}
+
+
+#[test]
+fn only_the_selected_ecosystems_are_kept_and_the_rest_is_counted() -> TestResult {
+    let twelve = ecosystem_record("DSA-12", &[("Debian:12", 1)]);
+    let eleven = ecosystem_record("DSA-11", &[("Debian:11", 1)]);
+    let both = ecosystem_record("DSA-BOTH", &[("Debian:11", TWO_VERSIONS), ("Debian:12", THREE_VERSIONS)]);
+    let bare = ecosystem_record("DSA-BARE", &[("Debian", 1)]);
+    let bytes = build_zip(
+        &[
+            ("a.json", twelve.as_bytes()),
+            ("b.json", eleven.as_bytes()),
+            ("c.json", both.as_bytes()),
+            ("d.json", bare.as_bytes()),
+        ],
+        CompressionMethod::Deflated,
+    )?;
+    let report = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12"]), &default_limits())?;
+    let ids: Vec<&str> = report.records.iter().map(|loaded| loaded.record.id.as_str()).collect();
+    assert_eq!(ids, vec!["DSA-12", "DSA-BOTH", "DSA-BARE"]);
+    assert_eq!(report.dropped_by_ecosystem, 1);
+    let mixed = &report.records.get(1).ok_or("no mixed record")?.record;
+    assert_eq!(mixed.affected.len(), 1);
+    assert_eq!(mixed.affected.first().ok_or("no entry")?.package.ecosystem, "Debian:12");
+    assert_eq!(report.retained_items, SELECTED_ITEMS);
+    let all = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &default_limits())?;
+    assert_eq!((all.records.len(), all.dropped_by_ecosystem), (FOUR_RECORDS, 0));
+    Ok(())
+}
+
+
+#[test]
+fn the_ecosystem_selection_applies_before_the_retained_cap() -> TestResult {
+    let small = ecosystem_record("DSA-12", &[("Debian:12", 1)]);
+    let big = ecosystem_record("DSA-11", &[("Debian:11", OTHER_RELEASE_VERSIONS)]);
+    let bytes = build_zip(&[("a.json", small.as_bytes()), ("b.json", big.as_bytes())], CompressionMethod::Deflated)?;
+    let limits = FeedLimits {
+        max_retained_items: ECOSYSTEM_CAP,
+        ..default_limits()
+    };
+    let report = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12"]), &limits)?;
+    assert_eq!(
+        (report.records.len(), report.dropped_by_ecosystem, report.retained_items),
+        (1, 1, SMALL_ITEMS)
+    );
+    let unselected = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &limits);
+    assert!(matches!(unselected, Err(FeedError::TooManyRetained { .. })), "{unselected:?}");
+    let both = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12", "Debian:11"]), &limits);
+    assert!(matches!(both, Err(FeedError::TooManyRetained { .. })), "{both:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_release_names_itself_and_the_bare_family_only() -> TestResult {
+    let selected = vec!["Debian:12".to_owned()];
+    assert!(ecosystem_selected(&selected, "Debian:12"));
+    assert!(ecosystem_selected(&selected, "Debian"));
+    assert!(!ecosystem_selected(&selected, "Debian:11"));
+    assert!(!ecosystem_selected(&selected, "Debian:123"));
+    assert!(!ecosystem_selected(&selected, "Ubuntu:12"));
+    assert!(!ecosystem_selected(&[], "Debian:12"));
+    Ok(())
+}
+
+
+#[test]
+fn the_default_retained_cap_admits_two_real_debian_releases() -> TestResult {
+    assert!(default_limits().max_retained_items >= REAL_DEBIAN_11_AND_12_ITEMS);
+    Ok(())
+}
+
+
+const SLACK_ENTRIES: usize = 5;
+
+
+const SLACK_VERSIONS: usize = 50;
+
+
+fn slack_record() -> String {
+    let versions = (0..SLACK_VERSIONS).map(|index| format!("\"1.{index}\"")).collect::<Vec<_>>().join(",");
+    let ranges = r#"[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1"},{"introduced":"2"}]},{"type":"ECOSYSTEM","events":[]},{"type":"ECOSYSTEM","events":[]}]"#;
+    let entry = format!(r#"{{"package":{{"ecosystem":"Debian:12","name":"p"}},"versions":[{versions}],"ranges":{ranges}}}"#);
+    let other = affected_json("Debian:11", 1);
+    let entries = vec![entry; SLACK_ENTRIES].join(",");
+    format!(r#"{{"id":"DSA-SLACK","aliases":["A","B","C"],"upstream":["U","V","W"],"affected":[{entries},{other},{other},{other}]}}"#)
+}
+
+
+#[test]
+fn a_kept_record_holds_no_growth_slack() -> TestResult {
+    let record = slack_record();
+    let bytes = build_zip(&[("a.json", record.as_bytes())], CompressionMethod::Deflated)?;
+    let loaded = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12"]), &default_limits())?;
+    let kept = &loaded.records.first().ok_or("no record")?.record;
+    assert_eq!(kept.affected.len(), SLACK_ENTRIES);
+    assert_eq!(kept.affected.capacity(), kept.affected.len());
+    assert_eq!(
+        (kept.aliases.capacity(), kept.upstream.capacity()),
+        (kept.aliases.len(), kept.upstream.len())
+    );
+    kept.affected.iter().for_each(|entry| {
+        assert_eq!(entry.versions.capacity(), entry.versions.len());
+        assert_eq!(entry.ranges.capacity(), entry.ranges.len());
+        entry
+            .ranges
+            .iter()
+            .for_each(|range| assert_eq!(range.events.capacity(), range.events.len()));
+    });
+    let unselected = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &default_limits())?;
+    let whole = &unselected.records.first().ok_or("no record")?.record;
+    assert_eq!(whole.affected.capacity(), whole.affected.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_selected_name_that_matches_no_entry_is_reported() -> TestResult {
+    let twelve = ecosystem_record("DSA-12", &[("Debian:12", 1)]);
+    let bare = ecosystem_record("DSA-BARE", &[("Debian", 1)]);
+    let bytes = build_zip(&[("a.json", twelve.as_bytes()), ("b.json", bare.as_bytes())], CompressionMethod::Deflated)?;
+    let names = ["Debian:12", "debian:12", "Debian:12 ", "Debian:11", "Debian"];
+    let report = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &names), &default_limits())?;
+    assert_eq!(report.unmatched_ecosystems, ["debian:12", "Debian:12 ", "Debian:11"]);
+    let all_found = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &["Debian:12", "Debian"]), &default_limits())?;
+    assert!(all_found.unmatched_ecosystems.is_empty());
+    let nothing_selected = load_feed_reader(bytes.as_slice(), &selecting(&bytes, &[]), &default_limits())?;
+    assert!(nothing_selected.unmatched_ecosystems.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn the_retained_cap_fits_the_feed_memory_budget() -> TestResult {
+    let limits = default_limits();
+    let sets = limits.max_retained_items * WORST_ITEM_FIXED_BYTES + MAX_RECORDS as u64 * WORST_RECORD_FIXED_BYTES + limits.max_total_bytes;
+    let peak = FEED_SETS_ALIVE * sets + limits.max_archive_bytes;
+    assert!(peak <= MAX_FEED_MEMORY_BYTES, "{peak}");
+    assert!(limits.max_retained_items >= REAL_DEBIAN_11_AND_12_ITEMS);
+    assert_eq!(limits.max_retained_items, MAX_RETAINED_ITEMS);
+    Ok(())
+}
+
+
+#[test]
+fn the_worst_item_covers_its_struct_and_string_slots() -> TestResult {
+    let affected = std::mem::size_of::<Affected>() as u64;
+    assert!(WORST_ITEM_FIXED_BYTES >= affected + STRINGS_PER_AFFECTED * STRING_SLOT_OVERHEAD_BYTES);
+    assert!(WORST_RECORD_FIXED_BYTES >= std::mem::size_of::<OsvRecord>() as u64 + STRING_SLOT_OVERHEAD_BYTES);
+    Ok(())
+}
