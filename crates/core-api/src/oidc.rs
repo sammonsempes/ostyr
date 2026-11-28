@@ -446,7 +446,7 @@ pub fn count_callback_failure(app: &ApiState, request_id: &str, source: &str) {
         record_failure(&mut auth.attempts, &source_key(source), SOURCE_MAX_FAILURES, now)
             .into_iter()
             .for_each(|until| {
-                log_lockout(&context, now, ANONYMOUS_ACTOR, source, SCOPE_SOURCE, until)
+                log_lockout(&context, now, ANONYMOUS_ACTOR, (source, SCOPE_SOURCE), (until, false))
                     .inspect_err(|error| tracing::error!(%error, "lockout audit record failed"))
                     .ok();
             });

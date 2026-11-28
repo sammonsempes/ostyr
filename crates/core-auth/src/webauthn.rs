@@ -7,8 +7,8 @@ use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
 use crate::rbac::{check_roles, requires_mfa, webauthn_required};
 use crate::service::{
-    audit_name, count_failure, denial_error, finish, login_gate, record, record_denial, refuse_locked, require, resolve_actor, transact,
-    verify_account_password, Context, Denial, LoginRequest, State, ACTION_LOGIN, ANONYMOUS_ACTOR,
+    audit_name, count_failure, denial_error, finish, is_break_glass, login_gate, marked, record, record_denial, refuse_locked, require,
+    resolve_actor, transact, verify_account_password, warn_break_glass, Acting, Context, Denial, LoginRequest, State, ACTION_LOGIN, ANONYMOUS_ACTOR,
 };
 use crate::session::create_session;
 use crate::types::{AccountMap, Parameters, RandomFn, RoleCatalog, RoleSet};
@@ -281,6 +281,12 @@ pub fn begin_registration(
 }
 
 
+/// A break-glass account's passkeys are managed by the account itself only; any other account's by itself or by `users.manage`.
+pub fn may_manage_passkeys(state: &State, catalog: &RoleCatalog, acting: &Acting, username: &str) -> bool {
+    acting.actor == username || (acting.manager && !is_break_glass(&state.accounts, catalog, username))
+}
+
+
 /// Starts the registration of a credential for `username`; allowed for the account itself and for `users.manage`.
 pub fn register_start<Output: Write>(
     state: &mut State,
@@ -298,7 +304,7 @@ pub fn register_start<Output: Write>(
         ACTION_REGISTER_START,
         |after| audit_name(&after.accounts, username),
         |working, acting| {
-            require(acting, acting.manager || acting.actor == username)
+            require(acting, may_manage_passkeys(working, context.catalog, acting, username))
                 .and_then(|()| begin_registration(working, context, webauthn, now, (&acting.actor, username)))
                 .map(|started| (started, Vec::new()))
         },
@@ -360,7 +366,7 @@ pub fn register_finish<Output: Write>(
         ACTION_REGISTER,
         |after| audit_name(&after.accounts, &request.username),
         |working, acting| {
-            require(acting, acting.manager || acting.actor == request.username)
+            require(acting, may_manage_passkeys(working, context.catalog, acting, &request.username))
                 .and_then(|()| complete_registration(working, webauthn, now, &acting.actor, request))
         },
     )
@@ -419,7 +425,7 @@ pub fn rename_credential<Output: Write>(
         ACTION_RENAME,
         |after| audit_name(&after.accounts, username),
         |working, acting| {
-            require(acting, acting.manager || acting.actor == username)
+            require(acting, may_manage_passkeys(working, context.catalog, acting, username))
                 .and_then(|()| rename_in(working, username, identifier, name))
                 .map(|parameters| ((), parameters))
         },
@@ -463,7 +469,7 @@ pub fn remove_credential<Output: Write>(
         ACTION_REMOVE,
         |after| audit_name(&after.accounts, username),
         |working, acting| {
-            require(acting, acting.manager || acting.actor == username)
+            require(acting, may_manage_passkeys(working, context.catalog, acting, username))
                 .and_then(|()| remove_in(working, context.catalog, username, identifier))
                 .map(|parameters| ((), parameters))
         },
@@ -525,7 +531,8 @@ pub fn webauthn_login_start<Output: Write>(
     });
     match outcome {
         Ok(started) => {
-            let parameters = [("source", request.source.clone())];
+            let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+            let parameters = marked(vec![("source", request.source.clone())], flag);
             record(context, now, &audit_user, ACTION_LOGIN_START, &audit_user, Outcome::Success, &parameters)?;
             state.challenges = working.challenges;
             Ok(started)
@@ -550,7 +557,7 @@ pub fn passkey_login_start<Output: Write>(
     let locked = locked_until(&state.attempts, &source_key(source), now).or_else(|| locked_until(&state.attempts, &start_key, now));
     match locked {
         Some(until) => {
-            refuse_locked(context, now, ANONYMOUS_ACTOR, source)?;
+            refuse_locked(context, now, (ANONYMOUS_ACTOR, source), false)?;
             Err(AuthError::Locked { until })
         }
         None => {
@@ -647,7 +654,8 @@ pub fn refuse_assertion<Output: Write>(
 ) -> Result<SecretString, AuthError> {
     let username = user.unwrap_or(ANONYMOUS_ACTOR);
     let audit_user = user.map_or_else(|| ANONYMOUS_ACTOR.to_owned(), |name| audit_name(&state.accounts, name));
-    let parameters = [("reason", reason.to_owned()), ("source", source.to_owned())];
+    let flag = is_break_glass(&state.accounts, context.catalog, username);
+    let parameters = marked(vec![("reason", reason.to_owned()), ("source", source.to_owned())], flag);
     record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Failure, &parameters)?;
     count_failure(state, context, now, &audit_user, username, source, true)?;
     Err(AuthError::InvalidCredentials)
@@ -687,8 +695,13 @@ pub fn grant_assertion<Output: Write>(
     apply_result(&mut working, &located.user, result, now);
     match create_session(&mut working.sessions, &located.user, now, context.random) {
         Ok(token) => {
-            let parameters = [("source", source.to_owned()), ("method", method_of(&located.prepared).to_owned())];
+            let flag = is_break_glass(&state.accounts, context.catalog, &located.user);
+            let parameters = marked(
+                vec![("source", source.to_owned()), ("method", method_of(&located.prepared).to_owned())],
+                flag,
+            );
             record(context, now, &located.user, ACTION_LOGIN, &located.user, Outcome::Success, &parameters)?;
+            warn_break_glass(flag, &located.user);
             state.sessions = working.sessions;
             state.credentials = working.credentials;
             clear_failures(&mut state.attempts, &account_key(&located.user));
@@ -737,7 +750,7 @@ pub fn webauthn_login_finish<Output: Write>(
 ) -> Result<SecretString, AuthError> {
     match locked_until(&state.attempts, &source_key(&assertion.source), now) {
         Some(until) => {
-            refuse_locked(context, now, ANONYMOUS_ACTOR, &assertion.source)?;
+            refuse_locked(context, now, (ANONYMOUS_ACTOR, &assertion.source), false)?;
             Err(AuthError::Locked { until })
         }
         None => settle_assertion(state, context, webauthn, now, assertion),

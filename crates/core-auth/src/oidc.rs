@@ -1,7 +1,7 @@
 use crate::error::{AuthError, OidcDenial};
 use crate::model::{Account, PendingLogin};
 use crate::random::random_array;
-use crate::rbac::{check_roles, requires_mfa, webauthn_required};
+use crate::rbac::{break_glass, check_roles, requires_mfa, webauthn_required};
 use crate::service::{check_username, join_roles, record, Context, State, ACTION_LOGIN, ANONYMOUS_ACTOR, OIDC_PREFIX};
 use crate::session::{create_session, hash_token, revoke_user_sessions};
 use crate::types::{GroupRoleMap, HttpFn, OidcClient, Parameters, PendingMap, RandomFn, ResolveFn, RoleCatalog, RoleSet};
@@ -150,7 +150,9 @@ pub fn parse_oidc_config(text: &str, file: &str, catalog: &RoleCatalog) -> Resul
     require_https(&config.redirect_url)?;
     config.role_map.values().try_for_each(|roles| check_roles(catalog, roles))?;
     config.role_map.values().flatten().try_for_each(|role| {
-        if webauthn_required(catalog, &RoleSet::from([role.clone()])) {
+        if break_glass(catalog, &RoleSet::from([role.clone()])) {
+            Err(AuthError::OidcBreakGlassRole(role.clone()))
+        } else if webauthn_required(catalog, &RoleSet::from([role.clone()])) {
             Err(AuthError::OidcWebauthnRole(role.clone()))
         } else {
             Ok(())
@@ -340,6 +342,7 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::BadAzp => "bad_azp",
         OidcDenial::UnknownRole => "unknown_role",
         OidcDenial::WebauthnRequired => "webauthn_required",
+        OidcDenial::BreakGlassRole => "break_glass_role",
     }
 }
 
@@ -491,7 +494,7 @@ pub fn audit_denial<Output: Write>(
 ) -> Result<(), AuthError> {
     let outcome = if matches!(
         denial,
-        OidcDenial::Unmapped | OidcDenial::MfaMissing | OidcDenial::UnknownRole | OidcDenial::WebauthnRequired
+        OidcDenial::Unmapped | OidcDenial::MfaMissing | OidcDenial::UnknownRole | OidcDenial::WebauthnRequired | OidcDenial::BreakGlassRole
     ) {
         Outcome::Denied
     } else {
@@ -597,6 +600,16 @@ pub fn settle_identity<Output: Write>(
                 now,
                 &username,
                 OidcDenial::UnknownRole,
+                &mapping,
+                callback,
+            )?)
+        } else if break_glass(context.catalog, &roles) {
+            Err(deny_external(
+                state,
+                context,
+                now,
+                &username,
+                OidcDenial::BreakGlassRole,
                 &mapping,
                 callback,
             )?)

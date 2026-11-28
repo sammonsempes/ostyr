@@ -13,6 +13,8 @@ use core_audit::log::{append_declared, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
+use core_auth::model::Account;
+use core_auth::rbac::valid_name;
 use core_auth::secretbox::{open_secret, seal_secret};
 use core_auth::service::State;
 use core_auth::session::revoke_user_sessions;
@@ -56,6 +58,9 @@ pub const FINGERPRINT_COMPROMISED: &str = "file.compromised_list";
 
 
 pub const FINGERPRINT_OIDC: &str = "file.oidc";
+
+
+pub const MAX_REPORTED_ROLES: usize = 16;
 
 
 pub const FINGERPRINT_ROLES: &str = "file.roles";
@@ -313,15 +318,57 @@ pub fn revoke_changed_roles(auth: &mut State, previous: &RoleCatalog, next: &Rol
 }
 
 
+/// The distinct role names store accounts hold that the catalog lacks, and how many accounts hold at least one.
+pub fn orphaned_roles(accounts: &AccountMap, catalog: &RoleCatalog) -> (BTreeSet<String>, usize) {
+    let missing = |account: &&Account| account.roles.iter().any(|role| !catalog.contains_key(role));
+    let holders = accounts.values().filter(missing).count();
+    let names = accounts
+        .values()
+        .flat_map(|account| account.roles.iter())
+        .filter(|role| !catalog.contains_key(*role))
+        .cloned()
+        .collect();
+    (names, holders)
+}
+
+
+/// The warning and audit text: the grammar-checked names up to `MAX_REPORTED_ROLES`, then the count of the names left out.
+pub fn unknown_roles_text(names: &BTreeSet<String>, accounts: usize) -> String {
+    let shown: Vec<&str> = names
+        .iter()
+        .filter(|name| valid_name(name))
+        .map(String::as_str)
+        .take(MAX_REPORTED_ROLES)
+        .collect();
+    let omitted = names.len() - shown.len();
+    format!(
+        "roles_unknown: {accounts} account(s) hold roles absent from the new catalog: {} (and {omitted} more)",
+        shown.join(",")
+    )
+}
+
+
 /// The catalog and the OIDC runtime swap together under the auth lock, so a login settling or a request authorising sees the old pair or the new one.
 pub fn switch_authorisation(state: &SharedState, context: &ReloadContext, settings: &ApiSettings) {
     let mut auth = lock_auth(state);
     let previous = state.catalog.swap(Arc::clone(&settings.catalog));
     apply_oidc(state, settings);
     let revoked = revoke_changed_roles(&mut auth, &previous, &settings.catalog);
+    let (orphans, orphaned_accounts) = orphaned_roles(&auth.accounts, &settings.catalog);
     drop(auth);
-    if revoked > 0 {
-        let changed = format!("roles_reloaded: the sessions of {revoked} account(s) were revoked");
+    let unknown = unknown_roles_text(&orphans, orphaned_accounts);
+    let notes: Vec<String> = [
+        (revoked > 0).then(|| format!("roles_reloaded: the sessions of {revoked} account(s) were revoked")),
+        (orphaned_accounts > 0).then(|| unknown.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if orphaned_accounts > 0 {
+        tracing::warn!(accounts = orphaned_accounts, roles = %unknown, "roles reload leaves unknown roles");
+    }
+    if !notes.is_empty() {
+        let changed = notes.join("; ");
         append_declared(
             &state.audit,
             current_entry(

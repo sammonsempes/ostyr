@@ -1,8 +1,9 @@
+use crate::breakglass::breakglass_status;
 use crate::error::AuthError;
 use crate::model::CredentialInfo;
 use crate::password::verify_password;
 use crate::policy::load_compromised;
-use crate::rbac::{builtin_catalog, load_catalog, PERMISSION_EVENTS_READ};
+use crate::rbac::{builtin_catalog, parse_catalog, MAX_ROLES_FILE_BYTES, PERMISSION_EVENTS_READ};
 use crate::secretbox::KEY_BYTES;
 use crate::service::{
     audit_name, authorize, bootstrap_administrator, change_roles, create_account, denial_reason, enrol_totp, login, record, revoke_all_sessions,
@@ -19,6 +20,7 @@ use crate::webauthn::{
 use core_audit::log::open_file_log;
 use core_audit::model::Outcome;
 use core_audit::tenant::PLATFORM_TENANT;
+use core_config::parse::read_bytes_capped;
 use core_config::secret_file::open_secret;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
@@ -46,7 +48,15 @@ pub const CLI_TENANT: &str = PLATFORM_TENANT;
 pub const CLI_REQUEST_ID: &str = "cli";
 
 
-pub const READ_ONLY_COMMANDS: [&str; 6] = ["totp", "check", "wa-list", "wa-register-start", "wa-login-start", "passkey-start"];
+pub const READ_ONLY_COMMANDS: [&str; 7] = [
+    "totp",
+    "check",
+    "wa-list",
+    "wa-register-start",
+    "wa-login-start",
+    "passkey-start",
+    "breakglass-status",
+];
 
 
 pub const USAGE: &str = "usage: ostyr-auth <store> <audit-log> <key-file> <compromised-list> [<webauthn-config> [<roles-file>]]; commands on stdin";
@@ -185,6 +195,7 @@ pub fn execute_with<Output: Write>(
         ["roles", token, user, roles] => change_roles(state, context, now, token, user, parse_roles(roles)).map(|()| "ok".to_owned()),
         ["revoke", token, target] => revoke_token(state, context, now, token, target).map(|()| "ok".to_owned()),
         ["revoke-all", token, user] => revoke_all_sessions(state, context, now, token, user).map(|count| format!("revoked {count}")),
+        ["breakglass-status", token] => breakglass_status(state, context, now, token).map(|lines| lines.join("\n")),
         ["check", token] => authorize(state, context.catalog, token, now, PERMISSION_EVENTS_READ).map(|user| format!("allowed {user}")),
         _ => execute_webauthn(state, context, webauthn, now, words),
     }
@@ -308,7 +319,7 @@ pub fn run<Input: BufRead, Output: Write>(
 
 
 pub fn load_roles(file: &str) -> Result<RoleCatalog, AuthError> {
-    load_catalog(File::open(file)?)
+    parse_catalog(&read_bytes_capped(Path::new(file), MAX_ROLES_FILE_BYTES)?)
 }
 
 

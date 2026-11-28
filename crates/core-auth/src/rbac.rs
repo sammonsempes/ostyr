@@ -79,6 +79,9 @@ pub const PERMISSION_AUDIT_EXPORT: &str = "audit.export";
 pub const POLICY_WEBAUTHN_REQUIRED: &str = "policy.webauthn_required";
 
 
+pub const POLICY_BREAK_GLASS: &str = "policy.break_glass";
+
+
 pub const POLICY_PREFIX: &str = "policy.";
 
 
@@ -204,9 +207,11 @@ pub fn check_role(index: usize, role: &CustomRole) -> Result<(), RolesError> {
     } else if role
         .permissions
         .iter()
-        .any(|permission| permission.starts_with(POLICY_PREFIX) && permission != POLICY_WEBAUTHN_REQUIRED)
+        .any(|permission| permission.starts_with(POLICY_PREFIX) && permission != POLICY_WEBAUTHN_REQUIRED && permission != POLICY_BREAK_GLASS)
     {
         Err(RolesError::UnknownPolicy { index })
+    } else if role.permissions.contains(POLICY_BREAK_GLASS) && !role.permissions.contains(POLICY_WEBAUTHN_REQUIRED) {
+        Err(RolesError::BreakGlassWithoutWebauthn(role.name.clone()))
     } else {
         Ok(())
     }
@@ -312,6 +317,21 @@ pub fn requires_mfa(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
 
 pub fn webauthn_required(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
     is_allowed(catalog, roles, POLICY_WEBAUTHN_REQUIRED)
+}
+
+
+pub fn break_glass(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
+    is_allowed(catalog, roles, POLICY_BREAK_GLASS)
+}
+
+
+/// The roles of the set whose permissions carry `policy.break_glass` under the catalog in use.
+pub fn break_glass_roles(catalog: &RoleCatalog, roles: &RoleSet) -> RoleSet {
+    roles
+        .iter()
+        .filter(|role| catalog.get(*role).is_some_and(|permissions| permissions.contains(POLICY_BREAK_GLASS)))
+        .cloned()
+        .collect()
 }
 
 

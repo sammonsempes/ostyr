@@ -4,7 +4,9 @@ use crate::model::{Account, TotpEnrolment};
 use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::password::hash_password;
 use crate::policy::check_password;
-use crate::rbac::{check_roles, is_allowed, requires_mfa, webauthn_required, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR};
+use crate::rbac::{
+    break_glass, break_glass_roles, check_roles, is_allowed, requires_mfa, webauthn_required, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR,
+};
 use crate::secretbox::{open_secret, seal_secret};
 use crate::session::{create_session, hash_token, mark_sessions_revoked, revoke_session, revoke_user_sessions, session_owner, validate_session};
 use crate::totp::{consume_backup_code, hash_backup_code, new_backup_codes, new_secret, secret_text, verify_code};
@@ -16,13 +18,14 @@ use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::reload::bounded_value;
 use secrecy::{ExposeSecret, SecretString};
 use std::io::Write;
+use std::iter::once;
 use time::OffsetDateTime;
 
 
 pub const MODULE_NAME: &str = "core-auth";
 
 
-pub const DECLARED_KEYS: [&str; 15] = [
+pub const DECLARED_KEYS: [&str; 17] = [
     "reason",
     "source",
     "method",
@@ -38,6 +41,8 @@ pub const DECLARED_KEYS: [&str; 15] = [
     "credential",
     "name",
     "remaining",
+    "break_glass",
+    "break_glass_change",
 ];
 
 
@@ -66,6 +71,12 @@ pub const UNKNOWN_HEX_CHARS: usize = 12;
 
 
 pub const UNKNOWN_SESSION: &str = "unknown session";
+
+
+pub const KEY_BREAK_GLASS: &str = "break_glass";
+
+
+pub const KEY_BREAK_GLASS_CHANGE: &str = "break_glass_change";
 
 
 pub const ACTION_LOGIN: &str = "auth.login";
@@ -239,6 +250,42 @@ pub fn audit_name(accounts: &AccountMap, username: &str) -> String {
 }
 
 
+pub fn is_break_glass(accounts: &AccountMap, catalog: &RoleCatalog, username: &str) -> bool {
+    accounts.get(username).is_some_and(|account| break_glass(catalog, &account.roles))
+}
+
+
+/// The record parameters with the break-glass marker added when `flag`.
+pub fn marked(mut parameters: Parameters, flag: bool) -> Parameters {
+    if flag {
+        parameters.push((KEY_BREAK_GLASS, "true".to_owned()));
+    }
+    parameters
+}
+
+
+/// The marker of a target that is break-glass before or after an operation, and the grant or revoke it made when it succeeded.
+pub fn target_marks(before: bool, after: bool, succeeded: bool) -> Parameters {
+    let change = match (before, after, succeeded) {
+        (false, true, true) => Some("grant"),
+        (true, false, true) => Some("revoke"),
+        _ => None,
+    };
+    marked(Vec::new(), before || after)
+        .into_iter()
+        .chain(change.map(|name| (KEY_BREAK_GLASS_CHANGE, name.to_owned())))
+        .collect()
+}
+
+
+/// The one `warn!` of a successful break-glass login.
+pub fn warn_break_glass(flag: bool, username: &str) {
+    if flag {
+        tracing::warn!(account = ?username, "break-glass account used");
+    }
+}
+
+
 pub fn resolve_actor(state: &mut State, catalog: &RoleCatalog, token: &str, now: OffsetDateTime) -> Acting {
     match validate_session(&mut state.sessions, token, now) {
         Ok(user) => {
@@ -292,18 +339,25 @@ pub fn finish<Output: Write, Value>(
     target: &str,
     result: Result<(Value, Parameters), AuthError>,
 ) -> Result<Value, AuthError> {
+    finish_marked(context, now, (actor, action, target), result, &[])
+}
+
+
+pub fn finish_marked<Output: Write, Value>(
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    (actor, action, target): (&str, &str, &str),
+    result: Result<(Value, Parameters), AuthError>,
+    marks: &[(&'static str, String)],
+) -> Result<Value, AuthError> {
     match result {
-        Ok((value, parameters)) => record(context, now, actor, action, target, Outcome::Success, &parameters).map(|()| value),
+        Ok((value, parameters)) => {
+            let all: Parameters = parameters.into_iter().chain(marks.iter().cloned()).collect();
+            record(context, now, actor, action, target, Outcome::Success, &all).map(|()| value)
+        }
         Err(error) => {
-            record(
-                context,
-                now,
-                actor,
-                action,
-                target,
-                failure_outcome(&error),
-                &[("reason", error.to_string())],
-            )?;
+            let all: Parameters = once(("reason", error.to_string())).chain(marks.iter().cloned()).collect();
+            record(context, now, actor, action, target, failure_outcome(&error), &all)?;
             Err(error)
         }
     }
@@ -330,7 +384,13 @@ pub fn transact<Output: Write, Value>(
     let mut working = state.clone();
     let acting = resolve_actor(&mut working, context.catalog, token, now);
     let result = operation(&mut working, &acting);
-    let outcome = finish(context, now, &acting.actor, action, &target(&working), result);
+    let (target_before, target_after) = (target(state), target(&working));
+    let (before, after) = (
+        is_break_glass(&state.accounts, context.catalog, &target_before),
+        is_break_glass(&working.accounts, context.catalog, &target_after),
+    );
+    let marks = target_marks(before, after, result.is_ok());
+    let outcome = finish_marked(context, now, (&acting.actor, action, &target_after), result, &marks);
     state.attempts = working.attempts;
     state.challenges = working.challenges;
     if outcome.is_ok() {
@@ -471,7 +531,7 @@ pub fn check_current_code<Output: Write>(
     context: &Context<Output>,
     now: OffsetDateTime,
     existing: &mut TotpEnrolment,
-    username: &str,
+    (username, marked_account): (&str, bool),
     code: &SecretString,
 ) -> Result<(), AuthError> {
     let key = account_key(username);
@@ -480,8 +540,9 @@ pub fn check_current_code<Output: Write>(
         None => match verify_factor(existing, context.key, username, code.expose_secret(), now)? {
             None => Ok(()),
             Some(denial) => {
-                record_failure(attempts, &key, ACCOUNT_MAX_FAILURES, now)
-                    .map_or(Ok(()), |until| log_lockout(context, now, username, ENROLMENT_SOURCE, "account", until))?;
+                let scope = (ENROLMENT_SOURCE, "account");
+                let lock = record_failure(attempts, &key, ACCOUNT_MAX_FAILURES, now);
+                lock.map_or(Ok(()), |until| log_lockout(context, now, username, scope, (until, marked_account)))?;
                 Err(denial_error(denial))
             }
         },
@@ -497,10 +558,11 @@ pub fn replace_enrolment<Output: Write>(
     username: &str,
     current_code: Option<&SecretString>,
 ) -> Result<(Enrolment, Parameters), AuthError> {
+    let marked_account = is_break_glass(&state.accounts, context.catalog, username);
     let account = state.accounts.get_mut(username).ok_or(AuthError::NoSuchAccount)?;
     let proof = match (account.totp.as_mut(), acting.manager, current_code) {
         (Some(_), false, None) => Err(AuthError::MfaRequired),
-        (Some(existing), false, Some(code)) => check_current_code(&mut state.attempts, context, now, existing, username, code),
+        (Some(existing), false, Some(code)) => check_current_code(&mut state.attempts, context, now, existing, (username, marked_account), code),
         _ => Ok(()),
     };
     proof.and_then(|()| enrol_account(account, context, username))
@@ -541,6 +603,21 @@ pub fn apply_roles(state: &mut State, catalog: &RoleCatalog, username: &str, rol
 }
 
 
+/// Nobody grants themselves a break-glass role: the grant of another account carries the marker, the grant of one's own is refused.
+pub fn refuse_self_grant(state: &State, catalog: &RoleCatalog, (acting, username): (&Acting, &str), roles: &RoleSet) -> Result<(), AuthError> {
+    let held = state
+        .accounts
+        .get(username)
+        .map_or_else(RoleSet::new, |account| break_glass_roles(catalog, &account.roles));
+    let added = break_glass_roles(catalog, roles).difference(&held).next().is_some();
+    if acting.actor == username && added {
+        Err(AuthError::PermissionDenied)
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn change_roles<Output: Write>(
     state: &mut State,
     context: &Context<Output>,
@@ -558,6 +635,7 @@ pub fn change_roles<Output: Write>(
         |after| audit_name(&after.accounts, username),
         |working, acting| {
             require(acting, acting.manager)
+                .and_then(|()| refuse_self_grant(working, context.catalog, (acting, username), &roles))
                 .and_then(|()| apply_roles(working, context.catalog, username, roles))
                 .map(|parameters| {
                     mark_sessions_revoked(&mut working.accounts, username, now);
@@ -695,10 +773,14 @@ pub fn log_lockout<Output: Write>(
     context: &Context<Output>,
     now: OffsetDateTime,
     audit_user: &str,
-    source: &str,
-    scope: &str,
-    until: OffsetDateTime,
+    (source, scope): (&str, &str),
+    (until, flag): (OffsetDateTime, bool),
 ) -> Result<(), AuthError> {
+    let parameters = vec![
+        ("scope", scope.to_owned()),
+        ("source", source.to_owned()),
+        ("until", until.unix_timestamp().to_string()),
+    ];
     record(
         context,
         now,
@@ -706,11 +788,7 @@ pub fn log_lockout<Output: Write>(
         ACTION_LOCKOUT,
         audit_user,
         Outcome::Denied,
-        &[
-            ("scope", scope.to_owned()),
-            ("source", source.to_owned()),
-            ("until", until.unix_timestamp().to_string()),
-        ],
+        &marked(parameters, flag),
     )
 }
 
@@ -739,9 +817,10 @@ pub fn count_failure<Output: Write>(
         .then(|| record_failure(&mut state.attempts, &account_key(username), ACCOUNT_MAX_FAILURES, now))
         .flatten();
     let source_lock = record_failure(&mut state.attempts, &source_key(source), SOURCE_MAX_FAILURES, now);
+    let flag = is_break_glass(&state.accounts, context.catalog, username);
     [("account", account_lock), ("source", source_lock)]
         .into_iter()
-        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, source, scope, until)))
+        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, (source, scope), (until, flag))))
 }
 
 
@@ -753,8 +832,17 @@ pub fn record_denial<Output: Write>(
     request: &LoginRequest,
     denial: Denial,
 ) -> Result<(), AuthError> {
-    let parameters = [("reason", denial_reason(denial).to_owned()), ("source", request.source.clone())];
-    record(context, now, audit_user, ACTION_LOGIN, audit_user, denial_outcome(denial), &parameters)?;
+    let parameters = vec![("reason", denial_reason(denial).to_owned()), ("source", request.source.clone())];
+    let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+    record(
+        context,
+        now,
+        audit_user,
+        ACTION_LOGIN,
+        audit_user,
+        denial_outcome(denial),
+        &marked(parameters, flag),
+    )?;
     if counts_as_failure(denial) {
         register_failure(state, context, now, audit_user, request)?;
     }
@@ -798,6 +886,8 @@ pub fn grant_login<Output: Write>(
     let mut sessions = state.sessions.clone();
     match create_session(&mut sessions, &request.username, now, context.random) {
         Ok(token) => {
+            let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+            let parameters = marked(vec![("source", request.source.clone())], flag);
             record(
                 context,
                 now,
@@ -805,8 +895,9 @@ pub fn grant_login<Output: Write>(
                 ACTION_LOGIN,
                 &request.username,
                 Outcome::Success,
-                &[("source", request.source.clone())],
+                &parameters,
             )?;
+            warn_break_glass(flag, &request.username);
             state.sessions = sessions;
             clear_failures(&mut state.attempts, &account_key(&request.username));
             Ok(token)
@@ -819,9 +910,22 @@ pub fn grant_login<Output: Write>(
 }
 
 
-pub fn refuse_locked<Output: Write>(context: &Context<Output>, now: OffsetDateTime, audit_user: &str, source: &str) -> Result<(), AuthError> {
-    let parameters = [("reason", "locked".to_owned()), ("source", source.to_owned())];
-    record(context, now, audit_user, ACTION_LOGIN, audit_user, Outcome::Denied, &parameters)
+pub fn refuse_locked<Output: Write>(
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    (audit_user, source): (&str, &str),
+    flag: bool,
+) -> Result<(), AuthError> {
+    let parameters = vec![("reason", "locked".to_owned()), ("source", source.to_owned())];
+    record(
+        context,
+        now,
+        audit_user,
+        ACTION_LOGIN,
+        audit_user,
+        Outcome::Denied,
+        &marked(parameters, flag),
+    )
 }
 
 
@@ -832,7 +936,8 @@ pub fn penalise_locked_account<Output: Write>(
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<(), AuthError> {
-    refuse_locked(context, now, audit_user, &request.source)?;
+    let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+    refuse_locked(context, now, (audit_user, &request.source), flag)?;
     (context.verify)(request.password.expose_secret(), DUMMY_HASH)
         .inspect_err(|error| tracing::warn!(%error, "dummy verification failed for a locked account"))
         .ok();
@@ -863,7 +968,8 @@ pub fn login_gate<Output: Write>(
     let account_lock = locked_until(&state.attempts, &account_key(&request.username), now);
     match (source_lock, account_lock) {
         (Some(until), _) => {
-            refuse_locked(context, now, audit_user, &request.source)?;
+            let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+            refuse_locked(context, now, (audit_user, &request.source), flag)?;
             Err(AuthError::Locked { until })
         }
         (None, Some(_)) => {
@@ -886,7 +992,8 @@ pub fn login<Output: Write>(
     let account_lock = locked_until(&state.attempts, &account_key(&request.username), now);
     match (source_lock, account_lock) {
         (Some(until), _) => {
-            refuse_locked(context, now, &audit_user, &request.source)?;
+            let flag = is_break_glass(&state.accounts, context.catalog, &request.username);
+            refuse_locked(context, now, (&audit_user, &request.source), flag)?;
             Err(AuthError::Locked { until })
         }
         (None, Some(_)) => refuse_locked_account(state, context, now, &audit_user, request),

@@ -259,12 +259,13 @@ fn every_command_replies() -> TestResult {
     let token = "07".repeat(KEY_LENGTH);
     let script = format!(
         "login root {PASSWORD} src {code}\ncreate {token} alice {PASSWORD} reader\nenrol {token} alice\nenrol {token} alice 000000\nroles {token} alice analyst\n\
-         revoke-all {token} alice\ncheck {token}\nrevoke {token} {token}\ncheck {token}\nbogus\ntotp !!!\n"
+         revoke-all {token} alice\nbreakglass-status {token}\ncheck {token}\nrevoke {token} {token}\ncheck {token}\nbogus\ntotp !!!\n"
     );
     let output = constant_session(&space, &script)?;
     assert!(output.contains(&format!("ok {token}")));
     assert!(output.contains("allowed root"));
     assert!(output.contains("revoked 0"));
+    assert!(output.contains("revoked 0\n\n"));
     assert!(output.contains("error session is invalid or expired"));
     assert!(output.contains("error invalid command: unknown command"));
     assert!(output.contains("error invalid command: secret is not base32"));

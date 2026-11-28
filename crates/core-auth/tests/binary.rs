@@ -84,6 +84,16 @@ fn a_missing_key_file_is_a_named_failure() -> TestResult {
 
 
 #[test]
+fn the_real_binary_refuses_the_break_glass_status_without_a_session() -> TestResult {
+    let (_dir, arguments) = prepared()?;
+    let output = run_with(&arguments, "breakglass-status no-such-session\n")?;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8(output.stdout)?.starts_with("error "));
+    Ok(())
+}
+
+
+#[test]
 fn bootstrap_creates_the_first_administrator_and_the_store_file() -> TestResult {
     let (dir, arguments) = prepared()?;
     let output = run_with(&arguments, &format!("bootstrap admin {PASSWORD}\n"))?;
