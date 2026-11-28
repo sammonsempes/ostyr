@@ -64,7 +64,7 @@ import os, sys
 if os.fork() == 0:
     os.setsid()
     if os.fork() == 0:
-        os.execv("/bin/sleep", ["sleep", "31337.25"])
+        os.execv("/bin/sleep", ["sleep", "MARKER"])
     os._exit(0)
 os.wait()
 sys.exit(0)
@@ -83,7 +83,7 @@ ctypes.CDLL(None).pthread_exit(None)
 const GRANDCHILD_HOLDS_STDOUT: &str = r#"
 import os, sys
 if os.fork() == 0:
-    os.execv("/bin/sleep", ["sleep", "31338.25"])
+    os.execv("/bin/sleep", ["sleep", "MARKER"])
 print('{"status": "ok", "result": 1}')
 sys.stdout.flush()
 sys.exit(0)
@@ -261,7 +261,8 @@ fn stderr_is_counted_and_dropped_and_never_reaches_a_value_or_an_error() -> Test
 
 #[test]
 fn a_setsid_double_fork_grandchild_is_killed_after_the_main_process_exits() -> TestResult {
-    let outcome = run_python(DOUBLE_FORK, "{}", short_deadline())?;
+    let marker = format!("{}.25", std::process::id());
+    let outcome = run_python(&DOUBLE_FORK.replace("MARKER", &marker), "{}", short_deadline())?;
     assert!(
         matches!(
             outcome,
@@ -269,16 +270,17 @@ fn a_setsid_double_fork_grandchild_is_killed_after_the_main_process_exits() -> T
         ),
         "{outcome:?}"
     );
-    assert_eq!(processes_with("31337.25")?, 0, "the grandchild survived");
+    assert_eq!(processes_with(&marker)?, 0, "the grandchild survived");
     Ok(())
 }
 
 
 #[test]
 fn a_grandchild_holding_stdout_cannot_hold_the_run_past_the_deadline() -> TestResult {
-    let outcome = run_python(GRANDCHILD_HOLDS_STDOUT, "{}", short_deadline())?;
+    let marker = format!("{}.75", std::process::id());
+    let outcome = run_python(&GRANDCHILD_HOLDS_STDOUT.replace("MARKER", &marker), "{}", short_deadline())?;
     assert!(matches!(outcome, Err(ConnectorError::RunTimeout)), "{outcome:?}");
-    assert_eq!(processes_with("31338.25")?, 0, "the grandchild survived");
+    assert_eq!(processes_with(&marker)?, 0, "the grandchild survived");
     Ok(())
 }
 

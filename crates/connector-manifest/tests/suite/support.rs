@@ -260,7 +260,7 @@ pub fn processes_with(marker: &str) -> Result<usize, Failure> {
     let found = fs::read_dir("/proc")?
         .flatten()
         .flat_map(|entry| fs::read(entry.path().join("cmdline")))
-        .filter(|bytes| String::from_utf8_lossy(bytes).contains(marker))
+        .filter(|bytes| bytes.split(|byte| *byte == 0).any(|argument| argument == marker.as_bytes()))
         .count();
     Ok(found)
 }
