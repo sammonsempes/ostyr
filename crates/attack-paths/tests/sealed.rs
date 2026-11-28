@@ -118,7 +118,10 @@ fn a_body_edited_after_sealing_or_a_foreign_digest_is_refused_as_altered() -> Te
         assert!(matches!(loaded, Err(TagsError::Altered)), "{loaded:?}");
         Ok(())
     })?;
-    assert_eq!(TagsError::Altered.to_string(), "the tag file changed after it was sealed: run seal-tags");
+    assert_eq!(
+        TagsError::Altered.to_string(),
+        "the tag file changed after it was sealed: check the body, then run seal-tags --reseal"
+    );
     Ok(())
 }
 
