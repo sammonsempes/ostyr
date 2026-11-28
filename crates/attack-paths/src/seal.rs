@@ -2,10 +2,10 @@
 
 
 use crate::error::{SealError, TagsError};
-use crate::input::{untouched, Stamp};
-use crate::tags::{check_tags, read_stable, sealed_text, verify_sealed};
+use crate::input::{open_stamped, untouched, Stamp};
+use crate::tags::{check_tags, read_stable, sealed_text, verify_sealed, TRAILER_BYTES};
 use crate::types::MidRead;
-use core_config::parse::parse_document;
+use core_config::parse::{parse_document, MAX_FILE_BYTES};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,15 +90,16 @@ pub fn current_uid() -> u32 {
 
 /// Production entry: the caller is the effective user of the process and nothing happens between the read and the stamp check.
 pub fn seal_tags(arguments: &[String], out: &mut dyn Write) -> Result<(), SealError> {
-    seal_with(arguments, out, untouched, current_uid())
+    seal_with(arguments, out, untouched, untouched, current_uid())
 }
 
 
-/// Reads the file through one stable handle, checks the body parses as tags, then writes the sealed file; the caller uid is given so a test can play root.
-pub fn seal_with(arguments: &[String], out: &mut dyn Write, mid_read: MidRead, caller: u32) -> Result<(), SealError> {
+/// Reads the file through one stable handle, checks the body parses as tags, writes the sealed file; hooks and caller uid are injected for tests.
+pub fn seal_with(arguments: &[String], out: &mut dyn Write, mid_read: MidRead, before_persist: MidRead, caller: u32) -> Result<(), SealError> {
     let SealArguments { reseal, file } = parse_seal_arguments(arguments)?;
     let (text, stamp) = read_stable(&file, mid_read)?;
     let plan = plan_seal(&text, reseal)?;
+    refuse_oversized(&plan.body)?;
     let checked = check_tags(parse_document(&plan.body, &file.display().to_string())?)?;
     let count = checked.critical.len();
     let message = match plan.previous {
@@ -107,7 +108,12 @@ pub fn seal_with(arguments: &[String], out: &mut dyn Write, mid_read: MidRead, c
         Previous::Stale => format!("body changed since the last seal: {count} tags sealed"),
     };
     if plan.previous != Previous::Unchanged {
-        write_sealed(&file, &sealed_text(&plan.body), &stamp, caller)?;
+        let recheck = || {
+            before_persist(&file)
+                .map_err(SealError::from)
+                .and_then(|()| refuse_replaced(&file, &stamp))
+        };
+        write_sealed(&file, &sealed_text(&plan.body), &stamp, caller, &recheck)?;
     }
     writeln!(out, "{message}")?;
     Ok(())
@@ -121,14 +127,35 @@ pub fn plan_seal(text: &str, reseal: bool) -> Result<Plan, SealError> {
     } else if !text.is_empty() && !text.ends_with('\n') {
         Err(SealError::NoFinalNewline)
     } else {
-        let lines: Vec<&str> = text.split_inclusive('\n').collect();
-        match lines.split_last() {
-            Some((last, rest)) if last.starts_with(SEALED_LINE) => replan_sealed(text, rest.concat(), reseal),
+        let last_start = text.strip_suffix('\n').map(|without| without.rfind('\n').map_or(0, |index| index + 1));
+        match last_start.and_then(|start| text.split_at_checked(start)) {
+            Some((rest, last)) if last.starts_with(SEALED_LINE) => replan_sealed(text, rest.to_string(), reseal),
             _ => Ok(Plan {
                 body: text.to_string(),
                 previous: Previous::Fresh,
             }),
         }
+    }
+}
+
+
+/// A body that, with its trailer, would pass the runner's read cap.
+pub fn refuse_oversized(body: &str) -> Result<(), SealError> {
+    if (body.len() + TRAILER_BYTES) as u64 > MAX_FILE_BYTES {
+        Err(SealError::TooLarge { max: MAX_FILE_BYTES })
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The name must still lead to the file that was read: same device, inode, size and modification time.
+pub fn refuse_replaced(path: &Path, read: &Stamp) -> Result<(), SealError> {
+    let (_handle, now) = open_stamped(path, &path.display().to_string())?;
+    if (now.device, now.inode, now.size, now.modified) == (read.device, read.inode, read.size, read.modified) {
+        Ok(())
+    } else {
+        Err(SealError::ChangedBeforeWrite)
     }
 }
 
@@ -210,7 +237,13 @@ pub fn apply_attributes(_file: &File, _stamp: &Stamp, _caller: u32) -> std::io::
 
 
 /// Checks the directory and the old file, writes a random-named temporary file next to it, fsyncs, renames it over the name (a symlink at the name is replaced, never followed) and fsyncs the directory.
-pub fn write_sealed(path: &Path, sealed: &str, stamp: &Stamp, caller: u32) -> Result<(), SealError> {
+pub fn write_sealed(
+    path: &Path,
+    sealed: &str,
+    stamp: &Stamp,
+    caller: u32,
+    before_persist: &dyn Fn() -> Result<(), SealError>,
+) -> Result<(), SealError> {
     let directory = path.parent().unwrap_or(path);
     refuse_unsafe_directory(&directory_facts(directory)?, caller)?;
     refuse_unsafe_file(stamp.mode)?;
@@ -218,6 +251,7 @@ pub fn write_sealed(path: &Path, sealed: &str, stamp: &Stamp, caller: u32) -> Re
     staging.write_all(sealed.as_bytes())?;
     staging.as_file().sync_all()?;
     apply_attributes(staging.as_file(), stamp, caller)?;
+    before_persist()?;
     staging.persist(path).map_err(|failure| failure.error)?;
     sync_directory(directory)?;
     Ok(())

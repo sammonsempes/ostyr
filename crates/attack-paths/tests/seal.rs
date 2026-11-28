@@ -9,12 +9,15 @@ use attack_paths::seal::{
     DirectoryFacts, PERMISSION_BITS, ROOT_UID,
 };
 use attack_paths::serve::run;
+use attack_paths::tags::TRAILER_BYTES;
 use attack_paths::tags::{load_tags, sealed_text};
+use core_config::parse::MAX_FILE_BYTES;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 use tempfile::tempdir;
 use types::TestResult;
 
@@ -89,7 +92,7 @@ fn seal_file(file: &Path, flags: &[&str]) -> Result<Result<String, SealError>, B
     let mut arguments = flags.to_vec();
     arguments.push(&name);
     let mut out = Vec::new();
-    let outcome = seal_with(&words(&arguments), &mut out, |_path| Ok(()), current_uid());
+    let outcome = seal_with(&words(&arguments), &mut out, |_path| Ok(()), |_path| Ok(()), current_uid());
     Ok(outcome.map(|()| String::from_utf8_lossy(&out).trim_end().to_string()))
 }
 
@@ -243,7 +246,7 @@ fn a_file_that_changes_during_the_read_is_refused_with_nothing_written() -> Test
     let file = put(dir.path(), "tags.yaml", BODY, OWNER_ONLY)?;
     let name = file.display().to_string();
     let mut out = Vec::new();
-    let outcome = seal_with(&words(&[&name]), &mut out, append_during_read, current_uid());
+    let outcome = seal_with(&words(&[&name]), &mut out, append_during_read, |_path| Ok(()), current_uid());
     assert!(matches!(outcome, Err(SealError::Tags(TagsError::Changed))));
     assert!(out.is_empty());
     assert_eq!(fs::read_to_string(&file)?, format!("{BODY}#\n"));
@@ -309,6 +312,8 @@ fn the_directory_rule_is_checked_on_its_facts() -> TestResult {
 
 fn stamp_of_mode(mode: u32) -> Stamp {
     Stamp {
+        device: 0,
+        inode: 0,
         size: 0,
         modified: (0, 0),
         changed: (0, 0),
@@ -325,7 +330,7 @@ fn a_symlink_planted_at_the_name_is_replaced_never_followed() -> TestResult {
     let victim = put(dir.path(), "victim.yaml", "keep: me\n", OWNER_ONLY)?;
     let name = dir.path().join("tags.yaml");
     symlink(&victim, &name)?;
-    write_sealed(&name, &sealed_text(BODY), &stamp_of_mode(OWNER_ONLY), current_uid())?;
+    write_sealed(&name, &sealed_text(BODY), &stamp_of_mode(OWNER_ONLY), current_uid(), &|| Ok(()))?;
     assert_eq!(fs::read_to_string(&victim)?, "keep: me\n");
     assert!(!fs::symlink_metadata(&name)?.file_type().is_symlink());
     assert_eq!(fs::read_to_string(&name)?, sealed_text(BODY));
@@ -339,12 +344,12 @@ fn a_failed_rename_leaves_no_temporary_file_and_a_missing_directory_is_an_error(
     let blocking = dir.path().join("occupied");
     fs::create_dir(&blocking)?;
     fs::write(blocking.join("inside"), "x")?;
-    let refused = write_sealed(&blocking, &sealed_text(BODY), &stamp_of_mode(OWNER_ONLY), current_uid());
+    let refused = write_sealed(&blocking, &sealed_text(BODY), &stamp_of_mode(OWNER_ONLY), current_uid(), &|| Ok(()));
     assert!(matches!(refused, Err(SealError::Io(_))));
     assert!(leftovers(dir.path())?.is_empty());
     let nowhere = dir.path().join("absent").join("tags.yaml");
     assert!(matches!(
-        write_sealed(&nowhere, "x", &stamp_of_mode(OWNER_ONLY), current_uid()),
+        write_sealed(&nowhere, "x", &stamp_of_mode(OWNER_ONLY), current_uid(), &|| Ok(())),
         Err(SealError::Io(_))
     ));
     Ok(())
@@ -358,7 +363,7 @@ fn a_caller_playing_root_restores_the_owner_and_group_of_the_old_file() -> TestR
     let metadata = fs::metadata(&file)?;
     let name = file.display().to_string();
     let mut out = Vec::new();
-    seal_with(&words(&[&name]), &mut out, |_path| Ok(()), ROOT_UID)?;
+    seal_with(&words(&[&name]), &mut out, |_path| Ok(()), |_path| Ok(()), ROOT_UID)?;
     let after = fs::metadata(&file)?;
     assert_eq!((after.uid(), after.gid()), (metadata.uid(), metadata.gid()));
     assert_eq!(fs::read_to_string(&file)?, sealed_text(BODY));
@@ -389,7 +394,7 @@ fn a_closed_output_is_an_error_after_the_file_was_sealed() -> TestResult {
     let dir = tempdir()?;
     let file = put(dir.path(), "tags.yaml", BODY, OWNER_ONLY)?;
     let name = file.display().to_string();
-    let outcome = seal_with(&words(&[&name]), &mut FailingOutput, |_path| Ok(()), current_uid());
+    let outcome = seal_with(&words(&[&name]), &mut FailingOutput, |_path| Ok(()), |_path| Ok(()), current_uid());
     assert!(matches!(outcome, Err(SealError::Io(_))));
     Ok(())
 }
@@ -431,4 +436,122 @@ fn the_binary_seals_prints_the_count_and_refuses_a_second_seal() -> TestResult {
     let reseal = Command::new(PROGRAM).args(["seal-tags", "--reseal"]).arg(&file).output()?;
     assert_eq!(String::from_utf8(reseal.stdout)?, "unchanged\n");
     Ok(())
+}
+
+
+const LATER_SECONDS: u64 = 5;
+
+
+const HOOK_COUNT: usize = 3;
+
+
+const HALF: u64 = 2;
+
+
+fn replace_by_rename(path: &Path) -> io::Result<()> {
+    let other = path.with_file_name("replacement.yaml");
+    fs::write(&other, BODY)?;
+    fs::rename(&other, path)
+}
+
+
+fn edit_in_place_same_size(path: &Path) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new().write(true).open(path)?;
+    file.write_all(b"X")?;
+    file.set_modified(UNIX_EPOCH + Duration::from_secs(LATER_SECONDS))
+}
+
+
+fn append_before_persist(path: &Path) -> io::Result<()> {
+    append_during_read(path)
+}
+
+
+fn seal_with_hook(file: &Path, before_persist: attack_paths::types::MidRead) -> Result<Result<(), SealError>, Box<dyn std::error::Error>> {
+    let name = file.display().to_string();
+    let mut out = Vec::new();
+    let outcome = seal_with(&words(&[&name]), &mut out, |_path| Ok(()), before_persist, current_uid());
+    assert!(out.is_empty());
+    Ok(outcome)
+}
+
+
+#[test]
+fn a_file_replaced_or_edited_after_the_read_is_refused_with_nothing_written() -> TestResult {
+    let hooks: [(&str, attack_paths::types::MidRead); HOOK_COUNT] = [
+        ("rename", replace_by_rename),
+        ("same size edit", edit_in_place_same_size),
+        ("append", append_before_persist),
+    ];
+    hooks.iter().try_for_each(|(label, hook)| -> TestResult {
+        let dir = tempdir()?;
+        let file = put(dir.path(), "tags.yaml", BODY, OWNER_ONLY)?;
+        let outcome = seal_with_hook(&file, *hook)?;
+        assert!(matches!(outcome, Err(SealError::ChangedBeforeWrite)), "{label}: {outcome:?}");
+        assert!(!fs::read_to_string(&file)?.contains("complete:"), "{label}");
+        assert!(leftovers(dir.path())?.is_empty(), "{label}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_file_removed_before_the_rename_and_a_failing_hook_are_refused() -> TestResult {
+    let dir = tempdir()?;
+    let file = put(dir.path(), "tags.yaml", BODY, OWNER_ONLY)?;
+    let removed = seal_with_hook(&file, |path| fs::remove_file(path))?;
+    assert!(matches!(removed, Err(SealError::Config(_))), "{removed:?}");
+    let again = put(dir.path(), "again.yaml", BODY, OWNER_ONLY)?;
+    let failed = seal_with_hook(&again, |_path| Err(io::Error::other("hook")))?;
+    assert!(matches!(failed, Err(SealError::Io(_))), "{failed:?}");
+    assert!(leftovers(dir.path())?.is_empty());
+    Ok(())
+}
+
+
+fn padded_body(total: usize) -> String {
+    let head = "critical:\n  - Admins\n";
+    format!("{head}{}", "\n".repeat(total - head.len()))
+}
+
+
+#[test]
+fn a_body_that_would_pass_the_runner_cap_once_sealed_is_refused_naming_the_cap() -> TestResult {
+    let cap = usize::try_from(MAX_FILE_BYTES)?;
+    let dir = tempdir()?;
+    let over = put(dir.path(), "over.yaml", &padded_body(cap - TRAILER_BYTES + 1), OWNER_ONLY)?;
+    let refused = seal_file(&over, &[])?;
+    assert!(
+        matches!(refused, Err(SealError::TooLarge { max }) if max == MAX_FILE_BYTES),
+        "{refused:?}"
+    );
+    assert!(refused
+        .err()
+        .ok_or("expected an error")?
+        .to_string()
+        .contains(&MAX_FILE_BYTES.to_string()));
+    assert!(!fs::read_to_string(&over)?.contains("complete:"));
+    let exact = put(dir.path(), "exact.yaml", &padded_body(cap - TRAILER_BYTES), OWNER_ONLY)?;
+    assert!(seal_file(&exact, &[])?.is_ok());
+    assert_eq!(fs::metadata(&exact)?.len(), MAX_FILE_BYTES);
+    Ok(())
+}
+
+
+#[test]
+fn a_file_of_newlines_is_resealed_by_looking_at_its_last_line_only() -> TestResult {
+    let dir = tempdir()?;
+    let body = padded_body(cap_half()?);
+    let file = put(dir.path(), "tags.yaml", &body, OWNER_ONLY)?;
+    assert!(seal_file(&file, &[])?.is_ok());
+    assert_eq!(
+        seal_file(&file, &["--reseal"])?.map_err(|error| error.to_string()),
+        Ok("unchanged".to_string())
+    );
+    Ok(())
+}
+
+
+fn cap_half() -> Result<usize, std::num::TryFromIntError> {
+    usize::try_from(MAX_FILE_BYTES / HALF)
 }
