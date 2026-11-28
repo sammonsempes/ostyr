@@ -1,0 +1,35 @@
+[package]
+name = "command-issue"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+agent-channel = { path = "../agent-channel" }
+agent-command = { path = "../agent-command" }
+arc-swap = "1.9.3"
+core-config = { path = "../core-config" }
+core-pg = { path = "../core-pg" }
+data-encoding = "2.11.1"
+ed25519-dalek = "3"
+getrandom = "0.4.3"
+sha2 = "0.10"
+thiserror = "2"
+tokio-postgres = "0.7"
+tracing = "0.1"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+[dev-dependencies]
+pg-fake = { path = "../pg-fake" }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
