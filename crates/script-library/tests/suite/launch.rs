@@ -578,20 +578,32 @@ pub const POLL_ATTEMPTS: u32 = 1000;
 pub const POLL_MILLISECONDS: u64 = 10;
 
 
-pub const SET_M_MARKER: &str = "31337";
+pub const ARGUMENT_PAIR: usize = 2;
 
 
-pub const SETSID_MARKER: &str = "31338";
+pub const SET_M_SLEEP: &str = "31337";
+
+
+pub const SETSID_SLEEP: &str = "31338";
+
+
+fn run_marker(base: &str) -> String {
+    format!("{base}.{}", std::process::id())
+}
 
 
 fn job_alive(marker: &str) -> bool {
-    let needle = format!("sleep\0{marker}\0");
     std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .flatten()
         .flat_map(|entry| std::fs::read(entry.path().join("cmdline")))
-        .any(|cmdline| String::from_utf8_lossy(&cmdline).contains(&needle))
+        .any(|cmdline| {
+            let arguments: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+            arguments
+                .windows(ARGUMENT_PAIR)
+                .any(|pair| pair == [b"sleep".as_slice(), marker.as_bytes()])
+        })
 }
 
 
@@ -607,13 +619,13 @@ fn poll_until(condition: impl Fn() -> bool) -> bool {
 
 
 fn wait_for_set_m_job(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
-    poll_until(|| job_alive(SET_M_MARKER));
+    poll_until(|| job_alive(&run_marker(SET_M_SLEEP)));
     Ok(None)
 }
 
 
 fn wait_for_setsid_job(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
-    poll_until(|| job_alive(SETSID_MARKER));
+    poll_until(|| job_alive(&run_marker(SETSID_SLEEP)));
     Ok(None)
 }
 
@@ -667,8 +679,9 @@ fn enable_controllers(path: &Path) -> io::Result<ParentCgroup> {
 
 
 fn escaping_job_is_killed(script: &str, marker: &str, wait: script_library::types::WaitFn) -> TestResult {
+    let marked_script = script.replace("MARKER", marker);
     let root = tempfile::tempdir()?;
-    let mut launch = request(root.path(), Interpreter::Bash, script);
+    let mut launch = request(root.path(), Interpreter::Bash, &marked_script);
     let parent = own_cgroup_root()?;
     launch.cgroup_root = parent.path.clone();
     let outcome = run_script(&launch, wait, &SYSTEM_CGROUP)?;
@@ -680,7 +693,7 @@ fn escaping_job_is_killed(script: &str, marker: &str, wait: script_library::type
 
 #[test]
 fn a_set_m_job_is_killed_at_the_deadline() -> TestResult {
-    escaping_job_is_killed("set -m\nsleep 31337 &\nwait\n", SET_M_MARKER, wait_for_set_m_job)
+    escaping_job_is_killed("set -m\nsleep MARKER &\nwait\n", &run_marker(SET_M_SLEEP), wait_for_set_m_job)
 }
 
 
@@ -698,7 +711,7 @@ fn the_script_runs_in_its_cgroup_from_its_first_instruction() -> TestResult {
 
 #[test]
 fn a_setsid_job_is_killed_at_the_deadline() -> TestResult {
-    escaping_job_is_killed("setsid sleep 31338 &\nwait\n", SETSID_MARKER, wait_for_setsid_job)
+    escaping_job_is_killed("setsid sleep MARKER &\nwait\n", &run_marker(SETSID_SLEEP), wait_for_setsid_job)
 }
 
 
@@ -976,5 +989,23 @@ fn run_as_root_or_the_agent_uid_is_refused() -> TestResult {
     launch.run_as = user(NOBODY, rustix::process::getegid().as_raw());
     assert!(matches!(refusal(run(&launch))?, ScriptError::InvalidRunAs));
     assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_gate_does_not_start_the_job_on_end_of_file() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let gate = dir.path().join(script_library::launch::GATE_FILE);
+    let ran = dir.path().join("ran");
+    std::fs::write(&gate, script_library::launch::GATE_SCRIPT)?;
+    let status = Command::new("/bin/sh")
+        .arg(&gate)
+        .arg("/bin/touch")
+        .arg(&ran)
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    assert!(!status.success());
+    assert!(!ran.exists(), "the job started on end of file");
     Ok(())
 }
