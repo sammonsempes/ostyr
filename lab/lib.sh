@@ -105,7 +105,7 @@ run_tofu() {
     local task_id="$1"
     shift
     TF_DATA_DIR="$(state_dir "$task_id")/data" TF_PLUGIN_CACHE_DIR="$LAB_PLUGIN_CACHE" TF_IN_AUTOMATION=1 \
-        "${LAB_TOFU_BIN:-tofu}" -chdir="$LAB_DIR/tofu" "$@"
+        "${LAB_TOFU_BIN:-tofu}" -chdir="$LAB_DIR/tofu" "$@" 9>&- 8>&-
 }
 
 subnet_holder() {
