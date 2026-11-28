@@ -17,11 +17,11 @@ use core_audit::tenant::AUDIT_TENANT;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, reload, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
-use core_config::signal::SignalGuard;
+use core_config::signal::{SignalGuard, DROP_JOIN_POLLS};
 use core_config::types::{LoaderFn, SharedAuditFn};
 use serde::Deserialize;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-use signal_hook::iterator::Signals;
+use signal_hook::iterator::{Handle, Signals};
 use std::io;
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
@@ -256,6 +256,17 @@ pub fn serve_rounds<'a>(
 }
 
 
+/// A guard that only closes its stream: it has no reload thread.
+pub fn hand_guard(handle: Handle) -> SignalGuard {
+    SignalGuard {
+        handle,
+        thread: None,
+        in_flight: Arc::default(),
+        drop_join_polls: DROP_JOIN_POLLS,
+    }
+}
+
+
 /// A wait that ends early, reporting a stop, when one of `signals` arrives; the guard closes the stream when dropped.
 pub fn signal_waiter(signals: &[c_int]) -> io::Result<(Box<StopWaitFn<'static>>, SignalGuard)> {
     let mut stream = Signals::new(signals)?;
@@ -268,7 +279,7 @@ pub fn signal_waiter(signals: &[c_int]) -> io::Result<(Box<StopWaitFn<'static>>,
         });
     });
     let wait = move |interval: Duration| !matches!(receiver.recv_timeout(interval), Err(RecvTimeoutError::Timeout));
-    Ok((Box::new(wait), SignalGuard { handle }))
+    Ok((Box::new(wait), hand_guard(handle)))
 }
 
 
@@ -327,7 +338,7 @@ pub fn record_if_stop(stop: bool, stopped: &Mutex<bool>) -> bool {
 
 /// A reload per SIGHUP read from a stream opened before the service started, so an early SIGHUP queues instead of killing the process.
 pub fn reload_from(mut stream: Signals, engine: Arc<ReloadEngine<FeedsFile>>) -> ReloadThread {
-    let guard = SignalGuard { handle: stream.handle() };
+    let guard = hand_guard(stream.handle());
     let stopped = Arc::new(Mutex::new(false));
     let seen = Arc::clone(&stopped);
     let thread = thread::spawn(move || {

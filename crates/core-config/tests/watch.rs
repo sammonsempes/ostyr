@@ -1,3 +1,5 @@
+#[path = "common/gate.rs"]
+mod gate;
 #[path = "common/reload.rs"]
 mod support;
 #[path = "common/types.rs"]
@@ -8,7 +10,8 @@ mod wait;
 
 use core_config::error::WatchError;
 use core_config::reload::{reload, ReloadOutcome};
-use core_config::watch::{check_windows_path, handle_events, parent_of, watch_checked, watch_files, watch_files_counted};
+use core_config::watch::{check_windows_path, handle_events, parent_of, stop_watcher, watch_checked, watch_files, watch_files_counted};
+use gate::{gated_audit, Gate, HANG_GUARD};
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::{Event, EventKind};
 use notify_debouncer_full::DebouncedEvent;
@@ -16,7 +19,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -184,5 +187,36 @@ fn ignored_events_are_counted_and_never_logged() -> TestResult {
     drop(watcher);
     let text = String::from_utf8(captured.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
     assert!(!text.contains("ignored"));
+    Ok(())
+}
+
+
+#[test]
+fn stop_watcher_returns_only_after_the_event_thread_is_gone() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    replace_file(&path, &module_text("30d"))?;
+    let Gate {
+        audit,
+        entered,
+        release,
+        audited,
+    } = gated_audit();
+    let engine = Arc::new(engine_for(&path, audit, Vec::new())?);
+    let watcher = watch_files(Arc::clone(&engine), std::slice::from_ref(&path), DEBOUNCE)?;
+    replace_file(&path, &module_text("90d"))?;
+    entered.recv_timeout(HANG_GUARD)?;
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stopped_flag = Arc::clone(&stopped);
+    let stopper = thread::spawn(move || {
+        stop_watcher(watcher);
+        stopped_flag.store(true, Ordering::SeqCst);
+    });
+    thread::sleep(SETTLE);
+    assert!(!stopped.load(Ordering::SeqCst));
+    release.send(())?;
+    assert!(wait_until(|| stopped.load(Ordering::SeqCst)));
+    assert!(audited.load(Ordering::SeqCst));
+    stopper.join().map_err(|_| std::io::Error::other("stopper panicked"))?;
     Ok(())
 }

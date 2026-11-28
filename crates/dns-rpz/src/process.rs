@@ -10,7 +10,7 @@ use crate::service::{
 use crate::source::open_source;
 use crate::types::WaitFn;
 use core_audit::log::open_file_log;
-use core_config::signal::{reload_on_signals, SignalGuard};
+use core_config::signal::{reload_on_signals, SignalGuard, DROP_JOIN_POLLS};
 use core_config::watch::watch_files;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -50,7 +50,15 @@ pub fn signal_waiter(signals: &[c_int]) -> io::Result<(Box<WaitFn<'static>>, Sig
         });
     });
     let wait = move |interval: Duration| !matches!(receiver.recv_timeout(interval), Err(RecvTimeoutError::Timeout));
-    Ok((Box::new(wait), SignalGuard { handle }))
+    Ok((
+        Box::new(wait),
+        SignalGuard {
+            handle,
+            thread: None,
+            in_flight: Arc::default(),
+            drop_join_polls: DROP_JOIN_POLLS,
+        },
+    ))
 }
 
 
