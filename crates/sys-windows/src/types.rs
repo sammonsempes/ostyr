@@ -155,3 +155,116 @@ pub struct SpawnHooks {
     pub after_create: fn(),
     pub after_clear: fn(),
 }
+
+
+#[doc = "A file opened by `open_for_verification` (deny-write share mode); the field is crate-private so a plain `File` cannot be passed to the check.\n\n```compile_fail,E0603\nlet file = std::fs::File::open(\"any.exe\").unwrap();\nlet _held = sys_windows::types::VerificationFile(file);\n```\n"]
+#[derive(Debug)]
+pub struct VerificationFile(pub(crate) std::fs::File);
+
+
+/// The fields of the PE version resource a caller applies its name and version floor to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionInfo {
+    pub original_file_name: Option<String>,
+    pub internal_name: Option<String>,
+    pub product_name: Option<String>,
+    pub file_description: Option<String>,
+    pub company_name: Option<String>,
+    pub file_version: VersionParts,
+    pub file_version_text: Option<String>,
+}
+
+
+/// What the judgement of a signed file carries: file SHA-256, version resource, leaf subject and root certificate SHA-256 (lower case hex).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedFile {
+    pub file_sha256: String,
+    pub version: VersionInfo,
+    pub leaf_subject: String,
+    pub root_sha256: String,
+}
+
+
+/// A good signature chained to a pinned root, or the same with revocation not checkable (offline): the caller decides by policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SignatureOutcome {
+    Trusted(SignedFile),
+    RevocationUnknown(SignedFile),
+}
+
+
+/// The primary signer facts the pure judgement reads off the two certificates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignerFacts {
+    pub leaf_subject: String,
+    pub root_sha256: String,
+}
+
+
+/// What `WinVerifyTrust` answered, reduced to the cases the judgement tells apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustStatus {
+    Valid,
+    RevocationUnknown,
+    Unsigned,
+    Revoked,
+    Refused(u32),
+}
+
+
+#[derive(Debug, Error)]
+pub enum SignatureError {
+    #[error("the file is larger than {max_bytes} bytes")]
+    FileTooLarge { max_bytes: u64 },
+    #[error("cannot read the file: {kind:?}")]
+    Read { kind: std::io::ErrorKind },
+    #[error("the file has no readable PE version resource")]
+    NoVersionInfo,
+    #[error("the file has no embedded Authenticode signature")]
+    Unsigned,
+    #[error("a certificate of the signer chain is revoked")]
+    Revoked,
+    #[error("the signature is not trusted: WinVerifyTrust returned {code:#010x}")]
+    Untrusted { code: u32 },
+    #[error("the signer chain is missing or empty")]
+    NoChain,
+    #[error("the chain root {root_sha256} is not a pinned Microsoft root")]
+    RootNotPinned { root_sha256: String },
+    #[error("the signer certificate cannot be parsed")]
+    BadCertificate,
+    #[error("the signer certificate {field} is not an accepted Microsoft signer name")]
+    WrongSubject { field: &'static str },
+    #[error("the signer certificate does not allow code signing")]
+    NoCodeSigning,
+    #[error("the signature check did not answer within {millis} ms")]
+    Timeout { millis: u64 },
+    #[error("the signature check worker failed")]
+    WorkerFailed,
+    #[error("{operation} failed with code {code:#010x}")]
+    Windows { operation: &'static str, code: u32 },
+}
+
+
+/// The DER encoded leaf and root certificates of the primary signer chain and the error bits of its chain context (`CERT_TRUST_STATUS`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignerChain {
+    pub leaf_der: Vec<u8>,
+    pub root_der: Vec<u8>,
+    pub error_status: u32,
+}
+
+
+/// A unit of work run on a worker thread under a deadline.
+pub type Work = Box<dyn FnOnce() -> Result<SignatureOutcome, SignatureError> + Send>;
+
+
+pub const SHA256_BYTES: usize = 32;
+
+
+pub const VERSION_PART_COUNT: usize = 4;
+
+
+pub type Sha256Digest = [u8; SHA256_BYTES];
+
+
+pub type VersionParts = [u16; VERSION_PART_COUNT];

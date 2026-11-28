@@ -7116,10 +7116,13 @@ dependencies = [
 name = "sys-windows"
 version = "0.0.0"
 dependencies = [
+ "rcgen",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "windows",
+ "x509-parser",
 ]
 
 [[package]]
