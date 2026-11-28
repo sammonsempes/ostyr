@@ -15,7 +15,9 @@ use core_auth::oidc::{
 };
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
-use core_auth::rbac::{builtin_catalog, load_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE, POLICY_WEBAUTHN_REQUIRED};
+use core_auth::rbac::{
+    builtin_catalog, load_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE, POLICY_BREAK_GLASS, POLICY_WEBAUTHN_REQUIRED,
+};
 use core_auth::service::{authorize, create_account, login, Context, LoginRequest, State, DUMMY_HASH};
 use core_auth::store::load_accounts;
 use core_auth::types::{CompromisedSet, PendingMap, RoleCatalog, StoreKey};
@@ -688,6 +690,41 @@ fn a_role_map_naming_a_webauthn_role_is_refused_at_parse() -> TestResult {
     assert!(matches!(
         parse_oidc_config(&beside, "oidc.yaml", &catalog),
         Err(AuthError::OidcWebauthnRole(_))
+    ));
+    assert!(parse_oidc_config(CONFIG_TEXT, "oidc.yaml", &catalog).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_mapped_break_glass_role_is_denied_at_settle_as_break_glass() -> TestResult {
+    let mut fixture = fixture_over(Vec::new())?;
+    fixture
+        .catalog
+        .entry("analyst".to_owned())
+        .or_default()
+        .extend([POLICY_BREAK_GLASS.to_owned(), POLICY_WEBAUTHN_REQUIRED.to_owned()]);
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let prepared = prepare(&fixture, &mut pending)?;
+    let result = complete(&fixture, &mut state, &mut pending, &prepared, &spec())?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(state.sessions.is_empty() && state.accounts.values().all(|account| account.roles.is_empty()));
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("\"reason\":\"break_glass_role\"") && text.contains("\"outcome\":\"denied\"") && text.contains("authz.oidc.map"));
+    assert!(!text.contains("\"reason\":\"webauthn_required\""));
+    Ok(())
+}
+
+
+#[test]
+fn a_role_map_naming_a_break_glass_role_is_refused_at_parse() -> TestResult {
+    let mut catalog = builtin_catalog();
+    catalog.insert("glass".to_owned(), BTreeSet::from([POLICY_BREAK_GLASS.to_owned()]));
+    let text = CONFIG_TEXT.replace("[analyst]", "[glass]");
+    assert!(matches!(
+        parse_oidc_config(&text, "oidc.yaml", &catalog),
+        Err(AuthError::OidcBreakGlassRole(name)) if name == "glass"
     ));
     assert!(parse_oidc_config(CONFIG_TEXT, "oidc.yaml", &catalog).is_ok());
     Ok(())

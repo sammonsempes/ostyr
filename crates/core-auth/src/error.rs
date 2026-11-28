@@ -54,6 +54,8 @@ pub enum OidcDenial {
     UnknownRole,
     #[error("a mapped role requires a WebAuthn credential, which an identity provider login cannot give")]
     WebauthnRequired,
+    #[error("a mapped role is a break-glass role, which an identity provider never grants")]
+    BreakGlassRole,
 }
 
 
@@ -77,6 +79,8 @@ pub enum RolesError {
     UnknownPolicy { index: usize },
     #[error("role `{0}` is defined twice")]
     DuplicateRole(String),
+    #[error("role `{0}` is break-glass and must also carry policy.webauthn_required")]
+    BreakGlassWithoutWebauthn(String),
 }
 
 
@@ -86,6 +90,8 @@ pub enum AuthError {
     Roles(#[from] RolesError),
     #[error("OIDC role map names role `{0}`, which requires a WebAuthn credential")]
     OidcWebauthnRole(String),
+    #[error("OIDC role map names role `{0}`, which is break-glass")]
+    OidcBreakGlassRole(String),
     #[error("OIDC login refused: {0}")]
     Oidc(#[from] OidcDenial),
     #[error("OIDC configuration rejected: {0}")]

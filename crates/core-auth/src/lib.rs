@@ -1,5 +1,6 @@
 //! Local authentication, MFA, sessions and RBAC shared by every module (spec sections 4, 12 and 16).
 
+pub mod breakglass;
 pub mod cli;
 pub mod error;
 pub mod limiter;

@@ -1413,6 +1413,53 @@ async fn audit_records_carry_the_folded_source_key() -> TestResult {
 const CLIENT_PORT_FOR_AUDIT: u16 = 40_001;
 
 
+const LOGIN_RECORDS: usize = 3;
+
+
+const MARKED_RECORDS: usize = 2;
+
+
+#[tokio::test]
+async fn every_login_record_about_a_break_glass_account_carries_the_marker() -> TestResult {
+    let fx = fixture()?;
+    let glass = r#"[{"name":"glass","permissions":["events.read","policy.break_glass","policy.webauthn_required"]}]"#;
+    fx.state
+        .catalog
+        .store(std::sync::Arc::new(core_auth::rbac::load_catalog(glass.as_bytes())?));
+    {
+        let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+        auth.accounts.get_mut(READER).ok_or("no reader")?.roles = std::iter::once("glass".to_owned()).collect();
+        auth.attempts.insert("source:198.51.100.1".to_owned(), locked_for_a_while());
+    }
+    core_auth::store::update_store_file(&fx.config.accounts_store, core_auth::random::os_random, |accounts, _| {
+        accounts.get_mut(READER).ok_or(AuthError::NoSuchAccount)?.roles = std::iter::once("glass".to_owned()).collect();
+        Ok(())
+    })?
+    .saved?;
+    let mut locked = login_request(READER);
+    locked.source = "198.51.100.1".to_owned();
+    assert!(matches!(admit_login(&fx.state, "id-locked", &locked), Err(ApiError::TooManyRequests)));
+    let mut unknown = login_request("nobody");
+    unknown.source = "198.51.100.1".to_owned();
+    assert!(matches!(admit_login(&fx.state, "id-unknown", &unknown), Err(ApiError::TooManyRequests)));
+    send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
+    let records: Vec<serde_json::Value> = audit_lines(&fx)?
+        .into_iter()
+        .filter(|line| line.get("action") == Some(&json!("auth.login")))
+        .collect();
+    let marked = |line: &&serde_json::Value| line.pointer("/parameters/break_glass") == Some(&json!("true"));
+    assert_eq!(records.len(), LOGIN_RECORDS);
+    assert_eq!(records.iter().filter(marked).count(), MARKED_RECORDS);
+    assert!(records
+        .iter()
+        .any(|line| marked(&line) && line.pointer("/parameters/reason") == Some(&json!("locked"))));
+    assert!(records
+        .iter()
+        .any(|line| marked(&line) && line.pointer("/parameters/reason") == Some(&json!("webauthn_required"))));
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn a_body_that_stalls_is_answered_with_408() -> TestResult {
     let fx = fixture()?;

@@ -17,7 +17,8 @@ use core_audit::model::Outcome;
 use core_auth::error::AuthError;
 use core_auth::limiter::{locked_until, source_key};
 use core_auth::service::{
-    audit_name, login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH,
+    audit_name, is_break_glass, login as core_login, marked, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN,
+    DUMMY_HASH,
 };
 use core_auth::session::revoke_session;
 use core_auth::store::update_store_file;
@@ -229,7 +230,8 @@ pub fn persist_login(
         Err(error) => {
             tracing::warn!(%error, "account store save failed after login, session discarded");
             revoke_session(&mut auth.sessions, token.expose_secret());
-            let parameters = [("reason", "internal_error".to_owned()), ("source", request.source.clone())];
+            let flag = is_break_glass(&auth.accounts, context.catalog, &request.username);
+            let parameters = marked(vec![("reason", "internal_error".to_owned()), ("source", request.source.clone())], flag);
             record(
                 context,
                 now,
@@ -331,7 +333,8 @@ pub fn refuse_with(
     let inputs = auth_inputs(app);
     let context = auth_context(app, request_id, &app.verify, &inputs);
     let audit_user = audit_name(&auth.accounts, &request.username);
-    let parameters = [("reason", reason.to_owned()), ("source", request.source.clone())];
+    let flag = is_break_glass(&auth.accounts, context.catalog, &request.username);
+    let parameters = marked(vec![("reason", reason.to_owned()), ("source", request.source.clone())], flag);
     record(&context, (app.clock)(), &audit_user, ACTION_LOGIN, &audit_user, outcome, &parameters)
         .map_or_else(|failure| auth_failure(&failure), |()| error)
 }

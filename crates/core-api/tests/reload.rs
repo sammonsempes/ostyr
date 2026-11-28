@@ -1,5 +1,7 @@
 #[path = "support/fixture.rs"]
 mod fixture;
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
@@ -24,10 +26,10 @@ use core_api::previous::{
     PREVIOUS_KEY_SAVED, ROTATION_RESUMED,
 };
 use core_api::reload::{
-    accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
-    replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_authorisation, switch_identity, switch_key,
-    switch_store, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_ROLES, FINGERPRINT_TLS_CERTIFICATE,
-    FINGERPRINT_TLS_KEY, TENANT_START_ONLY,
+    accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, orphaned_roles, prepare_key,
+    read_store_handle, replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_authorisation,
+    switch_identity, switch_key, switch_store, unknown_roles_text, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC,
+    FINGERPRINT_ROLES, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY, MAX_REPORTED_ROLES, TENANT_START_ONLY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -822,6 +824,8 @@ fn a_roles_file_over_the_caps_or_the_grammar_is_refused_and_the_old_catalog_kept
         r#"[{"name":"-x","permissions":[]}]"#,
         r#"[{"name":"","permissions":[]}]"#,
         "[{\"name\":\"admin\u{200b}istrator\",\"permissions\":[]}]",
+        r#"[{"name":"admin\u200bistrator","permissions":[]}]"#,
+        r#"[{"name":"ops","permissions":["events\u002eread"]}]"#,
         many.as_str(),
         huge.as_str(),
         giant.as_str(),
@@ -3095,5 +3099,54 @@ fn a_fifo_at_a_new_audit_log_is_refused_audited_in_the_old_log_and_a_later_reloa
     assert!(old_log.contains("refused"));
     fs::write(&running.module_file, plain.clone() + "  rate_max_requests: 2\n")?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn a_roles_reload_that_orphans_accounts_warns_and_audits_the_role_names() -> TestResult {
+    let dir = tempdir()?;
+    let roles = dir.path().join("roles.json");
+    fs::write(&roles, VIEWER_ROLES)?;
+    let running = live_with(dir, &format!("  roles_file: {}\n", roles.display()), None)?;
+    open_session(&running, "vera", &["viewer"])?;
+    open_session(&running, "dave", &["viewer", "reader"])?;
+    open_session(&running, "bob", &["reader"])?;
+    fs::write(&roles, r#"[{"name":"vieweer","permissions":["events.read"]}]"#)?;
+    let log_dir = tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = logging::capture_dispatch(tracing_subscriber::fmt::writer::BoxMakeWriter::new(Mutex::new(fs::File::create(
+        &log_path,
+    )?)));
+    let outcome = tracing::dispatcher::with_default(&dispatch, || reload(&running.engine));
+    assert!(matches!(outcome, ReloadOutcome::Applied { .. }));
+    let text = fs::read_to_string(&log_path)?;
+    assert!(text.contains("roles reload leaves unknown roles") && text.contains("viewer") && text.contains("\"accounts\":2"));
+    let recorded: Vec<String> = audit_records(running.dir.path())?
+        .iter()
+        .map(|record| diff_of(record).to_owned())
+        .collect();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|diff| diff.contains("roles_unknown: 2 account(s)") && diff.contains(": viewer (and 0 more)") && diff.contains("roles_reloaded"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_unknown_role_report_is_grammar_checked_and_cut_visibly() -> TestResult {
+    let names: std::collections::BTreeSet<String> = (0..=MAX_REPORTED_ROLES)
+        .map(|index| format!("r{index:02}"))
+        .chain(["Bad Name\n".to_owned(), "x\u{1b}[31m".to_owned()])
+        .collect();
+    let text = unknown_roles_text(&names, 1);
+    assert!(text.contains("(and 3 more)") && !text.contains('\n') && !text.contains('\u{1b}') && !text.contains("Bad"));
+    assert_eq!(text.matches(",r").count(), MAX_REPORTED_ROLES - 1);
+    let (found, holders) = orphaned_roles(&AccountMap::new(), &core_auth::rbac::builtin_catalog());
+    assert!(found.is_empty() && holders == 0);
     Ok(())
 }
