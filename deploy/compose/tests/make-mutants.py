@@ -41,6 +41,8 @@ METRICS_SECRETS = "    secrets: [pg_ca, clickhouse_metrics_password, nats_metric
 METRICS_VOLUME = "      - metricsstate:/var/lib/ostyr-metrics\n"
 ALERTS_SECRETS = "    secrets: [pg_ca, metricalerts_pg_password, metricalerts_clickhouse_password]\n"
 ALERTS_VOLUME = "      - alertsstate:/var/lib/ostyr-metric-alerts\n"
+RELAY_NETWORKS = "      relay_edge: {}\n      relay_net:\n        ipv4_address: 172.29.64.12\n"
+RELAY_MOUNT = "      - ./config/relay:/etc/ostyr/relay:ro\n"
 RELAY_PORT = '    ports:\n      - "0.0.0.0:7443:7443"\n'
 
 
@@ -155,7 +157,26 @@ MUTANTS = {
     "relay_bind_secrets": lambda text: replace_once(text, RELAY_VOLUME, RELAY_VOLUME + "      - ./secrets:/srv/secrets:ro\n"),
     "relay_state_shared": lambda text: replace_once(text, RELAY_VOLUME, "      - gatewaystate:/var/lib/ostyr-relay\n"),
     "relay_root": lambda text: replace_once(text, "    user: 65531:65531\n", "    user: 0:0\n"),
-    "relay_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.63.12\n", "ipv4_address: 172.29.63.14\n"),
+    "relay_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.64.12\n", "ipv4_address: 172.29.64.14\n"),
+    "gateway_relay_ip_moved": lambda text: replace_once(text, "ipv4_address: 172.29.64.11\n", "ipv4_address: 172.29.64.13\n"),
+    "relay_forwarding_on": lambda text: replace_once(
+        text, '"/var/lib/ostyr-relay/relay-audit.log"]\n    sysctls:\n      - net.ipv4.ip_forward=0\n', '"/var/lib/ostyr-relay/relay-audit.log"]\n'
+    ),
+    "gateway_forwarding_on": lambda text: replace_once(
+        text, '"/etc/ostyr/gateway.yaml"]\n    sysctls:\n      - net.ipv4.ip_forward=0\n', '"/etc/ostyr/gateway.yaml"]\n'
+    ),
+    "relay_back_on_default": lambda text: replace_once(
+        text, RELAY_NETWORKS, "      default:\n        ipv4_address: 172.29.63.12\n" + RELAY_NETWORKS
+    ),
+    "relay_net_not_internal": lambda text: replace_once(text, "    internal: true\n", ""),
+    "relay_edge_shared": lambda text: replace_once(
+        text, "      relay_net:\n        ipv4_address: 172.29.64.11\n", "      relay_net:\n        ipv4_address: 172.29.64.11\n      relay_edge: {}\n"
+    ),
+    "relay_edge_dropped": lambda text: replace_once(text, "      relay_edge: {}\n", ""),
+    "relay_config_mount": lambda text: replace_once(text, RELAY_MOUNT, "      - ./config:/etc/ostyr:ro\n"),
+    "relay_extra_hosts": lambda text: replace_once(text, RELAY_PORT, RELAY_PORT + '    extra_hosts:\n      - "clickhouse:172.29.63.20"\n'),
+    "relay_network_mode_host": lambda text: replace_once(text, RELAY_PORT, RELAY_PORT + "    network_mode: host\n"),
+    "relay_subnet_overlap": lambda text: replace_once(text, "        - subnet: 172.29.64.0/24\n          ip_range: 172.29.64.128/25\n", "        - subnet: 172.29.64.0/24\n"),
     "clickhouse_cap_add": lambda text: replace_once(text, CH_SECRETS, CH_SECRETS + "    cap_add: [SYS_ADMIN]\n"),
     "clickhouse_publish": lambda text: replace_once(text, CH_SECRETS, CH_SECRETS + '    ports:\n      - "0.0.0.0:8123:8123"\n'),
     "clickhouse_secret_extra": lambda text: replace_once(text, CH_SECRETS, "    secrets: [clickhouse_server_key, clickhouse_server_cert, clickhouse_users, store_key]\n"),

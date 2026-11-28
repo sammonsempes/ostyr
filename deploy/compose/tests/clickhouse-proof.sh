@@ -26,6 +26,7 @@ printf 'objects %s\n' "$(ch schema "SELECT count() FROM system.tables WHERE data
 printf 'reader_select %s\n' "$(ch reader "SELECT count() FROM events WHERE tenant = 'proof'")"
 printf 'reader_insert_code %s\n' "$(ch reader "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | code_of)"
 printf 'reader_lift_readonly_code %s\n' "$(ch reader 'SELECT 1' '&readonly=0' | code_of)"
+printf 'experimental_setting_code %s\n' "$(ch reader 'SELECT 1' '&allow_experimental_time_series_aggregate_functions=1' | code_of)"
 printf 'reader_insert_text %s\n' "$(ch reader "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | head -n 1 | cut -c1-200)"
 printf 'reader_count_after_refused %s\n' "$(ch reader "SELECT count() FROM events WHERE tenant = 'proof'")"
 printf 'ingest_insert %s\n' "$(ch ingest "INSERT INTO events (\`@timestamp\`, tenant, tenant_tier) VALUES (now(), 'proof', 'standard')" | wc -c)"

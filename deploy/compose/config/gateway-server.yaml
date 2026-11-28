@@ -1,5 +1,5 @@
 listen: "127.0.0.1:7444"
-relay_listen: "172.29.63.11:7443"
+relay_listen: "172.29.64.11:7443"
 certificate: /run/secrets/gateway_tls_cert
 key: /run/secrets/gateway_tls_key
 agent_ca: /run/secrets/agent_ca

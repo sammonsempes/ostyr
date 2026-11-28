@@ -376,8 +376,12 @@ expect "the relay publishes exactly $RELAY_PORT" test "$(published_ports relay)"
 expect "nats mounts exactly its configuration and its TLS pair" test "$(service_secret_files nats)" = "nats.conf nats_server.crt nats_server.key"
 expect "the gateway mounts exactly its five secrets" test "$(service_secret_files gateway)" = "agent_ca.crt ca.crt gateway_tls.crt gateway_tls.key nats_gateway_password"
 expect "the relay mounts no secret" test -z "$(service_secret_files relay)"
-expect "the gateway sits at the address the relay forwards to" test "$(inspect_service gateway '{{(index .NetworkSettings.Networks "ostyr_default").IPAddress}}')" = 172.29.63.11
-expect "the relay sits at the address the gateway admits" test "$(inspect_service relay '{{(index .NetworkSettings.Networks "ostyr_default").IPAddress}}')" = 172.29.63.12
+expect "the gateway sits at the address the relay forwards to" test "$(inspect_service gateway '{{(index .NetworkSettings.Networks "ostyr_relay_net").IPAddress}}')" = 172.29.64.11
+expect "the relay sits at the address the gateway admits" test "$(inspect_service relay '{{(index .NetworkSettings.Networks "ostyr_relay_net").IPAddress}}')" = 172.29.64.12
+expect "the relay is on exactly ostyr_relay_edge and ostyr_relay_net" test "$(inspect_service relay '{{range $name, $net := .NetworkSettings.Networks}}{{$name}} {{end}}')" = "ostyr_relay_edge ostyr_relay_net "
+expect "ostyr_relay_net is internal and holds only the gateway and the relay" test "$(remote "sudo docker network inspect --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}' ostyr_relay_net | tr ' ' '\n' | sort | xargs")" \
+    = "ostyr-gateway-1 ostyr-relay-1 true"
+expect "ostyr_relay_edge is not internal and holds only the relay" test "$(remote "sudo docker network inspect --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}' ostyr_relay_edge | xargs")" = "false ostyr-relay-1"
 expect "the secret files have the expected owners and modes" test "$(remote "cd compose && sudo stat -c '%n %a %u:%g' secrets/gateway_tls.key secrets/nats_gateway_password secrets/nats_admin_password secrets/nats.conf secrets/nats_server.key secrets/agent.key secrets/agent_ca.crt | sed 's#secrets/##' | xargs")" \
     = "gateway_tls.key 600 65534:65534 nats_gateway_password 600 65534:65534 nats_admin_password 600 0:0 nats.conf 600 0:0 nats_server.key 600 0:0 agent.key 600 0:0 agent_ca.crt 644 0:0"
 expect "init.sh refuses a nats.conf that is not its own rendering (one line only)" remote "sudo rm -rf natsplant && sudo mkdir natsplant && sudo cp -a compose/init.sh natsplant/ && sudo cp -a compose/secrets natsplant/secrets \
@@ -422,7 +426,15 @@ expect "the gateway logged both refused clients (none, other CA) as failed hands
 expect "the gateway published exactly two batches" test "$(remote "cd compose && sudo docker compose logs gateway 2>&1 | grep -c 'a batch was published'")" = 2
 remote "cd compose && sudo docker compose logs gateway 2>&1 | tail -n 20"
 expect "no event reached the stream from the clients that were refused" test "$(nats_box admin nats_admin_password stream info events --json | sed -n 's/.*"messages": *\([0-9]*\).*/\1/p' | head -n 1)" = 2
-expect "a container that is not the relay is dropped by the gateway relay port before the handshake (curl exit 35)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.63.11:7443/; echo \$?")" = 35
+expect "a container on ostyr_default cannot reach the gateway relay port at all (curl fails)" test "$(remote "sudo docker run --rm --network ostyr_default $NATS_BOX_IMAGE curl -sk --max-time 8 -o /dev/null https://172.29.64.11:7443/; echo \$?")" -ne 0
+isolation_proofs="$(remote_stdin "cd compose && sudo bash -s -- $NATS_BOX_IMAGE" <"$TESTS_DIR/relay-isolation-proof.sh")"
+printf '%s\n' "$isolation_proofs"
+expect "from inside the relay ClickHouse, PostgreSQL and NATS are unreachable on their container addresses" test "$(grep -c -E '^connect (clickhouse|postgres|nats) .* unreachable$' <<<"$isolation_proofs")" = 3
+expect "from inside the relay the platform and the default-network gateway address are unreachable" test "$(grep -c -E '^connect (platform|gateway_default_ip) .* unreachable$' <<<"$isolation_proofs")" = 3
+expect "from inside the relay the database and NATS ports are unreachable on every bridge gateway and host address" test "$(grep -c -E '^connect (bridge_gateway|host_address) [0-9.]+:(5432|4222) reachable$' <<<"$isolation_proofs")" = 0
+expect "from inside the relay the gateway relay listener is reachable" grep -q '^connect gateway_relay_listener .* reachable$' <<<"$isolation_proofs"
+expect "the gateway forwards no packets (ip_forward 0)" grep -qx 'gateway_ip_forward 0' <<<"$isolation_proofs"
+expect "the gateway answered after the slow drip against its relay listener and NATS is healthy" nats_box admin nats_admin_password stream info events
 expect "NATS is closed from the host network" absent remote "nc -z -w 3 $vm_address $NATS_PORT || nc -z -w 3 127.0.0.1 $NATS_PORT"
 expect "the gateway ports are closed from the host network" absent remote "nc -z -w 3 127.0.0.1 7444 || nc -z -w 3 $vm_address 7444"
 for service in siem metrics metricalerts; do
@@ -515,6 +527,7 @@ expect "the schema holds 9 objects (6 tables, 3 views)" test "$(clickhouse_value
 expect "the reader reads events (0 rows)" test "$(clickhouse_value reader_select)" = 0
 expect "the reader INSERT is refused (497: no grant, and readonly=2 besides)" test "$(clickhouse_value reader_insert_code)" = 497
 expect "the reader cannot lift readonly=2 (164)" test "$(clickhouse_value reader_lift_readonly_code)" = 164
+expect "ClickHouse refuses an experimental setting for every user (allow_feature_tier, 164)" test "$(clickhouse_value experimental_setting_code)" = 164
 expect "the refused INSERT wrote nothing" test "$(clickhouse_value reader_count_after_refused)" = 0
 expect "the ingest writer inserts into events" test "$(clickhouse_value ingest_insert)" = 0
 expect "the reader sees the ingested row" test "$(clickhouse_value reader_count_after_insert)" = 1
