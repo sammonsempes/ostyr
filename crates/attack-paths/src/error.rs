@@ -1,3 +1,4 @@
+use ad_posture::error::SnapshotError;
 use core_config::error::ConfigError;
 use core_pg::error::PgError;
 use thiserror::Error;
@@ -37,6 +38,14 @@ pub enum TagsError {
     UnknownNode { index: usize },
     #[error("tag {index}: it names a DN that more than one entry holds, so the node cannot be told apart")]
     AmbiguousNode { index: usize },
+    #[error("the tag file changed while it was read")]
+    Changed,
+    #[error("the tag file does not end with a `complete: sha256:` trailer line, so it may have been cut: run seal-tags")]
+    Incomplete,
+    #[error("the tag file changed after it was sealed: run seal-tags")]
+    Altered,
+    #[error("CR line endings: write the file with LF")]
+    CarriageReturn,
 }
 
 
@@ -72,9 +81,52 @@ pub enum StoreError {
 
 
 #[derive(Debug, Error)]
+pub enum SealError {
+    #[error("usage: ostyr-attack-paths seal-tags [--reseal] <absolute file>")]
+    Usage,
+    #[error(transparent)]
+    Tags(#[from] TagsError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("the file already ends with a `complete:` line: pass --reseal to seal it again")]
+    AlreadySealed,
+    #[error("the file does not end with a newline: it is sealed as read, so add the final newline first")]
+    NoFinalNewline,
+    #[error("the directory is not a directory, is group- or other-writable, or belongs to neither the caller nor root")]
+    UnsafeDirectory,
+    #[error("the file is group- or other-writable")]
+    UnsafeFile,
+    #[error("cannot read or write the file")]
+    Io(#[from] std::io::Error),
+}
+
+
+#[derive(Debug, Error)]
 pub enum PathsError {
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error(transparent)]
     Limits(#[from] LimitsError),
+}
+
+
+/// Why one tenant produced no report in a round; the other tenants of the round still run.
+#[derive(Debug, Error)]
+pub enum TenantError {
+    #[error(transparent)]
+    File(#[from] ConfigError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("the snapshot is over its bound {bound}: {observed} observed, the limit is {limit}")]
+    SnapshotBound { bound: &'static str, observed: u64, limit: u64 },
+    #[error(transparent)]
+    Tags(#[from] TagsError),
+    #[error(transparent)]
+    Paths(#[from] PathsError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("the snapshot changed while it was read")]
+    SnapshotChanged,
+    #[error("the blocking task failed")]
+    Join(#[from] tokio::task::JoinError),
 }

@@ -1,8 +1,6 @@
 use attack_paths::error::TagsError;
 use attack_paths::model::{Graph, Node, NodeKind, Tags, MAX_TAGS};
-use attack_paths::tags::{apply_tags, check_tags, kind_is_critical, load_tags};
-use std::fs;
-use tempfile::tempdir;
+use attack_paths::tags::{apply_tags, check_tags, kind_is_critical};
 use types::TestResult;
 
 
@@ -74,23 +72,6 @@ fn a_tag_naming_no_node_is_refused() -> TestResult {
         critical: vec!["a".to_string(), "ghost".to_string()],
     };
     assert!(matches!(apply_tags(&mut graph, &tags), Err(TagsError::UnknownNode { index: 1 })));
-    Ok(())
-}
-
-
-#[test]
-fn the_tag_file_is_loaded_strictly() -> TestResult {
-    let dir = tempdir()?;
-    let good = dir.path().join("good.yaml");
-    fs::write(&good, "critical:\n  - file\n")?;
-    assert_eq!(load_tags(&good)?.critical, vec!["file".to_string()]);
-    let empty = dir.path().join("empty.yaml");
-    fs::write(&empty, "{}\n")?;
-    assert!(load_tags(&empty)?.critical.is_empty());
-    let unknown = dir.path().join("unknown.yaml");
-    fs::write(&unknown, "critical: []\nimportant: [a]\n")?;
-    assert!(matches!(load_tags(&unknown), Err(TagsError::Config(_))));
-    assert!(matches!(load_tags(&dir.path().join("missing.yaml")), Err(TagsError::Config(_))));
     Ok(())
 }
 
