@@ -8,6 +8,7 @@ use backup_monitor::restore::{
     restore_test, skip_label, valid_canary_path, valid_test, RestoreOutcome, RestoreTarget, CANARY_FILE_NAME, ID_LINE_BYTES, MAX_CANARY_BYTES,
 };
 use backup_monitor::secrets::{open_secrets_dir, SecretsDir};
+use grandchild::{gone_within_guard, grandchild_for};
 use net_topology::model::RunFailure;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -19,6 +20,10 @@ use std::time::Duration;
 use tempfile::TempDir;
 use time::macros::datetime;
 use time::OffsetDateTime;
+
+
+#[path = "common/grandchild.rs"]
+mod grandchild;
 
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-restic-dump.sh");
@@ -55,12 +60,6 @@ const SECRET_MODE: u32 = 0o600;
 
 
 const GROUP_READABLE_MODE: u32 = 0o640;
-
-
-const GONE_ATTEMPTS: usize = 100;
-
-
-const GONE_POLL: Duration = Duration::from_millis(50);
 
 
 const FAILED_CODE: i32 = 2;
@@ -300,7 +299,9 @@ fn a_dump_with_the_right_bytes_and_a_failing_exit_is_failed_and_keeps_no_text() 
 
 #[test]
 fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Error>> {
-    let setup = setup("hold", &good_snapshots())?;
+    let mut setup = setup("hold", &good_snapshots())?;
+    let mut grandchild = grandchild_for(setup.dir.path().join("grandchild"));
+    setup.test.max_bytes = SMALL_CAP;
     let declarations = load_declarations("tenant: acme\n", "d.yaml")?;
     let result = restore_test(
         &setup.program,
@@ -311,17 +312,12 @@ fn a_stalled_dump_times_out_and_the_group_is_killed() -> Result<(), Box<dyn Erro
             test: &setup.test,
         },
         &Limits::default(),
-        IMPATIENT,
+        PATIENT,
         clock,
         rustix::process::geteuid().as_raw(),
     )?;
-    assert_eq!(result.outcome, RestoreOutcome::Timeout);
-    let pid = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().to_owned();
-    let gone = (0..GONE_ATTEMPTS).any(|_| {
-        std::thread::sleep(GONE_POLL);
-        !std::path::Path::new(&format!("/proc/{pid}")).exists()
-    });
-    assert!(gone);
+    assert_eq!(result.outcome, RestoreOutcome::TooLarge);
+    assert!(gone_within_guard(&mut grandchild)?);
     let sleeping = self::setup("sleep", &good_snapshots())?;
     assert_eq!(
         restore_test(
