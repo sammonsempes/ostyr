@@ -566,6 +566,26 @@ async fn sixteen_decoy_files_hide_a_producer_file_loudly_and_its_control_says_wh
 }
 
 
+#[tokio::test]
+async fn a_scan_cut_marks_the_controls_without_a_value_like_the_file_cap() -> TestResult {
+    let (_dir, site) = fresh()?;
+    (0..SMALL_SCAN_FILES).try_for_each(|index| put(&site, &format!("f{index}.json"), "[]"))?;
+    let gathered = gather_indicators_bounded(&site.indicators, "acme", SMALL_SCAN);
+    assert_eq!((gathered.beyond_cap, gathered.scan_cut), (0, true));
+    let script = Script::default();
+    round_over(&script, &declarations(&site)?, &gathered).await;
+    let body = script
+        .stored
+        .lock()
+        .map_err(|_poisoned| "poisoned")?
+        .first()
+        .cloned()
+        .ok_or("nothing stored")?;
+    assert!(body.contains("indicator_files_cut"), "{body}");
+    Ok(())
+}
+
+
 #[test]
 fn many_skipped_files_are_named_up_to_a_bound_then_counted() -> TestResult {
     let (_dir, site) = fresh()?;
