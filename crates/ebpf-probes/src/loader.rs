@@ -1,7 +1,9 @@
 #![cfg(feature = "ebpf-load")]
 //! The production loader: load the exec probe from checked bytes, attach it, drain its ring. Proved by the `ebpf` workflow and the lab only.
 
-use crate::btf::{read_task_offsets, require_64_bit, VMLINUX_BTF_PATH};
+use crate::btf::{read_task_offsets, require_64_bit, Unsupported, REASON_UNREADABLE, VMLINUX_BTF_PATH};
+use crate::btf_file::{offset_globals, read_file_offsets, FileOffsets};
+use crate::capability::{create_unseen_from_reader, OSRELEASE_PATH};
 use crate::drain::{
     decode_batch, finish_drain, may_proceed, poll_loop, sum_per_cpu, Batch, Decoder, Drained, EXEC_DECODER, FILE_DECODER, MAX_DRAIN_PER_POLL,
 };
@@ -11,8 +13,8 @@ use crate::object::{read_object, EXEC_OBJECT_PATH};
 use crate::record::{ExecRecord, FileRecord};
 use crate::shape::{check_object_bytes_for, AttachKind, ProbeSpec, RecordKind, EXEC_PROBE, PROBE_TABLE};
 use aya::maps::{MapData, MapError, PerCpuArray, RingBuf};
-use aya::programs::TracePoint;
-use aya::{Ebpf, EbpfLoader};
+use aya::programs::Program;
+use aya::{Btf, Ebpf, EbpfLoader};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -33,6 +35,7 @@ pub struct Probe {
     pub ebpf: Ebpf,
     pub states: Vec<ProbeState>,
     pub unavailable: Vec<FileProbeUnavailable>,
+    pub create_unseen: bool,
 }
 
 
@@ -48,16 +51,24 @@ pub struct ProbeDrain {
 }
 
 
-fn tracepoint_of<'a>(ebpf: &'a mut Ebpf, spec: &ProbeSpec) -> Result<&'a mut TracePoint, LoadError> {
-    ebpf.program_mut(spec.program)
-        .ok_or(LoadError::MissingProgram(spec.program))?
-        .try_into()
-        .map_err(|_| LoadError::WrongProgramType(spec.program))
+fn load_program(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<(), LoadError> {
+    let program = ebpf.program_mut(spec.program).ok_or(LoadError::MissingProgram(spec.program))?;
+    match (&spec.attach, program) {
+        (AttachKind::TracePoint { .. }, Program::TracePoint(trace)) => trace.load().map_err(|error| program_load_error(spec.name, &error)),
+        (AttachKind::FExit { function }, Program::FExit(exit)) => {
+            let btf = Btf::from_sys_fs().map_err(|_| LoadError::Btf(Unsupported(REASON_UNREADABLE)))?;
+            exit.load(function, &btf).map_err(|error| program_load_error(spec.name, &error))
+        }
+        _ => Err(LoadError::WrongProgramType(spec.program)),
+    }
 }
 
 
-fn take_state(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<ProbeState, LoadError> {
-    tracepoint_of(ebpf, spec)?.load().map_err(|error| program_load_error(spec.name, &error))?;
+fn take_state(ebpf: &mut Ebpf, spec: &ProbeSpec, file_offsets: Result<FileOffsets, Unsupported>) -> Result<ProbeState, LoadError> {
+    if spec.kind == RecordKind::File {
+        file_offsets?;
+    }
+    load_program(ebpf, spec)?;
     let ring = ebpf
         .take_map(spec.ring)
         .ok_or(LoadError::TakeMap(spec.ring))
@@ -81,6 +92,19 @@ fn report_unavailable(lost: &FileProbeUnavailable) {
 }
 
 
+fn kernel_create_unseen() -> bool {
+    let decided = std::fs::File::open(OSRELEASE_PATH).and_then(create_unseen_from_reader);
+    let unseen = decided.unwrap_or_else(|error| {
+        tracing::warn!("kernel release unreadable, file creation by a read-only open counts as unseen: {error}");
+        true
+    });
+    if unseen {
+        tracing::warn!("file probe: a file created by a read-only open (O_CREAT|O_RDONLY) is not recorded on this kernel (create_unseen)");
+    }
+    unseen
+}
+
+
 /// Loads every program of `table` and takes its maps from bytes already judged by `read_object`, without attaching; `check_object_bytes_for` judges the same bytes once, first.
 pub fn prepare_probes_from_bytes(bytes: &[u8], table: &[ProbeSpec]) -> Result<Probe, LoadError> {
     require_64_bit(usize::BITS)?;
@@ -88,18 +112,29 @@ pub fn prepare_probes_from_bytes(bytes: &[u8], table: &[ProbeSpec]) -> Result<Pr
     check_object_bytes_for(bytes, table)?;
     let real_parent = u64::from(offsets.real_parent);
     let tgid = u64::from(offsets.tgid);
-    let mut ebpf = EbpfLoader::new()
+    let file_offsets = read_file_offsets(Path::new(VMLINUX_BTF_PATH));
+    let file_globals = file_offsets.iter().flat_map(offset_globals).collect::<Vec<_>>();
+    let mut loader = EbpfLoader::new();
+    loader
         .override_global("REAL_PARENT_OFFSET", &real_parent, true)
-        .override_global("TGID_OFFSET", &tgid, true)
-        .load(bytes)
-        .map_err(|error| ebpf_error(&error))?;
+        .override_global("TGID_OFFSET", &tgid, true);
+    file_globals.iter().for_each(|(name, value)| {
+        loader.override_global(name, value, true);
+    });
+    let mut ebpf = loader.load(bytes).map_err(|error| ebpf_error(&error))?;
     let settled = table
         .iter()
-        .map(|spec| settle_probe(spec, take_state(&mut ebpf, spec)))
+        .map(|spec| settle_probe(spec, take_state(&mut ebpf, spec, file_offsets)))
         .collect::<Result<Vec<_>, _>>()?;
     let (states, unavailable) = split_settled(settled);
     unavailable.iter().for_each(report_unavailable);
-    Ok(Probe { ebpf, states, unavailable })
+    let create_unseen = kernel_create_unseen();
+    Ok(Probe {
+        ebpf,
+        states,
+        unavailable,
+        create_unseen,
+    })
 }
 
 
@@ -110,9 +145,13 @@ pub fn prepare_exec_probe_from_bytes(bytes: &[u8]) -> Result<Probe, LoadError> {
 
 
 fn attach_state(ebpf: &mut Ebpf, spec: &ProbeSpec) -> Result<(), LoadError> {
-    let program = tracepoint_of(ebpf, spec)?;
-    match spec.attach {
-        AttachKind::TracePoint { category, name } => program.attach(category, name).map(drop).map_err(|error| attach_error(spec.name, &error)),
+    let program = ebpf.program_mut(spec.program).ok_or(LoadError::MissingProgram(spec.program))?;
+    match (&spec.attach, program) {
+        (AttachKind::TracePoint { category, name }, Program::TracePoint(trace)) => {
+            trace.attach(category, name).map(drop).map_err(|error| attach_error(spec.name, &error))
+        }
+        (AttachKind::FExit { .. }, Program::FExit(exit)) => exit.attach().map(drop).map_err(|error| attach_error(spec.name, &error)),
+        _ => Err(LoadError::WrongProgramType(spec.program)),
     }
 }
 

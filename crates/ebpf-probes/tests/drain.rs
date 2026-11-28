@@ -418,12 +418,18 @@ const EXEC_PAIR: usize = 2;
 const CUSTOM_BUDGET: u32 = 2;
 
 
+const FILE_TAIL_WORDS: usize = 4;
+
+
 fn raw_file(pid: u32, monotonic_ns: u64, path: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    [FILE_RECORD_KIND, pid, 0, 1, 0]
+    [FILE_RECORD_KIND, pid, 0, 1, 0, 0]
         .iter()
         .for_each(|word| bytes.extend_from_slice(&word.to_le_bytes()));
     bytes.extend_from_slice(&monotonic_ns.to_le_bytes());
+    [0u32; FILE_TAIL_WORDS]
+        .iter()
+        .for_each(|word| bytes.extend_from_slice(&word.to_le_bytes()));
     let mut field = path.to_vec();
     field.resize(FILE_PATH_BYTES, 0);
     bytes.extend_from_slice(&field);

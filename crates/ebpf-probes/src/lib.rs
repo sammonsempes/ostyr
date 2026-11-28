@@ -2,6 +2,7 @@
 
 pub mod btf;
 pub mod btf_file;
+pub mod capability;
 pub mod drain;
 #[cfg(target_os = "linux")]
 pub mod error;

@@ -1,8 +1,9 @@
 use ebpf_probes::btf::{lookup_of, parse_structs, Unsupported, MAX_BTF_BYTES, REASON_MISSING, REASON_OVERSIZED, REASON_TRUNCATED};
 use ebpf_probes::btf_file::{
-    find_file_offsets, nested_offset, offset_of, read_file_offsets, read_file_offsets_from, FileOffsets, MemberSpec, DENTRY_D_HASH, DENTRY_D_PARENT,
-    FILE_F_FLAGS, FILE_F_INODE, FILE_F_MODE, FILE_F_PATH, HLIST_BL_NODE_PPREV, HLIST_STRUCT, INODE_I_INO, INODE_I_SB, PATH_DENTRY, PATH_STRUCT,
-    REASON_UNLISTED_STRUCT, STRUCTS, SUPER_BLOCK_S_DEV,
+    find_file_offsets, nested_offset, offset_globals, offset_of, read_file_offsets, read_file_offsets_from, FileOffsets, MemberSpec, DENTRY_D_HASH,
+    DENTRY_D_PARENT, FILE_F_FLAGS, FILE_F_INODE, FILE_F_MODE, FILE_F_PATH, GLOBAL_COUNT, HLIST_BL_NODE_PPREV, HLIST_STRUCT, INODE_I_INO, INODE_I_SB,
+    MNT_NAMESPACE_NS, NSPROXY_MNT_NS, NS_COMMON_INUM, NS_COMMON_STRUCT, PATH_DENTRY, PATH_STRUCT, REASON_UNLISTED_STRUCT, STRUCTS, SUPER_BLOCK_S_DEV,
+    TASK_NSPROXY,
 };
 use ebpf_probes::types::Rule;
 use std::error::Error;
@@ -88,6 +89,21 @@ const SUPER_BLOCK_SIZE: u32 = 256;
 const DENTRY_SIZE: u32 = 64;
 
 
+const TASK_SIZE: u32 = 128;
+
+
+const NSPROXY_SIZE: u32 = 64;
+
+
+const MNT_NAMESPACE_SIZE: u32 = 64;
+
+
+const NS_COMMON_SIZE: u32 = 32;
+
+
+const NS_COMMON_ID: u32 = 14;
+
+
 const HEADER_WORDS: usize = 3;
 
 
@@ -98,6 +114,9 @@ const ONE_BIT: u32 = 1;
 
 
 const SPARSE: u64 = 1 << 40;
+
+
+const TASK_GLOBALS: usize = 2;
 
 
 const EXPECTED: FileOffsets = FileOffsets {
@@ -111,6 +130,9 @@ const EXPECTED: FileOffsets = FileOffsets {
     super_block_dev: 16,
     dentry_parent: 24,
     dentry_hash_pprev: 16,
+    task_nsproxy: 40,
+    nsproxy_mnt_ns: 24,
+    mnt_ns_inum: 24,
 };
 
 
@@ -211,6 +233,30 @@ fn definitions() -> Vec<Def> {
                 member("d_parent", PTR, at(EXPECTED.dentry_parent)),
             ],
         },
+        Def {
+            name: "task_struct".into(),
+            size: TASK_SIZE,
+            flagged: false,
+            members: vec![member("nsproxy", PTR, at(EXPECTED.task_nsproxy))],
+        },
+        Def {
+            name: "nsproxy".into(),
+            size: NSPROXY_SIZE,
+            flagged: false,
+            members: vec![member("mnt_ns", PTR, at(EXPECTED.nsproxy_mnt_ns))],
+        },
+        Def {
+            name: "mnt_namespace".into(),
+            size: MNT_NAMESPACE_SIZE,
+            flagged: false,
+            members: vec![member("ns", NS_COMMON_ID, at(EIGHT))],
+        },
+        Def {
+            name: "ns_common".into(),
+            size: NS_COMMON_SIZE,
+            flagged: false,
+            members: vec![member("inum", INT4, at(SMALL_SIZE))],
+        },
     ]
 }
 
@@ -289,6 +335,10 @@ fn all_specs() -> Vec<MemberSpec> {
         DENTRY_D_PARENT,
         DENTRY_D_HASH,
         HLIST_BL_NODE_PPREV,
+        TASK_NSPROXY,
+        NSPROXY_MNT_NS,
+        MNT_NAMESPACE_NS,
+        NS_COMMON_INUM,
     ]
 }
 
@@ -314,6 +364,7 @@ fn spec_offset(definitions: &[Def], spec: &MemberSpec) -> Result<u32, Unsupporte
     match spec.structure {
         "path" => nested_offset(&lookup, &parsed.found, (&FILE_F_PATH, PATH_STRUCT), spec).map(|(_, inner)| inner),
         "hlist_bl_node" => nested_offset(&lookup, &parsed.found, (&DENTRY_D_HASH, HLIST_STRUCT), spec).map(|(_, inner)| inner),
+        "ns_common" => nested_offset(&lookup, &parsed.found, (&MNT_NAMESPACE_NS, NS_COMMON_STRUCT), spec).map(|(_, inner)| inner),
         _ => offset_of(&lookup, &parsed.found, spec),
     }
 }
@@ -504,13 +555,61 @@ fn a_spec_for_an_unlisted_struct_is_named() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
-fn the_first_struct_of_a_name_wins() -> Result<(), Box<dyn Error>> {
+fn a_struct_defined_twice_is_refused_by_name_for_each_wanted_struct() -> Result<(), Box<dyn Error>> {
+    STRUCTS.iter().try_for_each(|entry| -> Result<(), Box<dyn Error>> {
+        let mut defs = definitions();
+        let copy = definitions().into_iter().find(|def| def.name == entry.name).ok_or("no such struct")?;
+        defs.push(copy);
+        assert_eq!(failure(find_file_offsets(&build(&defs)))?, entry.duplicate);
+        assert!(entry.duplicate.contains(entry.name));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_struct_defined_three_times_is_still_refused() -> Result<(), Box<dyn Error>> {
     let mut defs = definitions();
-    let mut second = definitions();
-    edit(&mut second, "file", "f_flags", INT4, at(EXPECTED.file_flags + FOUR))?;
-    let copy = second.remove(FILE_INDEX);
-    defs.push(copy);
-    assert_eq!(find_file_offsets(&build(&defs)), Ok(EXPECTED));
+    let first = definitions().into_iter().nth(FILE_INDEX).ok_or("no file")?;
+    let second = definitions().into_iter().nth(FILE_INDEX).ok_or("no file")?;
+    defs.push(first);
+    defs.push(second);
+    assert_eq!(failure(find_file_offsets(&build(&defs)))?, STRUCTS.first().ok_or("empty")?.duplicate);
+    Ok(())
+}
+
+
+#[test]
+fn the_rodata_globals_carry_every_offset_under_the_names_the_kernel_program_declares() -> Result<(), Box<dyn Error>> {
+    let globals = offset_globals(&EXPECTED);
+    assert_eq!(globals.len(), GLOBAL_COUNT);
+    let values: Vec<u64> = globals.iter().map(|(_, value)| *value).collect();
+    let expected = [
+        EXPECTED.file_mode,
+        EXPECTED.file_flags,
+        EXPECTED.file_path,
+        EXPECTED.file_inode,
+        EXPECTED.path_dentry,
+        EXPECTED.inode_sb,
+        EXPECTED.inode_ino,
+        EXPECTED.super_block_dev,
+        EXPECTED.dentry_parent,
+        EXPECTED.dentry_hash_pprev,
+        EXPECTED.task_nsproxy,
+        EXPECTED.nsproxy_mnt_ns,
+        EXPECTED.mnt_ns_inum,
+    ]
+    .map(u64::from);
+    assert_eq!(values, expected);
+    let kernel = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ebpf/src/main.rs"))?;
+    globals.iter().for_each(|(name, _)| {
+        assert!(
+            kernel.contains(&format!("static {name}: u64 = 0;")),
+            "{name} is not declared by the kernel program"
+        )
+    });
+    let declared = kernel.matches(": u64 = 0;").count();
+    assert_eq!(declared, GLOBAL_COUNT + TASK_GLOBALS);
     Ok(())
 }
 
@@ -572,10 +671,10 @@ const DECOY_SIZE: u32 = 4000;
 const DECOY_PPREV: u32 = 3008;
 
 
-const REAL_PATH_ID: u32 = 11;
+const REAL_PATH_ID: u32 = 15;
 
 
-const REAL_HLIST_ID: u32 = 12;
+const REAL_HLIST_ID: u32 = 16;
 
 
 fn decoy_first(definitions: &mut [Def]) -> Result<(), Box<dyn Error>> {
@@ -617,7 +716,7 @@ fn a_duplicated_nested_struct_is_resolved_by_the_type_the_member_uses() -> Resul
 
 
 #[test]
-fn a_huge_first_struct_of_the_name_never_leaks_into_the_sum() -> Result<(), Box<dyn Error>> {
+fn a_nested_struct_larger_than_its_dentry_fails_the_outer_fit_check() -> Result<(), Box<dyn Error>> {
     let mut defs = definitions();
     decoy_first(&mut defs)?;
     assert_eq!(failure(find_file_offsets(&build(&defs)))?, DENTRY_D_HASH.bad);

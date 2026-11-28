@@ -1,13 +1,14 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::bindings::path;
 use aya_ebpf::helpers::{
-    bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task, bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel,
-    bpf_probe_read_user_str_bytes,
+    bpf_d_path, bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+    bpf_probe_read_kernel,
 };
-use aya_ebpf::macros::{map, tracepoint};
+use aya_ebpf::macros::{fexit, map, tracepoint};
 use aya_ebpf::maps::{PerCpuArray, RingBuf};
-use aya_ebpf::programs::TracePointContext;
+use aya_ebpf::programs::{FExitContext, TracePointContext};
 
 
 const MAX_RING_BYTES: u32 = 64 * 1024;
@@ -31,10 +32,10 @@ const RECORD_WORDS: usize = 10;
 const FILE_RING_BYTES: u32 = 256 * 1024;
 
 
-const FILE_RECORD_KIND: u32 = 2;
+const FILE_RECORD_KIND: u32 = 3;
 
 
-const FILE_HEADER_WORDS: usize = 7;
+const FILE_HEADER_WORDS: usize = 12;
 
 
 const FILE_PATH_BYTES: usize = 256;
@@ -43,19 +44,31 @@ const FILE_PATH_BYTES: usize = 256;
 const FILE_RECORD_BYTES: usize = FILE_HEADER_WORDS * COMM_WORD_BYTES + FILE_PATH_BYTES;
 
 
-const FILENAME_OFFSET: usize = 24;
+const FMODE_WRITE: u32 = 0x2;
 
 
-const OPEN_FLAGS_OFFSET: usize = 32;
+const FMODE_CREATED: u32 = 0x0010_0000;
 
 
-const OPEN_WRITE_MASK: u32 = 0o1 | 0o2 | 0o100 | 0o1000;
+const O_TRUNC: u32 = 0o1000;
 
 
-const STATUS_CUT: u32 = 1;
+const ENAMETOOLONG: i64 = 36;
 
 
-const STATUS_UNREADABLE: u32 = 2;
+const FILE_FIRST_ARGUMENT: usize = 0;
+
+
+const FILE_RETURN_SLOT: usize = 1;
+
+
+const STATUS_TOO_LONG: u32 = 1;
+
+
+const STATUS_PATH_ERROR: u32 = 2;
+
+
+const STATUS_UNLINKED: u32 = 4;
 
 
 #[link_section = "license"]
@@ -69,6 +82,58 @@ static REAL_PARENT_OFFSET: u64 = 0;
 
 #[no_mangle]
 static TGID_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static FILE_MODE_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static FILE_FLAGS_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static FILE_PATH_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static FILE_INODE_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static PATH_DENTRY_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static INODE_SB_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static INODE_INO_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static SUPER_BLOCK_DEV_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static DENTRY_PARENT_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static DENTRY_HASH_PPREV_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static TASK_NSPROXY_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static NSPROXY_MNT_NS_OFFSET: u64 = 0;
+
+
+#[no_mangle]
+static MNT_NS_INUM_OFFSET: u64 = 0;
 
 
 #[map]
@@ -177,48 +242,101 @@ pub fn sched_process_exec(_context: TracePointContext) -> u32 {
 }
 
 
-fn file_header(flags: u32, status: u32) -> [u32; FILE_HEADER_WORDS] {
+fn at(base: *const u8, global: &'static u64) -> *const u8 {
+    base.wrapping_add(global_offset(global))
+}
+
+
+fn u64_at(base: *const u8, global: &'static u64) -> u64 {
+    // SAFETY: bpf_probe_read_kernel faults safely, so an address that is not readable gives Err and never a crash.
+    unsafe { bpf_probe_read_kernel::<u64>(at(base, global).cast::<u64>()) }.unwrap_or(0)
+}
+
+
+fn u32_at(base: *const u8, global: &'static u64) -> u32 {
+    // SAFETY: same helper and same guarantee as u64_at.
+    unsafe { bpf_probe_read_kernel::<u32>(at(base, global).cast::<u32>()) }.unwrap_or(0)
+}
+
+
+fn pointer_at(base: *const u8, global: &'static u64) -> *const u8 {
+    u64_at(base, global) as *const u8
+}
+
+
+fn opener_mount_namespace() -> u32 {
+    // SAFETY: the helper takes no argument and only returns the current task pointer, which is used as an address and never dereferenced here.
+    let task = unsafe { bpf_get_current_task() } as *const u8;
+    u32_at(
+        pointer_at(pointer_at(task, &TASK_NSPROXY_OFFSET), &NSPROXY_MNT_NS_OFFSET),
+        &MNT_NS_INUM_OFFSET,
+    )
+}
+
+
+fn is_unlinked(dentry: *const u8) -> bool {
+    let unhashed = u64_at(dentry, &DENTRY_HASH_PPREV_OFFSET) == 0;
+    unhashed && pointer_at(dentry, &DENTRY_PARENT_OFFSET) != dentry
+}
+
+
+fn file_header(file: *const u8, flags: u32, mode: u32, status: u32) -> [u32; FILE_HEADER_WORDS] {
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
     // SAFETY: the helper takes no argument and returns the monotonic clock.
     let monotonic_ns = unsafe { bpf_ktime_get_ns() };
+    let inode = pointer_at(file, &FILE_INODE_OFFSET);
+    let inode_number = u64_at(inode, &INODE_INO_OFFSET);
+    let device = u32_at(pointer_at(inode, &INODE_SB_OFFSET), &SUPER_BLOCK_DEV_OFFSET);
+    let dentry = pointer_at(at(file, &FILE_PATH_OFFSET), &PATH_DENTRY_OFFSET);
+    let unlinked = if is_unlinked(dentry) { STATUS_UNLINKED } else { 0 };
     [
         FILE_RECORD_KIND,
         pid_tgid.wrapping_shr(WORD_BITS) as u32,
         uid_gid as u32,
         flags,
-        status,
+        mode,
+        status | unlinked,
         monotonic_ns as u32,
         monotonic_ns.wrapping_shr(WORD_BITS) as u32,
+        device,
+        inode_number as u32,
+        inode_number.wrapping_shr(WORD_BITS) as u32,
+        opener_mount_namespace(),
     ]
 }
 
 
-fn fill_file_record(bytes: &mut [u8], filename: *const u8, flags: u32) -> Option<()> {
+fn fill_file_record(bytes: &mut [u8], file: *const u8, flags: u32, mode: u32) -> Option<()> {
     bytes.fill(0);
-    let (header, path) = bytes.split_at_mut_checked(FILE_HEADER_WORDS * COMM_WORD_BYTES)?;
-    // SAFETY: bpf_probe_read_user_str faults safely, so an unmapped or hostile user pointer gives Err and never a crash; it writes at most path.len() bytes into the reserved record.
-    let read = unsafe { bpf_probe_read_user_str_bytes(filename, path) };
-    let status = match read {
-        Ok(text) if text.len().wrapping_add(1) >= FILE_PATH_BYTES => STATUS_CUT,
-        Ok(_) => 0,
-        Err(_) => STATUS_UNREADABLE,
+    let (header, path_bytes) = bytes.split_at_mut_checked(FILE_HEADER_WORDS * COMM_WORD_BYTES)?;
+    let location = at(file, &FILE_PATH_OFFSET).cast::<path>();
+    let capacity = u32::try_from(path_bytes.len()).ok()?;
+    // SAFETY: the pointer is the f_path member of the struct file the verifier proved is the first argument of security_file_open; the size passed is the checked length of the very slice the buffer pointer comes from, so bpf_d_path writes at most path_bytes.len() bytes into the reserved record whatever the caller's slice.
+    let written = unsafe { bpf_d_path(location, path_bytes.as_mut_ptr().cast(), capacity) };
+    let status = if written > 0 {
+        0
+    } else if written == -ENAMETOOLONG {
+        STATUS_TOO_LONG
+    } else {
+        STATUS_PATH_ERROR
     };
-    let words = file_header(flags, status).map(u32::to_le_bytes);
+    if status != 0 {
+        path_bytes.fill(0);
+    }
+    let words = file_header(file, flags, mode, status).map(u32::to_le_bytes);
     header.iter_mut().zip(words.as_flattened()).for_each(|(slot, byte)| *slot = *byte);
     Some(())
 }
 
 
-fn emit_file(context: &TracePointContext) {
-    // SAFETY: read_at reads the tracepoint argument slot through bpf_probe_read_kernel, which faults safely.
-    let filename = unsafe { context.read_at::<u64>(FILENAME_OFFSET) }.unwrap_or(0) as *const u8;
-    // SAFETY: same helper and the same guarantee for the flags slot.
-    let flags = unsafe { context.read_at::<u64>(OPEN_FLAGS_OFFSET) }.unwrap_or(0) as u32;
-    if flags & OPEN_WRITE_MASK != 0 {
+fn emit_file(file: *const u8) {
+    let mode = u32_at(file, &FILE_MODE_OFFSET);
+    let flags = u32_at(file, &FILE_FLAGS_OFFSET);
+    if mode & (FMODE_WRITE | FMODE_CREATED) != 0 || flags & O_TRUNC != 0 {
         match FILE_EVENTS.reserve_bytes(FILE_RECORD_BYTES, 0) {
             Some(mut entry) => {
-                if fill_file_record(&mut entry, filename, flags).is_some() {
+                if fill_file_record(&mut entry, file, flags, mode).is_some() {
                     entry.submit(0);
                 } else {
                     entry.discard(0);
@@ -230,8 +348,11 @@ fn emit_file(context: &TracePointContext) {
 }
 
 
-#[tracepoint(name = "sys_enter_openat", category = "syscalls")]
-pub fn sys_enter_openat(context: TracePointContext) -> u32 {
-    emit_file(&context);
+#[fexit(function = "security_file_open")]
+pub fn security_file_open(context: FExitContext) -> i32 {
+    let returned: u64 = context.arg(FILE_RETURN_SLOT);
+    if returned as u32 == 0 {
+        emit_file(context.arg::<*const u8>(FILE_FIRST_ARGUMENT));
+    }
     0
 }
