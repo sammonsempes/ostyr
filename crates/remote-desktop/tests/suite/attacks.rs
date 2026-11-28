@@ -3,7 +3,7 @@ use crate::common::{
     claims, relay_keys_text, setup, setup_with, token_for, token_unchecked, NOW, PEER, SECOND_NONCE, SLACK, SMALL_CAP, TENANT, THIRD_NONCE,
 };
 use data_encoding::BASE64URL_NOPAD;
-use remote_desktop::model::CLOCK_SKEW_SECONDS;
+use remote_desktop::model::{Role, CLOCK_SKEW_SECONDS};
 use remote_desktop::token::verify_token;
 use std::thread;
 
@@ -25,14 +25,14 @@ fn flipping_one_bit_anywhere_in_the_token_refuses_it() -> TestResult {
     (0..bytes.len()).try_for_each(|position| {
         let mut flipped = bytes.clone();
         flipped.iter_mut().skip(position).take(1).for_each(|byte| *byte ^= 1);
-        let accepted = verify_token(&setup.verifier, &BASE64URL_NOPAD.encode(&flipped), PEER, TENANT, NOW).is_ok();
+        let accepted = verify_token(&setup.verifier, &BASE64URL_NOPAD.encode(&flipped), Role::Viewer, PEER, TENANT, NOW).is_ok();
         if accepted {
             Err(format!("a token flipped at byte {position} was accepted"))
         } else {
             Ok(())
         }
     })?;
-    assert!(verify_token(&setup.verifier, &token, PEER, TENANT, NOW).is_ok());
+    assert!(verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW).is_ok());
     Ok(())
 }
 
@@ -42,7 +42,7 @@ fn a_token_replayed_a_thousand_times_is_accepted_exactly_once() -> TestResult {
     let setup = setup()?;
     let token = token_for(&claims(1))?;
     let accepted = (0..REPLAYS)
-        .filter(|_| verify_token(&setup.verifier, &token, PEER, TENANT, NOW).is_ok())
+        .filter(|_| verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW).is_ok())
         .count();
     assert_eq!(accepted, 1);
     Ok(())
@@ -58,7 +58,7 @@ fn a_token_replayed_from_eight_threads_is_accepted_exactly_once() -> TestResult 
             .map(|_| {
                 scope.spawn(|| {
                     (0..PER_THREAD)
-                        .filter(|_| verify_token(&setup.verifier, &token, PEER, TENANT, NOW).is_ok())
+                        .filter(|_| verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW).is_ok())
                         .count()
                 })
             })
@@ -80,7 +80,7 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
     longest.not_before = 0;
     longest.expires_at = u64::MAX;
     assert_eq!(
-        verify_token(&setup.verifier, &token_unchecked(&longest)?, PEER, TENANT, NOW)
+        verify_token(&setup.verifier, &token_unchecked(&longest)?, Role::Viewer, PEER, TENANT, NOW)
             .err()
             .ok_or("accepted")?
             .to_string(),
@@ -90,7 +90,7 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
     empty.not_before = u64::MAX;
     empty.expires_at = u64::MAX;
     assert_eq!(
-        verify_token(&setup.verifier, &token_unchecked(&empty)?, PEER, TENANT, NOW)
+        verify_token(&setup.verifier, &token_unchecked(&empty)?, Role::Viewer, PEER, TENANT, NOW)
             .err()
             .ok_or("accepted")?
             .to_string(),
@@ -104,6 +104,7 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
         verify_token(
             &wide.verifier,
             &token_unchecked(&far)?,
+            Role::Viewer,
             PEER,
             TENANT,
             u64::MAX - CLOCK_SKEW_SECONDS - SLACK

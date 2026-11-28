@@ -1,6 +1,6 @@
 use crate::error::{ClaimError, IssueError, TokenError};
 use crate::model::{
-    RelayClaims, MAX_CUSTOM_PEER_BYTES, MAX_KEY_ID_BYTES, MAX_LIFETIME_SECONDS, MAX_PEER_ID_DIGITS, MAX_SUBJECT_BYTES, MIN_CUSTOM_PEER_BYTES,
+    RelayClaims, Role, MAX_CUSTOM_PEER_BYTES, MAX_KEY_ID_BYTES, MAX_LIFETIME_SECONDS, MAX_PEER_ID_DIGITS, MAX_SUBJECT_BYTES, MIN_CUSTOM_PEER_BYTES,
 };
 use core_pg::scope::tenant_scope;
 
@@ -55,10 +55,20 @@ pub fn check_key_id(key_id: &str) -> Result<(), ClaimError> {
 }
 
 
+/// A viewer token carries a subject; a device token carries none.
+pub fn check_role_subject(claims: &RelayClaims) -> Result<(), ClaimError> {
+    match claims.role {
+        Role::Viewer => check_subject(&claims.viewer_subject),
+        Role::Device if claims.viewer_subject.is_empty() => Ok(()),
+        Role::Device => Err(ClaimError::DeviceSubject),
+    }
+}
+
+
 /// The grammar of every identity claim, applied at issue and again at verify.
 pub fn check_claims(claims: &RelayClaims) -> Result<(), ClaimError> {
     tenant_scope(&claims.tenant).map_err(ClaimError::Tenant)?;
-    check_subject(&claims.viewer_subject)?;
+    check_role_subject(claims)?;
     check_peer(&claims.device_peer_id)?;
     check_key_id(&claims.key_id)
 }

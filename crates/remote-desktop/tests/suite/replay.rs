@@ -1,7 +1,7 @@
 use crate::common::types::TestResult;
 use crate::common::{claims, setup, token_for, LIFETIME, NOW, PEER, SLACK, SMALL_CAP, TENANT};
 use remote_desktop::error::TokenError;
-use remote_desktop::model::{ReplaySet, DEFAULT_LIVE_TOKENS, MAX_PRUNE_PER_CALL, NONCE_LENGTH};
+use remote_desktop::model::{ReplaySet, Role, DEFAULT_LIVE_TOKENS, MAX_PRUNE_PER_CALL, NONCE_LENGTH};
 use remote_desktop::replay::{admit, live_tokens, prune, refused_full};
 use remote_desktop::token::verify_token;
 
@@ -84,19 +84,21 @@ fn two_hundred_thousand_distinct_tokens_never_grow_the_set_past_the_cap() -> Tes
 fn the_verifier_counts_live_tokens_and_full_refusals_with_an_injected_clock() -> TestResult {
     let setup = setup()?;
     (0..SMALL_CAP as u8).try_for_each(|number| {
-        verify_token(&setup.verifier, &token_for(&claims(number))?, PEER, TENANT, NOW)?;
+        verify_token(&setup.verifier, &token_for(&claims(number))?, Role::Viewer, PEER, TENANT, NOW)?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     assert_eq!(live_tokens(&setup.verifier), SMALL_CAP);
     let extra = token_for(&claims(SMALL_CAP as u8))?;
-    let refused = verify_token(&setup.verifier, &extra, PEER, TENANT, NOW).err().ok_or("accepted")?;
+    let refused = verify_token(&setup.verifier, &extra, Role::Viewer, PEER, TENANT, NOW)
+        .err()
+        .ok_or("accepted")?;
     assert_eq!(refused.to_string(), "too many live tokens, token refused");
     assert_eq!(refused_full(&setup.verifier), 1);
     let later = NOW + LIFETIME + 1;
     let mut fresh = claims(SMALL_CAP as u8);
     fresh.not_before = later;
     fresh.expires_at = later + LIFETIME;
-    verify_token(&setup.verifier, &token_for(&fresh)?, PEER, TENANT, later)?;
+    verify_token(&setup.verifier, &token_for(&fresh)?, Role::Viewer, PEER, TENANT, later)?;
     assert_eq!(live_tokens(&setup.verifier), 1);
     Ok(())
 }

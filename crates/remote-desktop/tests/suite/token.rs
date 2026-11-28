@@ -6,13 +6,13 @@ use crate::common::{
 };
 use data_encoding::BASE64URL_NOPAD;
 use remote_desktop::error::{CodecError, IssueError, TokenError, VerifierError};
-use remote_desktop::model::{Envelope, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES};
+use remote_desktop::model::{Envelope, Role, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES};
 use remote_desktop::sign::memory_signer;
 use remote_desktop::token::{check_token, issue_token, open_verifier, seal, verify_token};
 
 
 fn refusal_at(setup: &Setup, token: &str, now: u64) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(verify_token(&setup.verifier, token, PEER, TENANT, now)
+    Ok(verify_token(&setup.verifier, token, Role::Viewer, PEER, TENANT, now)
         .err()
         .ok_or("the token was accepted")?
         .to_string())
@@ -36,7 +36,7 @@ fn seal_claims(claims_bytes: Vec<u8>, seed: u8) -> Result<String, Box<dyn std::e
 fn a_valid_token_is_accepted_once_then_refused_as_replayed() -> TestResult {
     let setup = setup()?;
     let token = token_for(&claims(1))?;
-    let accepted = verify_token(&setup.verifier, &token, PEER, TENANT, NOW)?;
+    let accepted = verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW)?;
     assert_eq!(accepted, claims(1));
     assert_eq!(refusal_at(&setup, &token, NOW)?, "token was already used");
     Ok(())
@@ -95,7 +95,7 @@ fn a_lifetime_of_exactly_the_maximum_and_the_skew_edge_are_accepted() -> TestRes
     let mut edge = claims(1);
     edge.not_before = NOW + CLOCK_SKEW_SECONDS;
     edge.expires_at = edge.not_before + MAX_LIFETIME_SECONDS;
-    assert_eq!(verify_token(&setup.verifier, &token_for(&edge)?, PEER, TENANT, NOW)?, edge);
+    assert_eq!(verify_token(&setup.verifier, &token_for(&edge)?, Role::Viewer, PEER, TENANT, NOW)?, edge);
     Ok(())
 }
 
@@ -105,13 +105,13 @@ fn a_refused_token_does_not_burn_its_nonce() -> TestResult {
     let setup = setup()?;
     let token = token_for(&claims(1))?;
     assert_eq!(
-        verify_token(&setup.verifier, &token, "987654321", TENANT, NOW)
+        verify_token(&setup.verifier, &token, Role::Viewer, "987654321", TENANT, NOW)
             .err()
             .ok_or("accepted")?
             .to_string(),
         "token is for another device"
     );
-    assert_eq!(verify_token(&setup.verifier, &token, PEER, TENANT, NOW)?, claims(1));
+    assert_eq!(verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW)?, claims(1));
     Ok(())
 }
 
@@ -120,7 +120,9 @@ fn a_refused_token_does_not_burn_its_nonce() -> TestResult {
 fn the_peer_is_checked_before_the_tenant() -> TestResult {
     let setup = setup()?;
     let token = token_for(&claims(1))?;
-    let refused = verify_token(&setup.verifier, &token, "987654321", "other", NOW).err().ok_or("accepted")?;
+    let refused = verify_token(&setup.verifier, &token, Role::Viewer, "987654321", "other", NOW)
+        .err()
+        .ok_or("accepted")?;
     assert!(matches!(refused, TokenError::WrongPeer));
     Ok(())
 }
@@ -156,7 +158,7 @@ fn a_revoked_key_and_a_key_outside_its_validity_are_refused() -> TestResult {
     let ended = setup_with(&relay_keys_text(NOW - LIFETIME, NOW - 1, false), SMALL_CAP)?;
     assert_eq!(refusal_at(&ended, &token, NOW)?, "signing key is outside its validity period");
     let edge = setup_with(&relay_keys_text(NOW, NOW + LIFETIME, false), SMALL_CAP)?;
-    assert_eq!(verify_token(&edge.verifier, &token, PEER, TENANT, NOW)?, claims(1));
+    assert_eq!(verify_token(&edge.verifier, &token, Role::Viewer, PEER, TENANT, NOW)?, claims(1));
     Ok(())
 }
 
@@ -177,7 +179,10 @@ fn a_key_must_be_valid_for_the_whole_token_life() -> TestResult {
         "signing key is outside its validity period"
     );
     let exact = setup_with(&relay_keys_text(NOW - HEAD_START, NOW + LIFETIME - HEAD_START, false), SMALL_CAP)?;
-    assert_eq!(verify_token(&exact.verifier, &token_for(&early)?, PEER, TENANT, NOW)?, early);
+    assert_eq!(
+        verify_token(&exact.verifier, &token_for(&early)?, Role::Viewer, PEER, TENANT, NOW)?,
+        early
+    );
     Ok(())
 }
 
@@ -189,8 +194,8 @@ fn a_backward_clock_step_does_not_revive_a_token_expired_by_an_earlier_reading()
     brief.expires_at = NOW + HALF_LIFETIME;
     let brief_token = token_for(&brief)?;
     let long_token = token_for(&claims(SECOND_NONCE))?;
-    verify_token(&setup.verifier, &brief_token, PEER, TENANT, NOW)?;
-    verify_token(&setup.verifier, &long_token, PEER, TENANT, NOW + HALF_LIFETIME)?;
+    verify_token(&setup.verifier, &brief_token, Role::Viewer, PEER, TENANT, NOW)?;
+    verify_token(&setup.verifier, &long_token, Role::Viewer, PEER, TENANT, NOW + HALF_LIFETIME)?;
     assert_eq!(refusal_at(&setup, &brief_token, NOW)?, "token is expired");
     assert_eq!(refusal_at(&setup, &long_token, NOW)?, "token was already used");
     Ok(())
@@ -201,7 +206,7 @@ fn a_backward_clock_step_does_not_revive_a_token_expired_by_an_earlier_reading()
 fn trailing_bytes_after_the_claims_are_refused() -> TestResult {
     let setup = setup()?;
     let padded = [postcard::to_stdvec(&claims(1))?, vec![0]].concat();
-    let refusal = verify_token(&setup.verifier, &seal_claims(padded, RELAY_SEED)?, PEER, TENANT, NOW);
+    let refusal = verify_token(&setup.verifier, &seal_claims(padded, RELAY_SEED)?, Role::Viewer, PEER, TENANT, NOW);
     assert!(matches!(refusal, Err(TokenError::Malformed(CodecError::TrailingBytes))));
     Ok(())
 }
@@ -212,7 +217,7 @@ fn claims_are_not_decoded_before_the_signature_is_verified() -> TestResult {
     let setup = setup()?;
     let garbage = vec![GARBAGE_BYTE; GARBAGE_LENGTH];
     assert_eq!(refusal_at(&setup, &seal_claims(garbage.clone(), OTHER_SEED)?, NOW)?, "bad signature");
-    let decoded = verify_token(&setup.verifier, &seal_claims(garbage, RELAY_SEED)?, PEER, TENANT, NOW);
+    let decoded = verify_token(&setup.verifier, &seal_claims(garbage, RELAY_SEED)?, Role::Viewer, PEER, TENANT, NOW);
     assert!(matches!(decoded, Err(TokenError::Malformed(CodecError::Postcard(_)))));
     Ok(())
 }
@@ -258,7 +263,9 @@ fn a_bad_envelope_and_bad_base64_are_refused() -> TestResult {
 fn an_oversize_token_is_refused_before_any_decoding() -> TestResult {
     let setup = setup()?;
     let oversize = "!".repeat(MAX_TOKEN_BYTES + 1);
-    let refused = check_token(&setup.verifier, &oversize, PEER, TENANT, NOW).err().ok_or("accepted")?;
+    let refused = check_token(&setup.verifier, &oversize, Role::Viewer, PEER, TENANT, NOW)
+        .err()
+        .ok_or("accepted")?;
     assert!(matches!(refused, TokenError::TooLarge));
     assert!(refusal_at(&setup, &"A".repeat(MAX_TOKEN_BYTES), NOW)?.starts_with("malformed token"));
     Ok(())

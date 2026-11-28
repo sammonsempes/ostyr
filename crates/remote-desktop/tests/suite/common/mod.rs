@@ -6,7 +6,7 @@ use core_config::reload::{ReloadContext, ReloadEngine};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::SigningKey;
 use remote_desktop::keys::open_keys_engine;
-use remote_desktop::model::{RelayClaims, RelayKeys, Verifier, NONCE_LENGTH, SESSION_ID_LENGTH};
+use remote_desktop::model::{ConnType, RelayClaims, RelayKeys, Role, Verifier, NONCE_LENGTH, SESSION_ID_LENGTH};
 use remote_desktop::sign::memory_signer;
 use remote_desktop::token::{issue_token, open_verifier, seal};
 use std::fs;
@@ -156,6 +156,8 @@ pub fn engine_at(path: &Path, agent_keys: Option<&Path>) -> Result<Arc<ReloadEng
 pub fn claims(nonce: u8) -> RelayClaims {
     RelayClaims {
         key_id: KEY_ID.to_owned(),
+        role: Role::Viewer,
+        conn_type: ConnType::DefaultConn,
         tenant: TENANT.to_owned(),
         session_id: [nonce; SESSION_ID_LENGTH],
         device_peer_id: PEER.to_owned(),

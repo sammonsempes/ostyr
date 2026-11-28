@@ -2,8 +2,8 @@ use crate::claims::{check_claims, check_expectation, check_issuable};
 use crate::codec::{decode_exact, signing_message};
 use crate::error::{IssueError, TokenError, VerifierError};
 use crate::model::{
-    Envelope, RelayClaims, RelayKey, RelayKeys, ReplaySet, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING,
-    MAX_TOKEN_BYTES,
+    Envelope, LegacyClaims, RelayClaims, RelayKey, RelayKeys, ReplaySet, Role, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS,
+    MAX_LIVE_TOKENS_CEILING, MAX_TOKEN_BYTES,
 };
 use crate::replay::{accept_nonce, observe_clock};
 use crate::types::SignerFn;
@@ -113,6 +113,24 @@ pub fn check_times(claims: &RelayClaims, now: u64) -> Result<(), TokenError> {
 }
 
 
+pub fn check_role(claims: &RelayClaims, expected_role: Role) -> Result<(), TokenError> {
+    if claims.role == expected_role {
+        Ok(())
+    } else {
+        Err(TokenError::WrongRole)
+    }
+}
+
+
+/// A layout without role and conn_type is named, never defaulted.
+pub fn decode_claims(bytes: &[u8]) -> Result<RelayClaims, TokenError> {
+    decode_exact::<RelayClaims>(bytes).map_err(|refusal| match decode_exact::<LegacyClaims>(bytes) {
+        Ok(_) => TokenError::MissingRole,
+        Err(_) => TokenError::Malformed(refusal),
+    })
+}
+
+
 pub fn check_target(claims: &RelayClaims, expected_peer: &str, expected_tenant: &str) -> Result<(), TokenError> {
     if claims.device_peer_id != expected_peer {
         Err(TokenError::WrongPeer)
@@ -124,8 +142,15 @@ pub fn check_target(claims: &RelayClaims, expected_peer: &str, expected_tenant: 
 }
 
 
-/// The signature is verified over the received bytes before the claims are decoded; the single-use check comes last so a refused token burns nothing.
-pub fn check_token(verifier: &Verifier, token: &str, expected_peer: &str, expected_tenant: &str, now: u64) -> Result<RelayClaims, TokenError> {
+/// Signature before claims decode, single use last so a refusal burns nothing; never logs, the caller counts refusals.
+pub fn check_token(
+    verifier: &Verifier,
+    token: &str,
+    expected_role: Role,
+    expected_peer: &str,
+    expected_tenant: &str,
+    now: u64,
+) -> Result<RelayClaims, TokenError> {
     check_expectation(expected_peer, expected_tenant)?;
     check_size(token)?;
     let clock = observe_clock(verifier, now);
@@ -135,20 +160,28 @@ pub fn check_token(verifier: &Verifier, token: &str, expected_peer: &str, expect
     let key = keys.keys.get(&envelope.key_id).ok_or(TokenError::UnknownKey)?;
     check_key(key, clock)?;
     check_signature(key, &envelope)?;
-    let claims: RelayClaims = decode_exact(&envelope.claims)?;
+    let claims = decode_claims(&envelope.claims)?;
     check_claims(&claims)?;
     check_binding(&envelope.key_id, &claims)?;
     check_times(&claims, clock)?;
     check_key_covers(key, &claims)?;
     check_target(&claims, expected_peer, expected_tenant)?;
+    check_role(&claims, expected_role)?;
     accept_nonce(verifier, claims.nonce, claims.expires_at, clock)?;
     Ok(claims)
 }
 
 
 /// Fails closed; the refusal is logged with its reason only, never with the claims.
-pub fn verify_token(verifier: &Verifier, token: &str, expected_peer: &str, expected_tenant: &str, now: u64) -> Result<RelayClaims, TokenError> {
-    check_token(verifier, token, expected_peer, expected_tenant, now).inspect_err(|refusal| {
+pub fn verify_token(
+    verifier: &Verifier,
+    token: &str,
+    expected_role: Role,
+    expected_peer: &str,
+    expected_tenant: &str,
+    now: u64,
+) -> Result<RelayClaims, TokenError> {
+    check_token(verifier, token, expected_role, expected_peer, expected_tenant, now).inspect_err(|refusal| {
         let reason = refusal.to_string();
         warn!(reason = reason.as_str(), "relay token refused");
     })

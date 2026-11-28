@@ -2,7 +2,7 @@ use crate::common::types::TestResult;
 use crate::common::{claims, setup, signing_key, token_for, KEY_ID, NOW, PEER, RELAY_SEED, SECOND_NONCE, TENANT};
 use remote_desktop::claims::{check_claims, check_expectation, check_issuable, check_key_id, check_peer, check_subject};
 use remote_desktop::error::{ClaimError, IssueError, TokenError};
-use remote_desktop::model::{MAX_KEY_ID_BYTES, MAX_LIFETIME_SECONDS, MAX_PEER_ID_DIGITS, MAX_SUBJECT_BYTES};
+use remote_desktop::model::{Role, MAX_KEY_ID_BYTES, MAX_LIFETIME_SECONDS, MAX_PEER_ID_DIGITS, MAX_SUBJECT_BYTES};
 use remote_desktop::sign::memory_signer;
 use remote_desktop::token::{issue_token, seal, verify_token};
 
@@ -108,12 +108,16 @@ fn a_hand_signed_token_with_bad_claims_is_refused_at_verify() -> TestResult {
     let mut hostile = claims(1);
     hostile.viewer_subject = HOMOGLYPH_SUBJECT.to_owned();
     let token = seal(&signer, KEY_ID, postcard::to_stdvec(&hostile)?)?;
-    let refused = verify_token(&setup.verifier, &token, PEER, TENANT, NOW).err().ok_or("accepted")?;
+    let refused = verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW)
+        .err()
+        .ok_or("accepted")?;
     assert!(matches!(refused, TokenError::Claims(ClaimError::Subject)));
     let mut bad_key = claims(SECOND_NONCE);
     bad_key.key_id = "../k".to_owned();
     let key_token = seal(&signer, KEY_ID, postcard::to_stdvec(&bad_key)?)?;
-    let key_refused = verify_token(&setup.verifier, &key_token, PEER, TENANT, NOW).err().ok_or("accepted")?;
+    let key_refused = verify_token(&setup.verifier, &key_token, Role::Viewer, PEER, TENANT, NOW)
+        .err()
+        .ok_or("accepted")?;
     assert!(matches!(key_refused, TokenError::Claims(ClaimError::KeyId)));
     Ok(())
 }
@@ -130,11 +134,13 @@ fn an_invalid_expectation_is_refused_before_the_token_is_read() -> TestResult {
         [("", TENANT), (PEER, ""), ("12a", TENANT), (PEER, "-x")]
             .iter()
             .try_for_each(|(peer, tenant)| {
-                let refused = verify_token(&setup.verifier, input, peer, tenant, NOW).err().ok_or("accepted")?;
+                let refused = verify_token(&setup.verifier, input, Role::Viewer, peer, tenant, NOW)
+                    .err()
+                    .ok_or("accepted")?;
                 assert_eq!(refused.to_string(), "the expected peer or tenant is invalid");
                 Ok::<(), Box<dyn std::error::Error>>(())
             })
     })?;
-    assert!(verify_token(&setup.verifier, &token, PEER, TENANT, NOW).is_ok());
+    assert!(verify_token(&setup.verifier, &token, Role::Viewer, PEER, TENANT, NOW).is_ok());
     Ok(())
 }

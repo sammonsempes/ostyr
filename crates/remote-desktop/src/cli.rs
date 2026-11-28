@@ -1,6 +1,6 @@
 use crate::error::{CliError, TokenError};
 use crate::model::{
-    IssueRequest, Line, RelayClaims, Verifier, GROUP_OTHER_MASK, MAX_SEED_FILE_BYTES, MAX_TOKEN_BYTES, PUBLIC_FILE_MODE, SEED_FILE_MODE,
+    IssueRequest, Line, RelayClaims, Role, Verifier, GROUP_OTHER_MASK, MAX_SEED_FILE_BYTES, MAX_TOKEN_BYTES, PUBLIC_FILE_MODE, SEED_FILE_MODE,
 };
 use crate::sign::{memory_signer, new_identifiers};
 use crate::token::{issue_token, verify_token};
@@ -178,6 +178,8 @@ pub fn write_issued<Output: Write>(args: &[&str], now: u64, fill: FillFn, out: &
             let (session_id, nonce) = new_identifiers(fill)?;
             let claims = RelayClaims {
                 key_id: request.key_id,
+                role: request.role,
+                conn_type: request.conn_type,
                 tenant: request.tenant,
                 session_id,
                 device_peer_id: request.device_peer_id,
@@ -210,11 +212,11 @@ pub fn read_line<Input: BufRead>(input: &mut Input) -> io::Result<Option<Line>> 
 }
 
 
-pub fn line_verdict(verifier: &Verifier, line: &Line, expected_peer: &str, expected_tenant: &str, now: u64) -> String {
+pub fn line_verdict(verifier: &Verifier, line: &Line, expected_role: Role, expected_peer: &str, expected_tenant: &str, now: u64) -> String {
     match line {
         Line::TooLong => format!("refused {}", TokenError::TooLarge),
         Line::Text(bytes) => match std::str::from_utf8(bytes) {
-            Ok(text) => match verify_token(verifier, text.trim(), expected_peer, expected_tenant, now) {
+            Ok(text) => match verify_token(verifier, text.trim(), expected_role, expected_peer, expected_tenant, now) {
                 Ok(claims) => format!("accepted {}", HEXLOWER.encode(&claims.session_id)),
                 Err(refusal) => format!("refused {refusal}"),
             },
@@ -230,11 +232,12 @@ pub fn verify_session<Input: BufRead, Output: Write>(
     mut input: Input,
     out: &mut Output,
     clock: fn() -> u64,
+    expected_role: Role,
     expected_peer: &str,
     expected_tenant: &str,
 ) -> Result<(), CliError> {
     std::iter::from_fn(|| read_line(&mut input).transpose()).try_for_each(|line| {
-        let verdict = line_verdict(verifier, &line?, expected_peer, expected_tenant, clock());
+        let verdict = line_verdict(verifier, &line?, expected_role, expected_peer, expected_tenant, clock());
         writeln!(out, "{verdict}")?;
         Ok(out.flush()?)
     })

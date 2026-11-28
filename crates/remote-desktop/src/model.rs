@@ -71,9 +71,43 @@ pub struct Envelope {
 }
 
 
+/// Which half of a relay session the token admits: the viewer, or the device endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Viewer,
+    Device,
+}
+
+
+/// The RustDesk `ConnType` values the product issues; today only `DEFAULT_CONN` (value 0 of `hbb_common` `rendezvous.proto`), a remote desktop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnType {
+    #[default]
+    DefaultConn,
+}
+
+
+/// The claims layout before `role` and `conn_type` existed; decoded only to name a roleless token.
+#[derive(Debug, Deserialize)]
+pub struct LegacyClaims {
+    pub key_id: String,
+    pub tenant: String,
+    pub session_id: [u8; SESSION_ID_LENGTH],
+    pub device_peer_id: String,
+    pub viewer_subject: String,
+    pub not_before: u64,
+    pub expires_at: u64,
+    pub nonce: Nonce,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayClaims {
     pub key_id: String,
+    pub role: Role,
+    pub conn_type: ConnType,
     pub tenant: String,
     pub session_id: [u8; SESSION_ID_LENGTH],
     pub device_peer_id: String,
@@ -91,6 +125,10 @@ pub struct IssueRequest {
     pub key_id: String,
     pub tenant: String,
     pub device_peer_id: String,
+    pub role: Role,
+    #[serde(default)]
+    pub conn_type: ConnType,
+    #[serde(default)]
     pub viewer_subject: String,
     pub lifetime_seconds: u64,
 }
