@@ -51,7 +51,7 @@ pub const SHELL_PATHS: &[&str] = &["/bin/sh", "/usr/bin/sh"];
 pub const GATE_FILE: &str = "gate.sh";
 
 
-pub const GATE_SCRIPT: &str = "read -r gate\nexec \"$@\" </dev/null\n";
+pub const GATE_SCRIPT: &str = "read -r gate || exit 1\nexec \"$@\" </dev/null\n";
 
 
 pub const GATE_RELEASE: &[u8] = b"\n";
