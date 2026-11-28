@@ -40,6 +40,10 @@ pub const ACTION_NAMES: &[&str] = &[
     "install_updates",
     "reboot",
     "open_shell",
+    "stop",
+    "quarantine",
+    "restore_quarantine",
+    "scan",
 ];
 
 
@@ -53,11 +57,30 @@ pub const SENSITIVE_ACTION_NAMES: &[&str] = &[
     "install_updates",
     "reboot",
     "open_shell",
+    "stop",
+    "quarantine",
+    "restore_quarantine",
+    "scan",
 ];
 
 
 /// Kinds that only a key scoped to exactly that one kind may sign.
 pub const EXCLUSIVE_ACTIONS: &[&str] = &["open_shell"];
+
+
+pub const MAX_AGENT_PATH_BYTES: usize = 4_096;
+
+
+pub const MAX_QUARANTINE_BYTES: u64 = 268_435_456;
+
+
+pub const MIN_STOP_SECONDS: u32 = 60;
+
+
+pub const MAX_STOP_SECONDS: u32 = 86_400;
+
+
+pub const SHA256_HEX_LENGTH: usize = 64;
 
 
 pub const MAX_SHELL_APPROVERS: usize = 16;
@@ -140,6 +163,21 @@ pub enum Action {
         approvers: Vec<String>,
         max_seconds: u32,
         idle_seconds: u32,
+    },
+    Stop {
+        resume_after_seconds: u32,
+    },
+    Quarantine {
+        path: String,
+        sha256: String,
+        size: u64,
+    },
+    RestoreQuarantine {
+        entry: u64,
+        sha256: String,
+    },
+    Scan {
+        path: String,
     },
 }
 

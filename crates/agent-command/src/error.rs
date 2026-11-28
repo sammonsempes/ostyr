@@ -53,6 +53,20 @@ pub enum ActionError {
     ShellIdleSeconds,
     #[error("the kill boot id is invalid")]
     KillBootId,
+    #[error("the stop resume delay is invalid")]
+    StopSeconds,
+    #[error("the quarantine path is invalid")]
+    QuarantinePath,
+    #[error("the quarantine sha256 is invalid")]
+    QuarantineSha256,
+    #[error("the quarantine size is invalid")]
+    QuarantineSize,
+    #[error("the restore entry is invalid")]
+    RestoreEntry,
+    #[error("the restore sha256 is invalid")]
+    RestoreSha256,
+    #[error("the scan path is invalid")]
+    ScanPath,
 }
 
 

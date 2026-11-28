@@ -17,10 +17,13 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+unicode-general-category = "1"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+status-page = { path = "../status-page" }
 
 [lints]
 workspace = true

@@ -169,6 +169,19 @@ fn all_actions() -> Vec<Action> {
             max_seconds: 1,
             idle_seconds: 1,
         },
+        Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS,
+        },
+        Action::Quarantine {
+            path: "/tmp/a".to_owned(),
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            size: 1,
+        },
+        Action::RestoreQuarantine {
+            entry: 1,
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        },
+        Action::Scan { path: "/tmp".to_owned() },
     ]
 }
 
