@@ -21,6 +21,8 @@ readonly PLAYBOOKS="the playbooks service is hardened, runs as 65533 and holds o
 readonly NATS_HARD="the nats service is hardened, pinned by digest, publishes no port and holds only its three secrets"
 readonly GATEWAY_HARD="the gateway service is hardened, runs as 65534 and holds only its five secrets"
 readonly RELAY_HARD="the relay service is hardened, runs as 65531 and holds no secret"
+readonly RELAY_ISOLATED="the relay joins exactly relay_edge and the internal relay_net it shares with the gateway, and no other service joins relay_edge"
+readonly AGREE="the gateway, relay and channel settings name the same addresses and ports"
 readonly CH_HARD="the clickhouse service is hardened, pinned by digest, publishes no port and holds only its three secrets"
 readonly CHSCHEMA_HARD="the chschema service is hardened, runs as 65530 and holds only the CA and its password"
 readonly SIEM_HARD="the siem service is hardened, runs as 65529 and holds only the CA and its two passwords"
@@ -31,6 +33,7 @@ readonly INGEST_USERS="the ingest settings files name their own ClickHouse and N
 readonly NATS_GOLDEN="the nats.conf written by the real init.sh equals the committed golden file"
 readonly NATS_REFUSES="init.sh refuses an existing nats.conf that is not its own rendering, by name"
 readonly NATS_SCOPED="the NATS consumer accounts are scoped to one durable each and have no create or purge subject"
+readonly CH_BOUNDED="ClickHouse bounds its memory and keeps free disk space"
 readonly CH_ONE_IMAGE="both ClickHouse services use one pinned image"
 readonly CH_USERS="ClickHouse has no default user, four hashed users on the compose subnet and a readonly=2 reader"
 readonly CH_DEFINER="the ClickHouse materialised views run as schema, so the metrics writer needs no SELECT"
@@ -74,6 +77,9 @@ declare -A STATIC_REFUSAL=(
     [gateway_bind_secrets]="$BINDS" [gateway_state_shared]="$BINDS" [gateway_log_debug]="$GATEWAY_HARD" [gateway_root]="$GATEWAY_HARD" [gateway_ip_moved]="$GATEWAY_HARD"
     [relay_cap_add]="$CAPS" [relay_secret_extra]="$RELAY_HARD" [relay_publish_extra]="$PORTS" [relay_bind_secrets]="$BINDS"
     [relay_state_shared]="$BINDS" [relay_root]="$RELAY_HARD" [relay_ip_moved]="$RELAY_HARD"
+    [gateway_relay_ip_moved]="$AGREE" [relay_back_on_default]="$RELAY_ISOLATED" [relay_net_not_internal]="$RELAY_ISOLATED" [relay_edge_shared]="$RELAY_ISOLATED"
+    [relay_edge_dropped]="$RELAY_ISOLATED" [relay_config_mount]="$BINDS" [relay_extra_hosts]="$GRAMMAR" [relay_network_mode_host]="$GRAMMAR"
+    [relay_subnet_overlap]="$RELAY_ISOLATED" [relay_forwarding_on]="$RELAY_HARD" [gateway_forwarding_on]="$GATEWAY_HARD"
     [clickhouse_cap_add]="$CAPS" [clickhouse_publish]="$CH_HARD" [clickhouse_secret_extra]="$CH_HARD" [clickhouse_bind_secrets]="$BINDS"
     [clickhouse_state_shared]="$BINDS" [clickhouse_unpinned]="$PINNED" [clickhouse_root]="$CH_HARD" [clickhouse_writable]="$HARDENED"
     [siem_cap_add]="$CAPS" [siem_publish]="$SIEM_HARD" [siem_secret_metrics]="$SIEM_HARD" [siem_secret_admin]="$SIEM_HARD" [siem_bind_secrets]="$BINDS"
@@ -90,7 +96,7 @@ declare -A PARSED_REFUSAL=()
 for mutant in "${!STATIC_REFUSAL[@]}"; do
     PARSED_REFUSAL[$mutant]="$PARSED"
 done
-unset 'PARSED_REFUSAL[dollar_default]' 'PARSED_REFUSAL[esc_secopt]' 'PARSED_REFUSAL[esc_pgcmd]' 'PARSED_REFUSAL[esc_tmpfs]' 'PARSED_REFUSAL[env_passthrough]' 'PARSED_REFUSAL[bin_capadd]' 'PARSED_REFUSAL[bin_pgsecret]' 'PARSED_REFUSAL[bin_platform_cmd]' 'PARSED_REFUSAL[flow_anchor]' 'PARSED_REFUSAL[flow_alias]'
+unset 'PARSED_REFUSAL[relay_network_mode_host]' 'PARSED_REFUSAL[dollar_default]' 'PARSED_REFUSAL[esc_secopt]' 'PARSED_REFUSAL[esc_pgcmd]' 'PARSED_REFUSAL[esc_tmpfs]' 'PARSED_REFUSAL[env_passthrough]' 'PARSED_REFUSAL[bin_capadd]' 'PARSED_REFUSAL[bin_pgsecret]' 'PARSED_REFUSAL[bin_platform_cmd]' 'PARSED_REFUSAL[flow_anchor]' 'PARSED_REFUSAL[flow_alias]'
 for mutant in "${!STRAY_REFUSAL[@]}"; do
     PARSED_REFUSAL[$mutant]="$PARSED"
 done
@@ -181,6 +187,7 @@ file_static_runs() {
     file_static_run metrics_select_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples|GRANT INSERT, SELECT ON $CLICKHOUSE_DATABASE.metric_samples|' "$CH_USERS"
     file_static_run metrics_rollup_granted STATIC_TEST_INIT_FILE "$init" 's|GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_samples</query>|&<query>GRANT INSERT ON $CLICKHOUSE_DATABASE.metric_rollup_1m</query>|' "$CH_USERS"
     file_static_run view_definer_removed STATIC_TEST_CH_SCHEMA_FILE "$schema" '0,/ DEFINER = schema SQL SECURITY DEFINER AS$/s// AS/' "$CH_DEFINER"
+    file_static_run feature_tier_dropped STATIC_TEST_CH_CONFIG_FILE "$config" '/allow_feature_tier/d' "$CH_BOUNDED"
     file_static_run handlers_defaults_back STATIC_TEST_CH_CONFIG_FILE "$config" 's|<http_handlers>|<http_handlers><defaults/>|' "$CH_NO_PAGE"
     file_static_run handlers_play_added STATIC_TEST_CH_CONFIG_FILE "$config" 's|<url>/ping</url>|<url>/play</url>|' "$CH_NO_PAGE"
     file_static_run gateway_san_widened STATIC_TEST_INIT_FILE "$init" 's|DNS:gateway "$scratch"|DNS:gateway,DNS:platform "$scratch"|' "$GATEWAY_SAN"
@@ -203,6 +210,9 @@ file_static_runs() {
     file_static_run nats_accounts_redefined STATIC_TEST_INIT_FILE "$init" 's|^make_nats_conf() {$|nats_accounts() { printf "accounts { }\\n"; }\n\n&|' "$NATS_GOLDEN"
     file_static_run nats_jetstream_widened STATIC_TEST_INIT_FILE "$init" 's|^                        "$NATS_DEAD_SUBJECT"$|&\n                        "\\$JS.API.STREAM.DELETE.events"|' "$NATS_GOLDEN"
     file_static_run nats_refusal_removed STATIC_TEST_INIT_FILE "$init" '/^make_nats_conf() {$/,/^make_clickhouse_users() {$/s|if ! cmp -s "$SECRETS_DIR/$name" "$temporary"; then|if false; then|' "$NATS_REFUSES"
+    config_static_run relay_listen_wildcard gateway-server.yaml 's|^relay_listen: "172.29.64.11:7443"|relay_listen: "0.0.0.0:7443"|' "$AGREE"
+    config_static_run relay_sources_default_ip channel-settings.yaml 's|^relay_sources: \[172.29.64.12\]|relay_sources: [172.29.63.12]|' "$AGREE"
+    config_static_run relay_upstream_moved relay/relay.yaml 's|^upstream: "172.29.64.11:7443"|upstream: "172.29.63.11:7443"|' "$AGREE"
     config_static_run siem_admin_clickhouse siem-ingest.yaml 's|^clickhouse_user: ingest|clickhouse_user: schema|' "$INGEST_USERS"
     config_static_run metrics_nats_siem metrics-ingest.yaml 's|nats_user: metrics_ingest|nats_user: siem_ingest|' "$INGEST_USERS"
     config_static_run alerts_writer_clickhouse metric-alerts-fetch.yaml 's|^user: reader|user: ingest|' "$INGEST_USERS"

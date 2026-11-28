@@ -11,6 +11,28 @@
         ]
       },
       "name": "ostyr_default"
+    },
+    "relay_edge": {
+      "ipam": {
+        "config": [
+          {
+            "subnet": "172.29.65.0/24"
+          }
+        ]
+      },
+      "name": "ostyr_relay_edge"
+    },
+    "relay_net": {
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "ip_range": "172.29.64.128/25",
+            "subnet": "172.29.64.0/24"
+          }
+        ]
+      },
+      "name": "ostyr_relay_net"
     }
   },
   "secrets": {
@@ -270,6 +292,9 @@
       "networks": {
         "default": {
           "ipv4_address": "172.29.63.11"
+        },
+        "relay_net": {
+          "ipv4_address": "172.29.64.11"
         }
       },
       "pull_policy": "never",
@@ -300,6 +325,9 @@
       "security_opt": [
         "no-new-privileges:true"
       ],
+      "sysctls": {
+        "net.ipv4.ip_forward": "0"
+      },
       "user": "65534:65534",
       "volumes": [
         {
@@ -721,7 +749,7 @@
       ],
       "command": [
         "/usr/local/bin/ostyr-relay",
-        "/etc/ostyr/relay.yaml",
+        "/etc/ostyr/relay/relay.yaml",
         "/var/lib/ostyr-relay/relay-audit.log"
       ],
       "depends_on": {
@@ -733,8 +761,9 @@
       "entrypoint": null,
       "image": "ostyr-platform:local",
       "networks": {
-        "default": {
-          "ipv4_address": "172.29.63.12"
+        "relay_edge": {},
+        "relay_net": {
+          "ipv4_address": "172.29.64.12"
         }
       },
       "ports": [
@@ -752,6 +781,9 @@
       "security_opt": [
         "no-new-privileges:true"
       ],
+      "sysctls": {
+        "net.ipv4.ip_forward": "0"
+      },
       "user": "65531:65531",
       "volumes": [
         {
@@ -759,8 +791,8 @@
             "create_host_path": true
           },
           "read_only": true,
-          "source": "config",
-          "target": "/etc/ostyr",
+          "source": "config/relay",
+          "target": "/etc/ostyr/relay",
           "type": "bind"
         },
         {

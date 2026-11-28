@@ -115,6 +115,8 @@ services:
     environment:
       RUST_LOG: info
     command: ["/usr/local/bin/ostyr-event-gateway", "/etc/ostyr/gateway-server.yaml", "/etc/ostyr/gateway.yaml"]
+    sysctls:
+      - net.ipv4.ip_forward=0
     depends_on:
       - nats
     secrets: [pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password]
@@ -124,6 +126,8 @@ services:
     networks:
       default:
         ipv4_address: 172.29.63.11
+      relay_net:
+        ipv4_address: 172.29.64.11
   relay:
     image: ostyr-platform:local
     pull_policy: never
@@ -132,15 +136,18 @@ services:
     user: 65531:65531
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    command: ["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"]
+    command: ["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"]
+    sysctls:
+      - net.ipv4.ip_forward=0
     depends_on:
       - gateway
     volumes:
-      - ./config:/etc/ostyr:ro
+      - ./config/relay:/etc/ostyr/relay:ro
       - relaystate:/var/lib/ostyr-relay
     networks:
-      default:
-        ipv4_address: 172.29.63.12
+      relay_edge: {}
+      relay_net:
+        ipv4_address: 172.29.64.12
     ports:
       - "0.0.0.0:7443:7443"
   clickhouse:
@@ -243,6 +250,16 @@ networks:
       config:
         - subnet: 172.29.63.0/24
           ip_range: 172.29.63.128/25
+  relay_edge:
+    ipam:
+      config:
+        - subnet: 172.29.65.0/24
+  relay_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.64.0/24
+          ip_range: 172.29.64.128/25
 volumes:
   pgdata: {}
   state: {}

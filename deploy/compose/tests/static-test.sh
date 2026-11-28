@@ -13,9 +13,9 @@ readonly CH_CONFIG_FILE="${STATIC_TEST_CH_CONFIG_FILE:-$COMPOSE_DIR/config/click
 readonly CH_SCHEMA_FILE="${STATIC_TEST_CH_SCHEMA_FILE:-$COMPOSE_DIR/config/clickhouse-schema.sql}"
 readonly CONFIG_DIR="${STATIC_TEST_CONFIG_DIR:-$COMPOSE_DIR/config}"
 readonly PROJECT_DIR="${STATIC_TEST_PROJECT_DIR:-$COMPOSE_DIR}"
-readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE siem metrics metricalerts siemstate metricsstate alertsstate clickhouse_ingest_password clickhouse_metrics_password nats_siem_password nats_metrics_password metricalerts_pg_password metricalerts_clickhouse_password ${STATIC_TEST_EXTRA_KEYS:-}"
+readonly ALLOWED_KEYS="name services postgres platform web image restart read_only cap_drop cap_add security_opt environment POSTGRES_PASSWORD_FILE entrypoint command secrets volumes tmpfs healthcheck test interval timeout retries pull_policy depends_on condition networks default ipv4_address ports ipam config subnet ip_range sysctls internal relay_edge relay_net pgdata state webstate playbooks playbooksstate user file pg_password pg_service_password pg_server_key pg_server_cert pg_ca playbooks_pg_password api_tls_key api_tls_cert store_key nats gateway relay natsdata gatewaystate relaystate gateway_tls_key gateway_tls_cert nats_server_key nats_server_cert nats_conf agent_ca nats_gateway_password RUST_LOG clickhouse chschema chdata clickhouse_server_key clickhouse_server_cert clickhouse_users clickhouse_schema_password CLICKHOUSE_WATCHDOG_ENABLE siem metrics metricalerts siemstate metricsstate alertsstate clickhouse_ingest_password clickhouse_metrics_password nats_siem_password nats_metrics_password metricalerts_pg_password metricalerts_clickhouse_password ${STATIC_TEST_EXTRA_KEYS:-}"
 readonly FLOW_KEYS="cap_drop cap_add security_opt secrets command test"
-readonly BLOCK_KEYS="ports volumes services networks"
+readonly BLOCK_KEYS="ports volumes services networks sysctls"
 failures=0
 
 expect() {
@@ -257,7 +257,8 @@ clickhouse_serves_https_only() {
 
 clickhouse_is_bounded() {
     clickhouse_config_has '    <max_server_memory_usage>2147483648</max_server_memory_usage>' \
-        && clickhouse_config_has '                <keep_free_space_bytes>2147483648</keep_free_space_bytes>'
+        && clickhouse_config_has '                <keep_free_space_bytes>2147483648</keep_free_space_bytes>' \
+        && clickhouse_config_has '    <allow_feature_tier>1</allow_feature_tier>'
 }
 
 clickhouse_users_are_least_privilege() {
@@ -319,7 +320,7 @@ gateway_is_hardened() {
         && gateway_has '^    user: 65534:65534$' \
         && gateway_has '^    secrets: \[pg_ca, gateway_tls_key, gateway_tls_cert, agent_ca, nats_gateway_password\]$' \
         && gateway_has '^    command: \["/usr/local/bin/ostyr-event-gateway", "/etc/ostyr/gateway-server.yaml", "/etc/ostyr/gateway.yaml"\]$' \
-        && gateway_has '^        ipv4_address: 172.29.63.11$' && gateway_has '^      RUST_LOG: info$' \
+        && gateway_has '^      - net.ipv4.ip_forward=0$' && gateway_has '^        ipv4_address: 172.29.63.11$' && gateway_has '^      RUST_LOG: info$' \
         && ! gateway_has '^    ports:' && ! gateway_has 'cap_add' && ! gateway_has 'store_key' && ! gateway_has 'pg_service_password' \
         && ! gateway_has 'nats_conf' && ! gateway_has 'api_tls'
 }
@@ -327,9 +328,9 @@ gateway_is_hardened() {
 relay_is_hardened() {
     relay_has '^    read_only: true$' && relay_has '^    cap_drop: \[ALL\]$' && relay_has 'no-new-privileges:true' \
         && relay_has '^    user: 65531:65531$' \
-        && relay_has '^    command: \["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"\]$' \
-        && relay_has '^        ipv4_address: 172.29.63.12$' \
-        && ! relay_has '^    secrets:' && ! relay_has 'cap_add'
+        && relay_has '^    command: \["/usr/local/bin/ostyr-relay", "/etc/ostyr/relay/relay.yaml", "/var/lib/ostyr-relay/relay-audit.log"\]$' \
+        && relay_has '^        ipv4_address: 172.29.64.12$' \
+        && relay_has '^      - net.ipv4.ip_forward=0$' && ! relay_has '^    secrets:' && ! relay_has 'cap_add' && ! relay_has 'network_mode' && ! relay_has 'extra_hosts'
 }
 
 gateway_volume_items() {
@@ -347,22 +348,44 @@ nats_volume_items() {
 agent_path_mounts_only_its_volumes() {
     [[ "$(nats_volume_items)" == '      - natsdata:/data' \
         && "$(gateway_volume_items)" == '      - ./config:/etc/ostyr:ro'$'\n''      - gatewaystate:/var/lib/ostyr-gateway' \
-        && "$(relay_volume_items)" == '      - ./config:/etc/ostyr:ro'$'\n''      - relaystate:/var/lib/ostyr-relay' ]]
+        && "$(relay_volume_items)" == '      - ./config/relay:/etc/ostyr/relay:ro'$'\n''      - relaystate:/var/lib/ostyr-relay' ]]
 }
 
 only_the_relay_publishes_the_agent_port() {
     [[ "$(service_items relay ports)" == '      - "0.0.0.0:7443:7443"' ]] && ! service_has_key nats ports && ! service_has_key gateway ports
 }
 
+relay_net_address() {
+    awk '/^      relay_net:$/ {found = 1; next} found {sub(/^        ipv4_address: /, ""); print; found = 0}'
+}
+
 agent_path_addresses_agree() {
     local gateway_address relay_address
-    gateway_address="$(sed -n 's/^        ipv4_address: //p' < <(gateway_service))"
-    relay_address="$(sed -n 's/^        ipv4_address: //p' < <(relay_service))"
-    grep -qx "relay_listen: \"$gateway_address:7443\"" "$COMPOSE_DIR/config/gateway-server.yaml" \
-        && grep -qx "upstream: \"$gateway_address:7443\"" "$COMPOSE_DIR/config/relay.yaml" \
-        && grep -qx 'listen: "0.0.0.0:7443"' "$COMPOSE_DIR/config/relay.yaml" \
-        && grep -qx "relay_sources: \[$relay_address\]" "$COMPOSE_DIR/config/channel-settings.yaml" \
-        && grep -qx 'listen: "127.0.0.1:7444"' "$COMPOSE_DIR/config/gateway-server.yaml"
+    gateway_address="$(relay_net_address < <(gateway_service))"
+    relay_address="$(relay_net_address < <(relay_service))"
+    [[ "$gateway_address" =~ ^172\.29\.64\.[0-9]+$ && "$relay_address" =~ ^172\.29\.64\.[0-9]+$ ]] \
+        && grep -qx "relay_listen: \"$gateway_address:7443\"" "$CONFIG_DIR/gateway-server.yaml" \
+        && grep -qx "upstream: \"$gateway_address:7443\"" "$CONFIG_DIR/relay/relay.yaml" \
+        && grep -qx 'listen: "0.0.0.0:7443"' "$CONFIG_DIR/relay/relay.yaml" \
+        && grep -qx "relay_sources: \[$relay_address\]" "$CONFIG_DIR/channel-settings.yaml" \
+        && grep -qx 'listen: "127.0.0.1:7444"' "$CONFIG_DIR/gateway-server.yaml"
+}
+
+service_networks() {
+    awk -v name="$1" '$0 == "  " name ":" {inside = 1; next} /^  [^ ]/ || /^[^ ]/ {inside = 0; found = 0}
+        inside && $0 == "    networks:" {found = 1; next} inside && found && /^      / {print; next} {found = 0}' "$COMPOSE_FILE"
+}
+
+relay_networks_are_isolated() {
+    local expected
+    expected="$(printf '%s\n' 'networks:' '  default:' '    ipam:' '      config:' '        - subnet: 172.29.63.0/24' '          ip_range: 172.29.63.128/25' \
+        '  relay_edge:' '    ipam:' '      config:' '        - subnet: 172.29.65.0/24' '  relay_net:' '    internal: true' '    ipam:' '      config:' \
+        '        - subnet: 172.29.64.0/24' '          ip_range: 172.29.64.128/25')"
+    [[ "$(sed -n '/^networks:$/,/^volumes:$/{/^volumes:$/!p}' "$COMPOSE_FILE")" == "$expected" ]] \
+        && [[ "$(service_networks relay)" == $'      relay_edge: {}\n      relay_net:\n        ipv4_address: 172.29.64.12' ]] \
+        && [[ "$(service_networks gateway)" == $'      default:\n        ipv4_address: 172.29.63.11\n      relay_net:\n        ipv4_address: 172.29.64.11' ]] \
+        && [[ "$(grep -c 'relay_edge' "$COMPOSE_FILE")" -eq 2 && "$(grep -c 'relay_net' "$COMPOSE_FILE")" -eq 3 ]] \
+        && ! grep -q -e 'network_mode' -e 'extra_hosts' "$COMPOSE_FILE"
 }
 
 gateway_files_use_only_its_secrets_and_state() {
@@ -707,7 +730,7 @@ else
     printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
-    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$COMPOSE_DIR/config/clickhouse-apply.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/clickhouse-proof.sh" "$TESTS_DIR/ingest-proof.sh" "$TESTS_DIR/mutation-test.sh"
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$COMPOSE_DIR/config/clickhouse-apply.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh" "$TESTS_DIR/module-proof.sh" "$TESTS_DIR/agent-proof.sh" "$TESTS_DIR/lab-accounts.sh" "$TESTS_DIR/clickhouse-proof.sh" "$TESTS_DIR/ingest-proof.sh" "$TESTS_DIR/relay-isolation-proof.sh" "$TESTS_DIR/mutation-test.sh"
 else
     printf 'info shellcheck is not installed: skipped\n'
 fi
@@ -738,6 +761,7 @@ expect "the nats service is hardened, pinned by digest, publishes no port and ho
 expect "the gateway service is hardened, runs as 65534 and holds only its five secrets" gateway_is_hardened
 expect "the relay service is hardened, runs as 65531 and holds no secret" relay_is_hardened
 expect "the gateway, relay and channel settings name the same addresses and ports" agent_path_addresses_agree
+expect "the relay joins exactly relay_edge and the internal relay_net it shares with the gateway, and no other service joins relay_edge" relay_networks_are_isolated
 expect "the gateway files name only its own secrets and state" gateway_files_use_only_its_secrets_and_state
 expect "the NATS user gateway publishes events.* only and subscribes to its own inbox" \
     grep -qF 'permissions: { publish: { allow: ["events.*"] }, subscribe: { allow: ["_INBOX_gateway.>"] } }' "$COMPOSE_DIR/init.sh"
@@ -776,7 +800,7 @@ expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29
 expect "web-ui.yaml serves TLS and verifies the API against the CA" web_yaml_serves_tls_and_verifies_api
 expect "every image is pinned by digest or built locally" images_are_pinned
 expect "every service is read-only, drops capabilities and sets no-new-privileges" all_services_hardened
-expect "no YAML file has a comment" absent grep -n '#' "$COMPOSE_FILE" "$COMPOSE_DIR"/config/*.yaml
+expect "no YAML file has a comment" absent grep -n '#' "$COMPOSE_FILE" "$COMPOSE_DIR"/config/*.yaml "$COMPOSE_DIR"/config/relay/*.yaml
 expect "pg_hba accepts hostssl only" absent grep -E '^host ' "$COMPOSE_DIR/config/pg_hba.conf"
 expect "the only local pg_hba line is the in-container socket" test "$(grep -c '^local ' "$COMPOSE_DIR/config/pg_hba.conf")" -eq 1
 expect "pg_hba admits one role on one database" test "$(grep -c '^hostssl ostyr ostyr_service all scram-sha-256$' "$COMPOSE_DIR/config/pg_hba.conf")" -eq 1
