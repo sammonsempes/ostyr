@@ -1582,6 +1582,19 @@ fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and
             prompt_user: false,
             deadline: 1,
         },
+        Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS,
+        },
+        Action::Quarantine {
+            path: "/tmp/a".to_owned(),
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            size: 1,
+        },
+        Action::RestoreQuarantine {
+            entry: 1,
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        },
+        Action::Scan { path: "/tmp".to_owned() },
     ];
     unsupported.into_iter().for_each(|action| {
         assert_eq!(
@@ -1589,6 +1602,47 @@ fn a_supported_action_without_its_executor_and_every_other_action_is_refused_and
             Err(ExecuteRefusal::Unsupported)
         )
     });
+    assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_four_new_actions_reach_no_executor_even_when_every_executor_is_present() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(WORKER_ROOM);
+    let calls = AtomicU32::new(0);
+    let admit: &ExecuteFn<'_> = &|_command| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let executors = Executors {
+        shell: Some(admit),
+        ping: Some(admit),
+        collect_status: Some(admit),
+        isolate: Some(admit),
+        restart: None,
+    };
+    let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
+    let actions = [
+        Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS,
+        },
+        Action::Quarantine {
+            path: "/tmp/a".to_owned(),
+            sha256: sha256.clone(),
+            size: 1,
+        },
+        Action::RestoreQuarantine { entry: 1, sha256 },
+        Action::Scan { path: "/tmp".to_owned() },
+    ];
+    actions.into_iter().for_each(|action| {
+        assert_eq!(
+            dispatch_command(&sender, &executors, action_command(FIRST, action)),
+            Err(ExecuteRefusal::Unsupported)
+        )
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(receiver.try_recv().is_err());
     Ok(())
 }
@@ -1605,6 +1659,28 @@ fn the_kind_names_are_fixed_and_hold_no_field() -> TestResult {
         "kill"
     );
     assert_eq!(agent_channel::agent_app::action_kind(&Action::Isolate), "isolate");
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::Stop {
+            resume_after_seconds: agent_command::model::MIN_STOP_SECONDS
+        }),
+        "stop"
+    );
+    assert_eq!(agent_channel::agent_app::action_kind(&Action::Scan { path: "/".to_owned() }), "scan");
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::Quarantine {
+            path: String::new(),
+            sha256: String::new(),
+            size: 0
+        }),
+        "quarantine"
+    );
+    assert_eq!(
+        agent_channel::agent_app::action_kind(&Action::RestoreQuarantine {
+            entry: 0,
+            sha256: String::new()
+        }),
+        "restore_quarantine"
+    );
     assert_eq!(agent_channel::agent_app::action_kind(&open_shell_command(FIRST).action), "open_shell");
     Ok(())
 }

@@ -4,6 +4,7 @@ mod keys;
 mod openshell;
 mod patch;
 mod property;
+mod quarantine;
 mod scope;
 mod sign;
 mod store;

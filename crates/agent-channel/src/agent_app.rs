@@ -163,6 +163,10 @@ pub fn action_kind(action: &Action) -> &'static str {
         Action::InstallUpdates { .. } => "install_updates",
         Action::Reboot { .. } => "reboot",
         Action::OpenShell { .. } => "open_shell",
+        Action::Stop { .. } => "stop",
+        Action::Quarantine { .. } => "quarantine",
+        Action::RestoreQuarantine { .. } => "restore_quarantine",
+        Action::Scan { .. } => "scan",
     }
 }
 
@@ -214,7 +218,11 @@ pub fn dispatch_command(sender: &mpsc::Sender<Command>, executors: &Executors<'_
         | Action::Uninstall
         | Action::ChangePolicy { .. }
         | Action::InstallUpdates { .. }
-        | Action::Reboot { .. } => refuse_unsupported(&command),
+        | Action::Reboot { .. }
+        | Action::Stop { .. }
+        | Action::Quarantine { .. }
+        | Action::RestoreQuarantine { .. }
+        | Action::Scan { .. } => refuse_unsupported(&command),
     }
 }
 
