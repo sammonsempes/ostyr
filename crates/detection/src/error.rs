@@ -118,3 +118,32 @@ pub enum RetroError {
     #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
     ReaderProfileChanged(usize),
 }
+
+
+/// Every text is fixed: the cursor file never reaches an error.
+#[derive(Debug, Error)]
+pub enum CursorError {
+    #[error("cannot read the retro cursor file")]
+    Read(#[source] io::Error),
+    #[error("cannot write the retro cursor file")]
+    Write(#[source] io::Error),
+    #[error("the retro cursor file is larger than {0} bytes")]
+    TooLarge(u64),
+    #[error("the retro cursor file is not a valid cursor document")]
+    Corrupt,
+    #[error("the retro cursor file has version {0}")]
+    Version(u32),
+    #[error("a retro cursor is out of range")]
+    Range,
+}
+
+
+#[derive(Debug, Error)]
+pub enum StepError {
+    #[error("the retro read failed")]
+    Read(#[source] RetroError),
+    #[error("the retro alerts could not be stored")]
+    Insert(#[source] SinkError),
+    #[error("the retro cursor could not be saved")]
+    Save(#[source] CursorError),
+}
