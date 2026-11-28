@@ -42,7 +42,7 @@ pub enum TagsError {
     Changed,
     #[error("the tag file does not end with a `complete: sha256:` trailer line, so it may have been cut: run seal-tags")]
     Incomplete,
-    #[error("the tag file changed after it was sealed: run seal-tags")]
+    #[error("the tag file changed after it was sealed: check the body, then run seal-tags --reseal")]
     Altered,
     #[error("CR line endings: write the file with LF")]
     CarriageReturn,
@@ -96,6 +96,10 @@ pub enum SealError {
     UnsafeDirectory,
     #[error("the file is group- or other-writable")]
     UnsafeFile,
+    #[error("the sealed file would be over the runner's cap of {max} bytes")]
+    TooLarge { max: u64 },
+    #[error("the file changed or was replaced since it was read: nothing was written, run seal-tags again")]
+    ChangedBeforeWrite,
     #[error("cannot read or write the file")]
     Io(#[from] std::io::Error),
 }

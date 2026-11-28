@@ -11,9 +11,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 
-/// Size, times, mode and owner of an open handle, taken before and after a read.
+/// Device, inode, size, times, mode and owner of an open handle, taken before and after a read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
+    pub device: u64,
+    pub inode: u64,
     pub size: u64,
     pub modified: (i64, i64),
     pub changed: (i64, i64),
@@ -81,6 +83,8 @@ pub fn refuse_unless_regular(handle: &File, file: &str) -> Result<(), ConfigErro
 pub fn stamp_of(handle: &File, file: &str) -> Result<Stamp, ConfigError> {
     let metadata = handle.metadata().map_err(io_at(file))?;
     Ok(Stamp {
+        device: metadata.dev(),
+        inode: metadata.ino(),
         size: metadata.len(),
         modified: (metadata.mtime(), metadata.mtime_nsec()),
         changed: (metadata.ctime(), metadata.ctime_nsec()),
@@ -104,6 +108,8 @@ pub fn stamp_of(handle: &File, file: &str) -> Result<Stamp, ConfigError> {
         i64::MAX
     });
     Ok(Stamp {
+        device: 0,
+        inode: 0,
         size: metadata.len(),
         modified: (seconds, i64::from(since.subsec_nanos())),
         changed: (0, 0),

@@ -63,6 +63,7 @@ fn the_readme_documents_the_seal_command_and_the_trailer() -> TestResult {
     assert!(text.contains(&format!("({TRAILER_BYTES} bytes)")));
     [
         "ostyr-attack-paths seal-tags [--reseal]",
+        "check the body, then run seal-tags --reseal",
         "`.tmp*` name",
         "-text",
         "CR line endings: write the file with LF",
