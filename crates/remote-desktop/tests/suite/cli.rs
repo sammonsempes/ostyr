@@ -9,7 +9,7 @@ use remote_desktop::cli::{
     write_hex_line, write_issued, write_keypair_files, write_public_hex, write_seed_file_checked, LINE_LIMIT,
 };
 use remote_desktop::error::CliError;
-use remote_desktop::model::{Line, MAX_TOKEN_BYTES};
+use remote_desktop::model::{Line, Role, MAX_TOKEN_BYTES};
 use remote_desktop::sign::{new_identifiers, os_random};
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 
@@ -133,6 +133,7 @@ fn run(input: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
         BufReader::with_capacity(SMALL_CHUNK, input),
         &mut out,
         clock,
+        Role::Viewer,
         PEER,
         TENANT,
     )?;
@@ -141,7 +142,7 @@ fn run(input: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
 
 
 fn json(lifetime: u64, subject: &str) -> String {
-    format!("{{\"key_id\":\"relay-1\",\"tenant\":\"{TENANT}\",\"device_peer_id\":\"{PEER}\",\"viewer_subject\":\"{subject}\",\"lifetime_seconds\":{lifetime}}}")
+    format!("{{\"key_id\":\"relay-1\",\"tenant\":\"{TENANT}\",\"device_peer_id\":\"{PEER}\",\"role\":\"viewer\",\"viewer_subject\":\"{subject}\",\"lifetime_seconds\":{lifetime}}}")
 }
 
 
@@ -591,7 +592,7 @@ fn read_line_bounds_a_line_at_the_limit() -> TestResult {
 fn line_verdict_names_a_too_long_line() -> TestResult {
     let setup = setup()?;
     assert_eq!(
-        line_verdict(&setup.verifier, &Line::TooLong, PEER, TENANT, NOW),
+        line_verdict(&setup.verifier, &Line::TooLong, Role::Viewer, PEER, TENANT, NOW),
         "refused token is too large"
     );
     Ok(())
@@ -602,13 +603,13 @@ fn line_verdict_names_a_too_long_line() -> TestResult {
 fn io_failures_stop_the_session() -> TestResult {
     let setup = setup()?;
     let good = format!("{}\n", token_for(&claims(1))?);
-    let write_fails = verify_session(&setup.verifier, good.as_bytes(), &mut FailingWriter, clock, PEER, TENANT);
+    let write_fails = verify_session(&setup.verifier, good.as_bytes(), &mut FailingWriter, clock, Role::Viewer, PEER, TENANT);
     assert!(matches!(write_fails, Err(CliError::Io(_))));
-    let flush_fails = verify_session(&setup.verifier, good.as_bytes(), &mut FlushFails, clock, PEER, TENANT);
+    let flush_fails = verify_session(&setup.verifier, good.as_bytes(), &mut FlushFails, clock, Role::Viewer, PEER, TENANT);
     assert!(matches!(flush_fails, Err(CliError::Io(_))));
     [0, LINE_LIMIT].iter().try_for_each(|remaining| {
         let reader = BufReader::with_capacity(SMALL_CHUNK, ServesThenFails { remaining: *remaining });
-        let reset = verify_session(&setup.verifier, reader, &mut Vec::new(), clock, PEER, TENANT);
+        let reset = verify_session(&setup.verifier, reader, &mut Vec::new(), clock, Role::Viewer, PEER, TENANT);
         if matches!(reset, Err(CliError::Io(_))) {
             Ok(())
         } else {
@@ -663,5 +664,53 @@ fn the_hex_and_its_newline_go_out_in_one_write() -> TestResult {
     let mut writer = CountingWriter { calls: 0 };
     write_hex_line(&mut writer, b"abcd")?;
     assert_eq!(writer.calls, 1);
+    Ok(())
+}
+
+
+fn issue_failure(seed: &str, request: &str) -> bool {
+    matches!(write_issued(&[seed, request], NOW, os_random, &mut Vec::new()), Err(CliError::Issue(_)))
+}
+
+
+fn request_failure(seed: &str, request: &str) -> bool {
+    matches!(write_issued(&[seed, request], NOW, os_random, &mut Vec::new()), Err(CliError::Request(_)))
+}
+
+
+#[test]
+fn the_cli_issues_a_device_token_that_only_a_device_session_accepts() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let seed = seed_file(&dir, "seed", &HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]), OWNER_ONLY)?;
+    let device_json = format!(
+        "{{\"key_id\":\"relay-1\",\"tenant\":\"{TENANT}\",\"device_peer_id\":\"{PEER}\",\"role\":\"device\",\"lifetime_seconds\":{LIFETIME}}}"
+    );
+    let mut out = Vec::new();
+    write_issued(&[&seed, &device_json], NOW, os_random, &mut out)?;
+    let token = String::from_utf8(out)?;
+    let setup = setup()?;
+    let mut verdicts = Vec::new();
+    verify_session(
+        &setup.verifier,
+        Cursor::new(token.clone()),
+        &mut verdicts,
+        clock,
+        Role::Viewer,
+        PEER,
+        TENANT,
+    )?;
+    verify_session(&setup.verifier, Cursor::new(token), &mut verdicts, clock, Role::Device, PEER, TENANT)?;
+    let text = String::from_utf8(verdicts)?;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.first(), Some(&"refused token is for another role"));
+    assert!(lines.get(1).ok_or("no verdict")?.starts_with("accepted "));
+    let with_subject = device_json.replace("\"role\":\"device\"", "\"role\":\"device\",\"viewer_subject\":\"alice\"");
+    assert!(issue_failure(&seed, &with_subject));
+    assert!(request_failure(&seed, &device_json.replace("\"device\"", "\"admin\"")));
+    assert!(request_failure(
+        &seed,
+        &device_json.replace("\"role\"", "\"conn_type\":\"file_transfer\",\"role\"")
+    ));
+    assert!(request_failure(&seed, &device_json.replace("\"role\":\"device\",", "")));
     Ok(())
 }

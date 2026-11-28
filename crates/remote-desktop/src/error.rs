@@ -24,6 +24,8 @@ pub enum ClaimError {
     Peer,
     #[error("the key id claim is invalid")]
     KeyId,
+    #[error("a device token carries a viewer subject")]
+    DeviceSubject,
 }
 
 
@@ -58,6 +60,10 @@ pub enum TokenError {
     Claims(#[from] ClaimError),
     #[error("the expected peer or tenant is invalid")]
     BadExpectation,
+    #[error("token has no role")]
+    MissingRole,
+    #[error("token is for another role")]
+    WrongRole,
     #[error("token is for another device")]
     WrongPeer,
     #[error("token is for another tenant")]
