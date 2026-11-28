@@ -25,6 +25,10 @@ pub const CLOUD_ID_PREFIX: &str = "k8s:";
 pub const PAGE_OBSERVATIONS: usize = 100;
 
 
+/// `apply_page` runs `apply_attempts` a second time, without creations, when the first run ends in `CapReached`.
+pub const APPLY_RUNS_PER_PAGE: usize = 2;
+
+
 pub const CAUSE_CLIENT_DEADLINE: &str = "client_deadline";
 
 
@@ -428,7 +432,17 @@ pub fn unknown_cause(error: &StoreError) -> Option<&'static str> {
         | StoreError::BadVersion(_)
         | StoreError::BadRefused(_)
         | StoreError::BadDuplicates(_) => Some(CAUSE_BAD_ANSWER),
-        _ => None,
+        StoreError::Cmdb(_)
+        | StoreError::TooManyRows { .. }
+        | StoreError::BadLimits
+        | StoreError::Lease(_)
+        | StoreError::BadPageSize { .. }
+        | StoreError::BadCursor
+        | StoreError::BadId
+        | StoreError::DuplicateConflict { .. }
+        | StoreError::CapReached { .. }
+        | StoreError::VersionConflict
+        | StoreError::RetriesExhausted { .. } => None,
     }
 }
 
