@@ -308,12 +308,13 @@ pub fn parse_structs<'a>(data: &'a [u8], names: &[&str]) -> Result<Parsed<'a>, U
     let mut position = 0;
     let mut steps = 0;
     let mut found = vec![None; names.len()];
+    let mut duplicated = vec![false; names.len()];
     let mut index = Vec::new();
     while position < types.len() && steps < MAX_BTF_TYPES {
         let (next, matched) = walk_type(types, strings, position, names)?;
         index.push(position);
         position = next;
-        record_match(&mut found, matched);
+        record_match(&mut found, &mut duplicated, matched);
         steps += 1;
     }
     walk_complete(position, types.len())?;
@@ -322,6 +323,7 @@ pub fn parse_structs<'a>(data: &'a [u8], names: &[&str]) -> Result<Parsed<'a>, U
         strings,
         index,
         found,
+        duplicated,
     })
 }
 
@@ -336,14 +338,17 @@ pub fn lookup_of<'a>(parsed: &'a Parsed<'a>) -> Lookup<'a> {
 }
 
 
-fn record_match(found: &mut [Option<TaskStruct>], matched: Option<(usize, TaskStruct)>) {
+fn record_match(found: &mut [Option<TaskStruct>], duplicated: &mut [bool], matched: Option<(usize, TaskStruct)>) {
     matched.iter().for_each(|(which, body)| {
         found
             .iter_mut()
+            .zip(duplicated.iter_mut())
             .skip(*which)
             .take(1)
-            .filter(|slot| slot.is_none())
-            .for_each(|slot| *slot = Some(*body));
+            .for_each(|(slot, repeat)| {
+                *repeat = slot.is_some();
+                *slot = slot.or(Some(*body));
+            });
     });
 }
 

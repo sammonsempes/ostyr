@@ -1,6 +1,6 @@
 use ebpf_probes::record::{
     decode_exec, decode_file, exec_time, file_time, DecodeError, FileRecord, FILE_HEADER_WORDS, FILE_PATH_BYTES, FILE_RECORD_BYTES, FILE_RECORD_KIND,
-    STATUS_CUT, STATUS_UNREADABLE,
+    STATUS_PATH_ERROR, STATUS_TOO_LONG, STATUS_UNLINKED,
 };
 use std::error::Error;
 
@@ -17,7 +17,19 @@ const OPEN_FLAGS: u32 = 0o101;
 const NS: u64 = 0x0000_0005_0000_0007;
 
 
-const UNKNOWN_STATUS: u32 = 4;
+const MODE: u32 = 0x0010_0002;
+
+
+const DEVICE: u32 = 0x0010_0001;
+
+
+const INODE: u64 = 0x0000_0009_0000_000b;
+
+
+const MOUNT_NAMESPACE: u32 = 4_026_531_841;
+
+
+const UNKNOWN_STATUS: u32 = 8;
 
 
 const WRONG_KIND: u32 = 1;
@@ -29,7 +41,7 @@ const WORD: usize = 4;
 const EXEC_BYTES: usize = 40;
 
 
-const EXPECTED_BYTES: usize = 284;
+const EXPECTED_BYTES: usize = 304;
 
 
 const SHORT_GOT: usize = 3;
@@ -37,10 +49,13 @@ const SHORT_GOT: usize = 3;
 
 fn raw(kind: u32, status: u32, path: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    [kind, PID, UID, OPEN_FLAGS, status]
+    [kind, PID, UID, OPEN_FLAGS, MODE, status]
         .iter()
         .for_each(|word| bytes.extend_from_slice(&word.to_le_bytes()));
     bytes.extend_from_slice(&NS.to_le_bytes());
+    bytes.extend_from_slice(&DEVICE.to_le_bytes());
+    bytes.extend_from_slice(&INODE.to_le_bytes());
+    bytes.extend_from_slice(&MOUNT_NAMESPACE.to_le_bytes());
     let mut field = path.to_vec();
     field.resize(FILE_PATH_BYTES, 0);
     bytes.extend_from_slice(&field);
@@ -71,9 +86,14 @@ fn a_record_decodes_every_field_at_its_offset() -> Result<(), Box<dyn Error>> {
             pid: PID,
             uid: UID,
             flags: OPEN_FLAGS,
-            cut: false,
-            unreadable: false,
+            mode: MODE,
+            too_long: false,
+            path_error: false,
+            unlinked: false,
             monotonic_ns: NS,
+            device: DEVICE,
+            inode: INODE,
+            mount_namespace: MOUNT_NAMESPACE,
             path: "/etc/passwd".to_string(),
         }
     );
@@ -84,13 +104,18 @@ fn a_record_decodes_every_field_at_its_offset() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
-fn the_status_bits_are_the_cut_and_unreadable_flags() -> Result<(), Box<dyn Error>> {
-    let cut = decoded(FILE_RECORD_KIND, STATUS_CUT, b"/long")?;
-    assert_eq!((cut.cut, cut.unreadable), (true, false));
-    let unreadable = decoded(FILE_RECORD_KIND, STATUS_UNREADABLE, b"")?;
-    assert_eq!((unreadable.cut, unreadable.unreadable, unreadable.path.as_str()), (false, true, ""));
-    let both = decoded(FILE_RECORD_KIND, STATUS_CUT | STATUS_UNREADABLE, b"")?;
-    assert_eq!((both.cut, both.unreadable), (true, true));
+fn the_status_bits_are_the_too_long_path_error_and_unlinked_flags() -> Result<(), Box<dyn Error>> {
+    let long = decoded(FILE_RECORD_KIND, STATUS_TOO_LONG, b"")?;
+    assert_eq!((long.too_long, long.path_error, long.unlinked), (true, false, false));
+    let failed = decoded(FILE_RECORD_KIND, STATUS_PATH_ERROR, b"")?;
+    assert_eq!((failed.too_long, failed.path_error, failed.unlinked), (false, true, false));
+    let gone = decoded(FILE_RECORD_KIND, STATUS_UNLINKED, b"/t/x (deleted)")?;
+    assert_eq!(
+        (gone.too_long, gone.path_error, gone.unlinked, gone.path.as_str()),
+        (false, false, true, "/t/x (deleted)")
+    );
+    let all = decoded(FILE_RECORD_KIND, STATUS_TOO_LONG | STATUS_PATH_ERROR | STATUS_UNLINKED, b"")?;
+    assert_eq!((all.too_long, all.path_error, all.unlinked), (true, true, true));
     Ok(())
 }
 
@@ -122,9 +147,9 @@ fn a_wrong_length_kind_or_status_is_refused_by_name() -> Result<(), Box<dyn Erro
     assert_eq!(
         texts,
         [
-            "file record has 3 bytes, expected 284".to_string(),
-            "file record has kind 1, expected 2".to_string(),
-            "file record has unknown status bits 4".to_string(),
+            "file record has 3 bytes, expected 304".to_string(),
+            "file record has kind 1, expected 3".to_string(),
+            "file record has unknown status bits 8".to_string(),
         ]
     );
     Ok(())
@@ -132,9 +157,9 @@ fn a_wrong_length_kind_or_status_is_refused_by_name() -> Result<(), Box<dyn Erro
 
 
 #[test]
-fn a_nul_before_the_end_keeps_the_bytes_after_it_escaped() -> Result<(), Box<dyn Error>> {
-    assert_eq!(decoded(FILE_RECORD_KIND, 0, b"ab\0cd")?.path, "ab\\x00cd");
-    assert_eq!(decoded(FILE_RECORD_KIND, 0, b"\0\0x")?.path, "\\x00\\x00x");
+fn the_path_is_cut_at_its_first_nul_so_stale_bytes_after_it_never_show() -> Result<(), Box<dyn Error>> {
+    assert_eq!(decoded(FILE_RECORD_KIND, 0, b"ab\0cd")?.path, "ab");
+    assert_eq!(decoded(FILE_RECORD_KIND, 0, b"\0\0x")?.path, "");
     assert_eq!(decoded(FILE_RECORD_KIND, 0, b"")?.path, "");
     Ok(())
 }
@@ -154,8 +179,8 @@ fn invalid_utf8_controls_and_backslashes_are_escaped_unambiguously() -> Result<(
 #[test]
 fn a_full_field_keeps_all_its_bytes() -> Result<(), Box<dyn Error>> {
     let full = vec![b'a'; FILE_PATH_BYTES];
-    let record = decoded(FILE_RECORD_KIND, STATUS_CUT, &full)?;
+    let record = decoded(FILE_RECORD_KIND, STATUS_TOO_LONG, &full)?;
     assert_eq!(record.path.len(), FILE_PATH_BYTES);
-    assert!(record.cut);
+    assert!(record.too_long);
     Ok(())
 }
